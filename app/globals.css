@@ -1,0 +1,244 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-cartoon);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-cartoon), "Comic Sans MS", "Trebuchet MS", cursive;
+}
+
+:root[data-theme="dark"] {
+  --background: #0f1724;
+  --foreground: #e5edf8;
+}
+
+:root[data-theme="dark"] body {
+  background: radial-gradient(1200px 500px at 15% -10%, #23334a 0%, #0f1724 55%, #0b1320 100%);
+  color: #e5edf8;
+}
+
+:root[data-theme="dark"] [class*="bg-white"] {
+  background-color: #182436 !important;
+}
+
+:root[data-theme="dark"] [class*="bg-[#F7F7F7"] {
+  background-color: #0f1724 !important;
+}
+
+:root[data-theme="dark"] [class*="bg-[#F6FCFF"],
+:root[data-theme="dark"] [class*="bg-[#F7FCFF"],
+:root[data-theme="dark"] [class*="bg-[#F8FCFF"] {
+  background-color: #1d2a3d !important;
+}
+
+:root[data-theme="dark"] [class*="bg-[#FFF9DD"],
+:root[data-theme="dark"] [class*="bg-[#FFF7CF"] {
+  background-color: #2a3344 !important;
+}
+
+:root[data-theme="dark"] [class*="text-[#1F2937"] {
+  color: #e5edf8 !important;
+}
+
+:root[data-theme="dark"] [class*="border-[#1F2937"] {
+  border-color: rgba(203, 213, 225, 0.28) !important;
+}
+
+:root[data-theme="dark"] header {
+  background-color: rgba(15, 23, 36, 0.94) !important;
+}
+
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea {
+  background-color: #1e2b3d !important;
+  color: #e5edf8 !important;
+  border-color: rgba(203, 213, 225, 0.22) !important;
+}
+
+:root[data-theme="dark"] input::placeholder,
+:root[data-theme="dark"] textarea::placeholder {
+  color: rgba(226, 232, 240, 0.55) !important;
+}
+
+:root[data-theme="dark"] .btn-3d-white {
+  --btn-edge: #334155;
+  border-color: #475569;
+  background-color: #1f2937;
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .btn-3d-white:hover {
+  background-color: #334155;
+}
+
+:root[data-animations="off"] *,
+:root[data-animations="off"] *::before,
+:root[data-animations="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+:root[data-animations="off"] button:hover,
+:root[data-animations="off"] button:active,
+:root[data-animations="off"] .btn-3d:hover,
+:root[data-animations="off"] .btn-3d:active {
+  transform: none !important;
+}
+
+.btn-3d {
+  border-radius: 9999px;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.2;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease,
+    color 0.18s ease;
+  box-shadow: 0 5px 0 var(--btn-edge), 0 12px 18px rgba(0, 0, 0, 0.14);
+}
+
+.btn-3d:hover {
+  transform: translateY(1px);
+  box-shadow: 0 4px 0 var(--btn-edge), 0 10px 16px rgba(0, 0, 0, 0.14);
+}
+
+.btn-3d:active {
+  transform: translateY(3px);
+  box-shadow: 0 2px 0 var(--btn-edge), 0 6px 12px rgba(0, 0, 0, 0.12);
+}
+
+.btn-3d-white {
+  --btn-edge: #cfd3d8;
+  border: 1px solid #d4d4d8;
+  background-color: #ffffff;
+  color: #2563eb;
+}
+
+.btn-3d-white:hover {
+  background-color: #e5e7eb;
+}
+
+.btn-3d-green {
+  --btn-edge: #1a5f10;
+  border: 1px solid #236f17;
+  background-color: #2e8d1f;
+  color: #ffffff;
+}
+
+.btn-3d-green:hover {
+  background-color: #58cc02;
+}
+
+button:hover {
+  cursor: pointer;
+}
+
+@keyframes modal-overlay-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-card-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes panel-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes node-pop-in {
+  0% {
+    transform: scale(0.92);
+  }
+  70% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+:root[data-animations="on"] button:not(:disabled):not(.btn-3d) {
+  transition: transform 0.16s ease-out, box-shadow 0.16s ease-out, background-color 0.16s ease-out,
+    color 0.16s ease-out, border-color 0.16s ease-out;
+}
+
+:root[data-animations="on"] button:not(:disabled):not(.btn-3d):hover {
+  transform: scale(1.02);
+}
+
+:root[data-animations="on"] button:not(:disabled):not(.btn-3d):active {
+  transform: scale(0.98);
+}
+
+:root[data-animations="on"] .btn-3d:hover {
+  transform: translateY(1px) scale(1.01);
+}
+
+:root[data-animations="on"] .btn-3d:active {
+  transform: translateY(3px) scale(0.98);
+}
+
+:root[data-animations="on"] .motion-modal-overlay {
+  animation: modal-overlay-fade-in 0.16s ease-out;
+}
+
+:root[data-animations="on"] .motion-modal-content {
+  animation: modal-card-fade-up 0.2s ease-out;
+}
+
+:root[data-animations="on"] .motion-panel-switch {
+  animation: panel-fade-in 0.2s ease-out;
+}
+
+:root[data-animations="on"] .motion-journey-node {
+  transition: transform 0.16s ease-out, background-color 0.18s ease-out, color 0.18s ease-out,
+    border-color 0.18s ease-out, box-shadow 0.18s ease-out;
+}
+
+:root[data-animations="on"] .motion-journey-node.is-clickable:hover {
+  transform: translateY(-2px) scale(1.03);
+}
+
+:root[data-animations="on"] .motion-journey-node.is-clickable:active {
+  transform: scale(0.98);
+}
+
+:root[data-animations="on"] .motion-node-pop {
+  animation: node-pop-in 0.24s ease-out;
+}
