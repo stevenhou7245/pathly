@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { toStableJson, toStringValue } from "@/lib/ai/common";
+import { getDeepseekClient } from "@/lib/deepseekClient";
+import { installAiPipelineDebugLogFilter } from "@/lib/aiPipelineDebugLogging";
 
 export type AiProvenance = {
-  provider: "openai" | "deterministic";
+  provider: "deepseek" | "deterministic";
   model: string;
   prompt_version: string;
   generated_at: string;
@@ -13,6 +15,11 @@ export type AiProvenance = {
 export type StructuredGenerationResult<T> = {
   output: T;
   provenance: AiProvenance;
+  debug: {
+    ai_called: boolean;
+    raw_response_text: string | null;
+    parsed_output_json: unknown | null;
+  };
 };
 
 type GenerateStructuredJsonParams<T> = {
@@ -26,65 +33,44 @@ type GenerateStructuredJsonParams<T> = {
   maxOutputTokens?: number;
 };
 
-function extractResponseText(payload: unknown) {
-  const root = (payload ?? {}) as Record<string, unknown>;
+function extractCompletionText(value: unknown) {
+  const direct = toStringValue(value);
+  if (direct) {
+    return direct;
+  }
 
-  const outputArray = Array.isArray(root.output) ? root.output : [];
-  for (const outputItem of outputArray) {
-    const outputRecord = outputItem as Record<string, unknown>;
-    const contentArray = Array.isArray(outputRecord.content) ? outputRecord.content : [];
-    for (const contentItem of contentArray) {
-      const contentRecord = contentItem as Record<string, unknown>;
-      const textCandidate =
-        toStringValue(contentRecord.text) ||
-        toStringValue(contentRecord.output_text) ||
-        toStringValue(contentRecord.value);
-      if (textCandidate) {
-        return textCandidate;
-      }
+  if (Array.isArray(value)) {
+    const text = value
+      .map((item) => {
+        const record = (item ?? {}) as Record<string, unknown>;
+        return toStringValue(record.text) || toStringValue(record.value);
+      })
+      .join(" ")
+      .trim();
+    if (text) {
+      return text;
     }
-  }
-
-  const outputText = toStringValue(root.output_text);
-  if (outputText) {
-    return outputText;
-  }
-
-  const text = toStringValue(root.text);
-  if (text) {
-    return text;
   }
 
   return "";
 }
 
-function asObjectSchema(zodSchema: z.ZodType<unknown>) {
-  const jsonSchemaObject = {
-    type: "object",
-    additionalProperties: true,
-  };
-
-  try {
-    const jsonSchema = z.toJSONSchema(zodSchema as z.ZodType<unknown>);
-    if (jsonSchema && typeof jsonSchema === "object") {
-      return {
-        ...jsonSchemaObject,
-        ...(jsonSchema as Record<string, unknown>),
-      };
-    }
-  } catch {
-    return jsonSchemaObject;
-  }
-
-  return jsonSchemaObject;
-}
-
 export async function generateStructuredJson<T>(
   params: GenerateStructuredJsonParams<T>,
 ): Promise<StructuredGenerationResult<T>> {
+  installAiPipelineDebugLogFilter();
+
   const nowIso = new Date().toISOString();
-  const model = process.env.OPENAI_MODEL?.trim() || "gpt-5.2";
-  const openAiKey = process.env.OPENAI_API_KEY?.trim();
+  const model = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat";
+  const hasDeepseekKey = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
+  const client = getDeepseekClient();
+
+  console.info("[deepseek] request_started", {
+    feature: params.feature,
+    model,
+    deepseek_api_key_present: hasDeepseekKey,
+  });
+
   const inputPayload = {
     feature: params.feature,
     prompt_version: params.promptVersion,
@@ -92,95 +78,132 @@ export async function generateStructuredJson<T>(
     input: params.input,
   };
 
-  if (!openAiKey) {
+  if (!client) {
+    console.warn("[deepseek] request_failed", {
+      feature: params.feature,
+      model,
+      message: "DEEPSEEK_API_KEY is not configured.",
+    });
+    const fallbackOutput = params.fallback();
     return {
-      output: params.fallback(),
+      output: fallbackOutput,
       provenance: {
         provider: "deterministic",
         model: "deterministic-fallback",
         prompt_version: params.promptVersion,
         generated_at: nowIso,
         fallback_used: true,
-        failure_reason: "OPENAI_API_KEY is not configured.",
+        failure_reason: "DEEPSEEK_API_KEY is not configured.",
+      },
+      debug: {
+        ai_called: false,
+        raw_response_text: null,
+        parsed_output_json: fallbackOutput,
       },
     };
   }
 
+  let rawResponseText: string | null = null;
+  let parsedOutputJson: unknown | null = null;
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openAiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: params.temperature ?? 0.3,
-        max_output_tokens: params.maxOutputTokens ?? 2600,
-        input: [
-          {
-            role: "system",
-            content: [{ type: "input_text", text: params.systemInstruction }],
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: [
-                  "Generate a valid JSON object only.",
-                  "Use this input payload:",
-                  toStableJson(inputPayload),
-                ].join("\n"),
-              },
-            ],
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: `${params.feature}_output`,
-            strict: true,
-            schema: asObjectSchema(params.outputSchema),
-          },
+    const completion = await client.chat.completions.create({
+      model,
+      temperature: params.temperature ?? 0.3,
+      max_tokens: params.maxOutputTokens ?? 2600,
+      messages: [
+        {
+          role: "system",
+          content: params.systemInstruction,
         },
-      }),
+        {
+          role: "user",
+          content: [
+            "Generate a valid JSON object only.",
+            "Use this input payload:",
+            toStableJson(inputPayload),
+          ].join("\n"),
+        },
+      ],
+      response_format: {
+        type: "json_object",
+      },
     });
 
-    if (!response.ok) {
-      const responseText = await response.text();
-      throw new Error(`OpenAI API returned ${response.status}: ${responseText.slice(0, 600)}`);
+    const messageContent = completion.choices?.[0]?.message?.content ?? "";
+    const text = extractCompletionText(messageContent);
+    rawResponseText = text || null;
+
+    if (!text) {
+      throw new Error("DeepSeek returned an empty completion payload.");
     }
 
-    const rawPayload = (await response.json()) as unknown;
-    const text = extractResponseText(rawPayload);
-    const parsedJson = text ? JSON.parse(text) : rawPayload;
+    const parsedJson = JSON.parse(text) as unknown;
+    parsedOutputJson = parsedJson;
     const parsed = params.outputSchema.safeParse(parsedJson);
 
     if (!parsed.success) {
       throw new Error(parsed.error.issues[0]?.message ?? "Invalid AI JSON schema output.");
     }
 
+    console.info("[deepseek] request_succeeded", {
+      feature: params.feature,
+      model,
+    });
+
+    console.info("[deepseek] raw_response_text", rawResponseText);
+
+    try {
+      console.info(
+        "[deepseek] parsed_output_json_pretty",
+        JSON.stringify(parsedOutputJson, null, 2),
+      );
+    } catch (error) {
+      console.info("[deepseek] parsed_output_json_pretty_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
     return {
       output: parsed.data,
       provenance: {
-        provider: "openai",
+        provider: "deepseek",
         model,
         prompt_version: params.promptVersion,
         generated_at: nowIso,
         fallback_used: false,
         failure_reason: null,
       },
+      debug: {
+        ai_called: true,
+        raw_response_text: rawResponseText,
+        parsed_output_json: parsedOutputJson,
+      },
     };
   } catch (error) {
-    console.error("[ai_provider] structured_generation_failed", {
+    const errorRecord = (error ?? {}) as Record<string, unknown>;
+    console.error("[deepseek] request_failed", {
       feature: params.feature,
-      prompt_version: params.promptVersion,
       model,
-      reason: error instanceof Error ? error.message : String(error),
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+      error_code: toStringValue(errorRecord.code) || null,
+      error_details: toStringValue(errorRecord.details) || null,
+      error_hint: toStringValue(errorRecord.hint) || null,
+      raw_response_text: rawResponseText,
     });
+
+    try {
+      console.error(
+        "[deepseek] parsed_output_json_pretty",
+        JSON.stringify(parsedOutputJson, null, 2),
+      );
+    } catch (prettyError) {
+      console.error("[deepseek] parsed_output_json_pretty_failed", {
+        reason: prettyError instanceof Error ? prettyError.message : String(prettyError),
+      });
+    }
+    const fallbackOutput = params.fallback();
     return {
-      output: params.fallback(),
+      output: fallbackOutput,
       provenance: {
         provider: "deterministic",
         model: "deterministic-fallback",
@@ -188,6 +211,11 @@ export async function generateStructuredJson<T>(
         generated_at: nowIso,
         fallback_used: true,
         failure_reason: error instanceof Error ? error.message : String(error),
+      },
+      debug: {
+        ai_called: true,
+        raw_response_text: rawResponseText,
+        parsed_output_json: parsedOutputJson ?? fallbackOutput,
       },
     };
   }

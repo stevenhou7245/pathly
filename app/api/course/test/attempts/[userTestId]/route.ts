@@ -24,10 +24,10 @@ type CourseTestAttemptDetailResponse = {
     question_results: Array<{
       question_id: string;
       question_order: number;
-      question_type: "single_choice" | "fill_blank" | "essay";
+      question_type: "multiple_choice" | "fill_blank" | "short_answer";
       question_text: string;
-      concept_tag: string | null;
-      skill_tag: string | null;
+      concept_tags: string[];
+      skill_tags: string[];
       options: string[];
       user_answer: string;
       correct_answer: string;

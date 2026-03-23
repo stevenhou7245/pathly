@@ -30,7 +30,7 @@ export default function ResetPasswordPage() {
             Reset Your Password
           </h1>
           <p className="mt-3 max-w-2xl text-lg font-semibold text-[#1F2937]/75">
-            We will help you get back on your learning road in just a minute.
+            Complete a quick human check and we will direct you to secure support for account recovery.
           </p>
 
           <div className="mt-10 grid items-start gap-8 lg:grid-cols-2">

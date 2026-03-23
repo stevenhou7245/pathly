@@ -6,6 +6,7 @@ import {
   normalizeLearningLevel,
   normalizePathState,
 } from "@/lib/learningPath";
+import { ensureLearningStepsForUserField } from "@/lib/learningSteps";
 import {
   computeProgressPercent,
   isRealCompletedCourseRow,
@@ -86,6 +87,26 @@ type CreateLearningFieldResponse = {
     progressPercent: number;
     activeRouteId: string | null;
   };
+  generation?: {
+    source: "ai" | "fallback" | "database";
+    generated: boolean;
+  };
+  learning_steps?: Array<{
+    id: string;
+    step_number: number;
+    title: string;
+    summary: string | null;
+    resources: Array<{
+      type: "video" | "article" | "tutorial" | "interactive" | "document";
+      title: string;
+      url: string;
+      reason?: string | null;
+    }>;
+    status: "locked" | "current" | "completed";
+    generation_source: "ai" | "fallback" | "database";
+    started_at: string | null;
+    completed_at: string | null;
+  }>;
 };
 
 function unauthorizedResponse() {
@@ -503,6 +524,12 @@ export async function POST(request: Request) {
       current_level,
       target_level,
     } = parsed.data;
+    console.info("[api/user/learning-fields][POST] input", {
+      user_id: sessionUser.id,
+      requested_field: (title ?? field_name ?? learning_goal ?? "").trim(),
+      current_level,
+      target_level,
+    });
 
     const normalizedCurrentLevel = normalizeLearningLevel(current_level);
     const normalizedTargetLevel = normalizeLearningLevel(target_level);
@@ -531,6 +558,26 @@ export async function POST(request: Request) {
     const learningField = await createLearningFieldIfMissing(inputTitle);
     const resolvedFieldId = toStringValue(learningField.id);
     const resolvedFieldTitle = getFieldTitle(learningField);
+    const { count: existingCourseCount, error: existingCourseCountError } = await supabaseAdmin
+      .from("courses")
+      .select("id", {
+        count: "exact",
+        head: true,
+      })
+      .eq("learning_field_id", resolvedFieldId);
+    if (existingCourseCountError) {
+      console.warn("[api/user/learning-fields][POST] existing_course_lookup_failed", {
+        user_id: sessionUser.id,
+        learning_field_id: resolvedFieldId,
+        reason: existingCourseCountError.message,
+      });
+    } else {
+      console.info("[api/user/learning-fields][POST] existing_course_lookup", {
+        user_id: sessionUser.id,
+        learning_field_id: resolvedFieldId,
+        existing_course_count: existingCourseCount ?? 0,
+      });
+    }
 
     const { data: existingUserField, error: existingUserFieldError } = await supabaseAdmin
       .from("user_learning_fields")
@@ -634,8 +681,42 @@ export async function POST(request: Request) {
         activeRouteId: null,
       },
     };
+
+    try {
+      const ensureResult = await ensureLearningStepsForUserField({
+        userId: sessionUser.id,
+        userFieldId: toStringValue(created.id),
+      });
+      console.info("[api/user/learning-fields][POST] learning_steps_ready", {
+        user_id: sessionUser.id,
+        user_field_id: toStringValue(created.id),
+        learning_field_id: toStringValue(created.field_id),
+        generated: ensureResult?.generated ?? false,
+        generation_source: ensureResult?.generationSource ?? "database",
+        total_steps: ensureResult?.totalSteps ?? normalizedPath.totalSteps,
+      });
+      if (ensureResult) {
+        payload.generation = {
+          source: ensureResult.generationSource,
+          generated: ensureResult.generated,
+        };
+        payload.learning_steps = ensureResult.steps;
+      }
+    } catch (error) {
+      console.warn("[api/user/learning-fields][POST] learning_steps_generation_failed", {
+        user_id: sessionUser.id,
+        user_field_id: toStringValue(created.id),
+        learning_field_id: toStringValue(created.field_id),
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     return NextResponse.json(payload, { status: 201 });
-  } catch {
+  } catch (error) {
+    console.error("[api/user/learning-fields][POST] failed", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
     const payload: CreateLearningFieldResponse = {
       success: false,
       message: "Unable to create learning field right now.",

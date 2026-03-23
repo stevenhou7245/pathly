@@ -7,6 +7,7 @@ import {
   normalizeLearningLevel,
   normalizePathState,
 } from "@/lib/learningPath";
+import { syncLearningStepStatuses } from "@/lib/learningSteps";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
@@ -225,6 +226,20 @@ export async function POST(
       stepNumber: normalizedPath.currentStepIndex,
       fieldTitle,
     });
+
+    try {
+      await syncLearningStepStatuses({
+        userFieldId: id,
+        totalSteps: normalizedPath.totalSteps,
+        currentStepIndex: nextStepIndex,
+      });
+    } catch (error) {
+      console.warn("[api/user/learning-fields/:id/complete-step][POST] sync_learning_steps_failed", {
+        user_id: sessionUser.id,
+        user_field_id: id,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const payload: CompleteStepResponse = {
       success: true,

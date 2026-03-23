@@ -1,5 +1,5 @@
-import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
+import { verifyCaptchaChallenge } from "@/lib/captcha";
 import { resetPasswordRequestSchema } from "@/lib/authValidation";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -8,6 +8,7 @@ export const runtime = "nodejs";
 type ResetPasswordResponse = {
   success: boolean;
   message: string;
+  refreshCaptcha?: boolean;
 };
 
 export async function POST(request: Request) {
@@ -19,103 +20,43 @@ export async function POST(request: Request) {
       const payload: ResetPasswordResponse = {
         success: false,
         message: parsed.error.issues[0]?.message ?? "Invalid reset password payload.",
+        refreshCaptcha: true,
       };
       return NextResponse.json(payload, { status: 400 });
     }
 
-    const { email, verificationCode, newPassword } = parsed.data;
+    const { email, captchaInput, captchaToken } = parsed.data;
+    const captchaResult = verifyCaptchaChallenge({
+      captchaInput,
+      captchaToken,
+    });
+    if (!captchaResult.ok) {
+      const payload: ResetPasswordResponse = {
+        success: false,
+        message: "CAPTCHA verification failed. Please try again.",
+        refreshCaptcha: true,
+      };
+      return NextResponse.json(payload, { status: 400 });
+    }
 
-    const { data: user, error: userError } = await supabaseAdmin
+    const lookupResult = await supabaseAdmin
       .from("users")
-      .select("id, password_hash")
+      .select("id")
       .ilike("email", email)
       .limit(1)
       .maybeSingle();
-
-    if (userError) {
+    if (lookupResult.error) {
       const payload: ResetPasswordResponse = {
         success: false,
-        message: "Unable to validate email right now.",
+        message: "Unable to process password reset request right now.",
       };
       return NextResponse.json(payload, { status: 500 });
     }
-
-    if (!user) {
-      const payload: ResetPasswordResponse = {
-        success: false,
-        message: "No account found with this email.",
-      };
-      return NextResponse.json(payload, { status: 404 });
-    }
-
-    const { data: latestCode, error: latestCodeError } = await supabaseAdmin
-      .from("email_verification_codes")
-      .select("id, code, expires_at, used, created_at")
-      .eq("email", email)
-      .eq("used", false)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (latestCodeError) {
-      const payload: ResetPasswordResponse = {
-        success: false,
-        message: "Unable to verify the reset code right now.",
-      };
-      return NextResponse.json(payload, { status: 500 });
-    }
-
-    const isCodeMissing = !latestCode;
-    const isCodeMismatch = latestCode?.code !== verificationCode;
-    const isCodeExpired =
-      latestCode && new Date(latestCode.expires_at).getTime() <= Date.now();
-
-    if (isCodeMissing || isCodeMismatch || isCodeExpired) {
-      const payload: ResetPasswordResponse = {
-        success: false,
-        message: "Invalid or expired verification code.",
-      };
-      return NextResponse.json(payload, { status: 400 });
-    }
-
-    const currentPasswordHash = user.password_hash ?? "";
-    const isSameAsOldPassword = await bcrypt.compare(newPassword, currentPasswordHash);
-
-    if (isSameAsOldPassword) {
-      const payload: ResetPasswordResponse = {
-        success: false,
-        message: "New password cannot be the same as the old password.",
-      };
-      return NextResponse.json(payload, { status: 400 });
-    }
-
-    const newPasswordHash = await bcrypt.hash(newPassword, 10);
-    const nowIso = new Date().toISOString();
-
-    const { error: updatePasswordError } = await supabaseAdmin
-      .from("users")
-      .update({
-        password_hash: newPasswordHash,
-        updated_at: nowIso,
-      })
-      .eq("id", user.id);
-
-    if (updatePasswordError) {
-      const payload: ResetPasswordResponse = {
-        success: false,
-        message: "Failed to update password.",
-      };
-      return NextResponse.json(payload, { status: 500 });
-    }
-
-    await supabaseAdmin
-      .from("email_verification_codes")
-      .update({ used: true })
-      .eq("id", latestCode.id);
 
     const payload: ResetPasswordResponse = {
       success: true,
-      message: "Password reset successfully.",
+      message:
+        "Password reset via email codes has been removed for security. Please contact support from your account settings for assisted reset.",
     };
     return NextResponse.json(payload);
   } catch {
@@ -126,3 +67,4 @@ export async function POST(request: Request) {
     return NextResponse.json(payload, { status: 500 });
   }
 }
+

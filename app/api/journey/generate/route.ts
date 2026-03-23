@@ -13,9 +13,21 @@ const inFlightJourneyInitialization = new Map<
   string,
   Promise<{
     journey_path_id: string;
+    starting_point: string;
+    destination: string;
     total_steps: number;
     current_step: number;
     learning_field_id: string;
+    steps: Array<{
+      step_number: number;
+      course_id: string | null;
+      title: string;
+      description: string | null;
+      objective: string | null;
+      difficulty: string | null;
+      skill_tags: string[];
+      concept_tags: string[];
+    }>;
     nodes: Array<{
       step_number: number;
       course_id: string;
@@ -43,9 +55,21 @@ type GenerateJourneyResponse = {
   };
   journey?: {
     journey_path_id: string;
+    starting_point: string;
+    destination: string;
     total_steps: number;
     current_step: number;
     learning_field_id: string;
+    steps: Array<{
+      step_number: number;
+      course_id: string | null;
+      title: string;
+      description: string | null;
+      objective: string | null;
+      difficulty: string | null;
+      skill_tags: string[];
+      concept_tags: string[];
+    }>;
     nodes: Array<{
       step_number: number;
       course_id: string;

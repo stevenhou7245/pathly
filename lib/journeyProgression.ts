@@ -17,12 +17,12 @@ import {
   ensureCourseResourceOptions,
   markUserResourceCompletionAndSuccess,
   recordUserResourceSelection,
-  resolveResourceOptionIdFromLegacyResource,
   sortResourceOptionsByPreference,
 } from "@/lib/ai/resources";
 import { loadUserResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { resolveAiTestTemplateForAttempt } from "@/lib/ai/tests";
 import { analyzeWeaknessAndPrepareReview, getPendingReviewPopup } from "@/lib/ai/review";
+import type { DifficultyBand } from "@/lib/ai/common";
 
 export type CourseNodeStatus =
   | "locked"
@@ -41,11 +41,25 @@ export type JourneyNode = {
   passed_score: number | null;
 };
 
+export type JourneyStepContent = {
+  step_number: number;
+  course_id: string | null;
+  title: string;
+  description: string | null;
+  objective: string | null;
+  difficulty: string | null;
+  skill_tags: string[];
+  concept_tags: string[];
+};
+
 export type JourneyPayload = {
   journey_path_id: string;
+  starting_point: string;
+  destination: string;
   total_steps: number;
   current_step: number;
   learning_field_id: string;
+  steps: JourneyStepContent[];
   nodes: JourneyNode[];
 };
 
@@ -54,9 +68,9 @@ export type CourseResourcePayload = {
   resource_option_id: string | null;
   title: string;
   resource_type: string;
-  provider_name: string;
+  provider: string;
   url: string;
-  description: string | null;
+  summary: string | null;
   average_rating: number;
   comment_count: number;
   my_rating: number | null;
@@ -311,6 +325,26 @@ function toNumberValue(value: unknown) {
   return 0;
 }
 
+function parseStringArray(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => toStringValue(item)).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => toStringValue(item)).filter(Boolean);
+      }
+    } catch {
+      return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  return [] as string[];
+}
+
 function slugify(value: string) {
   return value
     .toLowerCase()
@@ -361,6 +395,21 @@ function getCourseTitle(course: GenericRecord | null, fallback = "Untitled Cours
   return fallback;
 }
 
+function isGenericGeneratedCourseTitle(params: { title: string; fieldTitle: string; stepNumber: number }) {
+  const normalized = params.title.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  const normalizedField = params.fieldTitle.trim().toLowerCase();
+  return (
+    /milestone\s+\d+$/i.test(normalized) ||
+    /course\s+\d+$/i.test(normalized) ||
+    /applied practice|advanced mastery|guided practice|performance practice/.test(normalized) ||
+    /foundations\s+\d+$/.test(normalized) ||
+    normalized === `${normalizedField} course ${params.stepNumber}`.trim()
+  );
+}
+
 export async function validateJourneySchema() {
   const checks: Array<{
     table: string;
@@ -378,7 +427,8 @@ export async function validateJourneySchema() {
     },
     {
       table: "journey_path_courses",
-      columns: "id, journey_path_id, course_id, step_number, is_required, created_at",
+      columns:
+        "id, journey_path_id, course_id, step_number, is_required, title, description, objective, difficulty, skill_tags, concept_tags, created_at",
     },
     {
       table: "user_course_progress",
@@ -454,7 +504,10 @@ async function ensureCoursesForField(params: {
     (row) => toStringValue(row.id) && toStringValue(row.learning_field_id),
   );
 
-  if (normalizedCourses.length >= params.totalSteps) {
+  if (
+    normalizedCourses.length >= params.totalSteps &&
+    (!params.plannedSteps || params.plannedSteps.length === 0)
+  ) {
     return normalizedCourses.slice(0, params.totalSteps);
   }
 
@@ -512,10 +565,11 @@ async function ensureCoursesForField(params: {
       }
 
       const existingTitle = toStringValue(course.title).trim();
-      const shouldRetitle =
-        !existingTitle ||
-        /course\s+\d+$/i.test(existingTitle) ||
-        existingTitle.toLowerCase() === `${params.fieldTitle.toLowerCase()} course ${i + 1}`;
+      const shouldRetitle = isGenericGeneratedCourseTitle({
+        title: existingTitle,
+        fieldTitle: params.fieldTitle,
+        stepNumber: i + 1,
+      });
 
       if (!shouldRetitle) {
         continue;
@@ -580,6 +634,15 @@ async function findJourneyPath(params: {
 async function ensureJourneyPathCourses(params: {
   journeyPathId: string;
   courses: GenericRecord[];
+  plannedSteps: Array<{
+    step_number: number;
+    step_title: string;
+    step_description: string;
+    learning_objective: string;
+    difficulty_level: string;
+    skill_tags: string[];
+    concept_tags: string[];
+  }>;
 }) {
   const { data: existingRows, error: existingRowsError } = await supabaseAdmin
     .from("journey_path_courses")
@@ -596,38 +659,89 @@ async function ensureJourneyPathCourses(params: {
   }
 
   const existing = (existingRows ?? []) as GenericRecord[];
-  if (existing.length >= params.courses.length) {
-    return existing;
-  }
-
-  const existingCourseIds = new Set(existing.map((row) => toStringValue(row.course_id)));
-  const insertRows: Record<string, unknown>[] = [];
-
-  params.courses.forEach((course, index) => {
-    const courseId = toStringValue(course.id);
-    if (!courseId || existingCourseIds.has(courseId)) {
-      return;
-    }
-
-    insertRows.push({
-      journey_path_id: params.journeyPathId,
-      course_id: courseId,
-      step_number: index + 1,
-      is_required: true,
-      created_at: new Date().toISOString(),
-    });
+  const existingByStep = new Map<number, GenericRecord>();
+  existing.forEach((row) => {
+    const stepNumber = Math.max(1, Math.floor(toNumberValue(row.step_number) || 1));
+    existingByStep.set(stepNumber, row);
   });
 
-  if (insertRows.length > 0) {
-    const { error: insertError } = await supabaseAdmin.from("journey_path_courses").insert(insertRows);
+  const targetStepCount = Math.max(params.plannedSteps.length, params.courses.length);
+  let insertedCount = 0;
+  for (let index = 0; index < targetStepCount; index += 1) {
+    const stepNumber = index + 1;
+    const plannedStep = params.plannedSteps.find((step) => step.step_number === stepNumber) ?? null;
+    const mappedCourse = params.courses[index] ?? null;
+    const courseId = toStringValue(mappedCourse?.id) || null;
+    const payload = {
+      journey_path_id: params.journeyPathId,
+      course_id: courseId,
+      step_number: stepNumber,
+      is_required: true,
+      title:
+        plannedStep?.step_title?.trim() ||
+        getCourseTitle(mappedCourse, `Step ${stepNumber}`),
+      description:
+        plannedStep?.step_description?.trim() ||
+        toNullableString(mappedCourse?.description) ||
+        null,
+      objective: plannedStep?.learning_objective?.trim() || null,
+      difficulty: plannedStep?.difficulty_level?.trim() || null,
+      skill_tags: plannedStep?.skill_tags ?? [],
+      concept_tags: plannedStep?.concept_tags ?? [],
+      created_at: new Date().toISOString(),
+    };
+
+    const existingRow = existingByStep.get(stepNumber);
+    if (existingRow) {
+      const { error: updateError } = await supabaseAdmin
+        .from("journey_path_courses")
+        .update({
+          course_id: payload.course_id,
+          is_required: payload.is_required,
+          title: payload.title,
+          description: payload.description,
+          objective: payload.objective,
+          difficulty: payload.difficulty,
+          skill_tags: payload.skill_tags,
+          concept_tags: payload.concept_tags,
+        })
+        .eq("id", toStringValue(existingRow.id));
+      if (updateError) {
+        console.error("[journey_path_courses] insert_failed", {
+          journey_path_id: params.journeyPathId,
+          step_number: stepNumber,
+          reason: toErrorMessage(updateError),
+        });
+        throw mapSupabaseError(
+          "insert_journey_path_courses",
+          updateError,
+          "Failed to update journey step content.",
+        );
+      }
+      continue;
+    }
+
+    const { error: insertError } = await supabaseAdmin.from("journey_path_courses").insert(payload);
     if (insertError) {
+      console.error("[journey_path_courses] insert_failed", {
+        journey_path_id: params.journeyPathId,
+        step_number: stepNumber,
+        reason: toErrorMessage(insertError),
+      });
       throw mapSupabaseError(
         "insert_journey_path_courses",
         insertError,
         "Failed to create journey path courses.",
       );
     }
+    insertedCount += 1;
   }
+
+  console.info("[journey_path_courses] insert_succeeded", {
+    journey_path_id: params.journeyPathId,
+    inserted_count: insertedCount,
+    total_steps: targetStepCount,
+  });
 
   const { data: refreshedRows, error: refreshedRowsError } = await supabaseAdmin
     .from("journey_path_courses")
@@ -775,6 +889,10 @@ export async function generateOrGetJourney(params: {
     normalizedCurrentLevel ?? params.startingPoint,
     normalizedTargetLevel ?? params.destination,
   );
+  const requestedTotalSteps =
+    params.desiredTotalSteps && Number.isFinite(params.desiredTotalSteps)
+      ? Math.max(1, Math.floor(params.desiredTotalSteps))
+      : fallbackTotalSteps;
   const fieldTitle = getFieldTitle(learningField);
   const preferenceProfile = await loadUserResourcePreferenceProfile(params.userId);
   const journeyTemplate = await resolveOrCreateJourneyTemplate({
@@ -783,15 +901,13 @@ export async function generateOrGetJourney(params: {
     fieldTitle,
     startLevel: normalizedCurrentLevel ?? params.startingPoint,
     targetLevel: normalizedTargetLevel ?? params.destination,
-    desiredTotalSteps: params.desiredTotalSteps ?? null,
+    desiredTotalSteps: requestedTotalSteps,
     userPreferenceProfile: preferenceProfile,
   });
   const totalSteps = Math.max(
     1,
-    journeyTemplate.total_steps ||
-      (params.desiredTotalSteps && Number.isFinite(params.desiredTotalSteps)
-        ? Math.floor(params.desiredTotalSteps)
-        : fallbackTotalSteps),
+    requestedTotalSteps,
+    journeyTemplate.total_steps || 0,
   );
   logJourneyStep("build_ordered_journey_steps:total_steps", {
     total_steps: totalSteps,
@@ -815,15 +931,40 @@ export async function generateOrGetJourney(params: {
     courses_count: courseRows.length,
   });
 
-  if (courseRows.length === 0) {
-    throw createJourneyError({
-      step: "query_courses",
-      code: "MISSING_COURSE_DATA",
-      status: 409,
-      message: "No courses are available for this learning field.",
-      details: {
-        learning_field_id: params.learningFieldId,
-      },
+  let resolvedCourseRows = courseRows;
+  if (resolvedCourseRows.length === 0) {
+    const nowIso = new Date().toISOString();
+    const fallbackInsertRows = Array.from({ length: totalSteps }).map((_, index) => ({
+      learning_field_id: params.learningFieldId,
+      title: `${fieldTitle} Foundations ${index + 1}`,
+      slug: slugify(`${fieldTitle}-foundations-${index + 1}`) || `course-${Date.now()}-${index + 1}`,
+      description: `Step ${index + 1} for ${fieldTitle}.`,
+      estimated_minutes: 35,
+      difficulty_level: "basic",
+      created_at: nowIso,
+    }));
+
+    const { error: fallbackInsertError } = await supabaseAdmin
+      .from("courses")
+      .insert(fallbackInsertRows);
+    if (fallbackInsertError) {
+      throw createJourneyError({
+        step: "query_courses",
+        code: "MISSING_COURSE_DATA",
+        status: 409,
+        message: "No courses are available for this learning field.",
+        details: {
+          learning_field_id: params.learningFieldId,
+          reason: toErrorMessage(fallbackInsertError),
+        },
+      });
+    }
+
+    resolvedCourseRows = await ensureCoursesForField({
+      learningFieldId: params.learningFieldId,
+      totalSteps,
+      fieldTitle,
+      plannedSteps: journeyTemplate.steps,
     });
   }
 
@@ -868,6 +1009,12 @@ export async function generateOrGetJourney(params: {
     }
 
     journeyPath = createdJourney as GenericRecord;
+    console.info("[journey_paths] insert_succeeded", {
+      journey_path_id: toStringValue(journeyPath.id),
+      user_id: params.userId,
+      learning_field_id: params.learningFieldId,
+      total_steps: totalSteps,
+    });
     logJourneyStep("insert_journey_path:after", {
       user_id: params.userId,
       journey_path_id: toStringValue(journeyPath.id),
@@ -880,13 +1027,20 @@ export async function generateOrGetJourney(params: {
     });
   }
 
+  console.info("[journey_read] loaded_journey_path", {
+    journey_path_id: toStringValue(journeyPath.id),
+    user_id: params.userId,
+    learning_field_id: toStringValue(journeyPath.learning_field_id),
+  });
+
   const journeyPathId = toStringValue(journeyPath.id);
   logJourneyStep("build_journey_sequence:before", {
     journey_path_id: journeyPathId,
   });
   const pathCourses = await ensureJourneyPathCourses({
     journeyPathId,
-    courses: courseRows,
+    courses: resolvedCourseRows,
+    plannedSteps: journeyTemplate.steps,
   });
   await ensureUserCourseProgress({
     userId: params.userId,
@@ -964,6 +1118,10 @@ export async function getJourneyById(params: {
   }
 
   const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  console.info("[journey_read] loaded_journey_steps_count", {
+    journey_path_id: params.journeyPathId,
+    count: pathCourses.length,
+  });
   await ensureUserCourseProgress({
     userId: params.userId,
     journeyPathId: params.journeyPathId,
@@ -1038,8 +1196,23 @@ export async function getJourneyById(params: {
     }
   }
 
-  const nodes: JourneyNode[] = pathCourses.map((pathCourse, index) => {
-    const courseId = toStringValue(pathCourse.course_id);
+  const steps: JourneyStepContent[] = pathCourses.map((pathCourse, index) => {
+    const courseId = toNullableString(pathCourse.course_id);
+    const courseTitle = getCourseTitle(courseById.get(toStringValue(pathCourse.course_id)) ?? null, "");
+    return {
+      step_number: Math.max(1, Math.floor(toNumberValue(pathCourse.step_number) || index + 1)),
+      course_id: courseId,
+      title: toStringValue(pathCourse.title).trim() || courseTitle || `Step ${index + 1}`,
+      description: toNullableString(pathCourse.description),
+      objective: toNullableString(pathCourse.objective),
+      difficulty: toNullableString(pathCourse.difficulty),
+      skill_tags: parseStringArray(pathCourse.skill_tags),
+      concept_tags: parseStringArray(pathCourse.concept_tags),
+    };
+  });
+
+  const nodes: JourneyNode[] = steps.map((step, index) => {
+    const courseId = step.course_id ?? "";
     const progress = progressByCourseId.get(courseId);
     const status = normalizeStatus(progress?.status ?? (index === 0 ? "unlocked" : "locked"));
     const bestTestScoreValue = Math.max(
@@ -1048,9 +1221,9 @@ export async function getJourneyById(params: {
     );
 
     return {
-      step_number: Math.max(1, Math.floor(toNumberValue(pathCourse.step_number) || index + 1)),
+      step_number: step.step_number,
       course_id: courseId,
-      title: getCourseTitle(courseById.get(courseId) ?? null, `Course ${index + 1}`),
+      title: step.title,
       status,
       passed_score: bestTestScoreValue > 0 ? bestTestScoreValue : null,
     };
@@ -1071,9 +1244,12 @@ export async function getJourneyById(params: {
 
   return {
     journey_path_id: toStringValue(journeyPath.id),
+    starting_point: toStringValue(journeyPath.starting_point),
+    destination: toStringValue(journeyPath.destination),
     total_steps: nodes.length,
     current_step: currentStep,
     learning_field_id: toStringValue(journeyPath.learning_field_id),
+    steps,
     nodes,
   };
 }
@@ -1084,8 +1260,9 @@ async function ensureThreeResources(params: {
   learningFieldTitle: string;
   courseId: string;
   courseTitle: string;
+  courseDescription: string | null;
 }) {
-  let step = "fetch_course_resources";
+  const step = "fetch_course_resources";
 
   try {
     const preferenceProfile = await loadUserResourcePreferenceProfile(params.userId);
@@ -1093,158 +1270,71 @@ async function ensureThreeResources(params: {
       userId: params.userId,
       courseId: params.courseId,
       courseTitle: params.courseTitle,
+      courseDescription: params.courseDescription,
       learningFieldTitle: params.learningFieldTitle,
       preferenceProfile,
     });
 
-    logCourseDetailsStep("fetch_course_resources:before", {
-      course_id: params.courseId,
-      with_is_active_filter: true,
-    });
+    let optionRows: GenericRecord[] = [];
+    let legacyFallbackUsed = false;
 
-    let resourceRows: GenericRecord[] = [];
-    let hasIsActiveColumn = true;
-    const { data: existingResources, error: existingResourcesError } = await supabaseAdmin
-      .from("course_resources")
+    const { data: activeOptions, error: activeOptionsError } = await supabaseAdmin
+      .from("course_resource_options")
       .select("*")
       .eq("course_id", params.courseId)
       .eq("is_active", true)
-      .order("display_order", { ascending: true });
+      .order("option_no", { ascending: true })
+      .limit(3);
 
-    if (existingResourcesError) {
-      if (isMissingColumnError(existingResourcesError, "course_resources", "is_active")) {
-        hasIsActiveColumn = false;
-        logCourseDetailsStep("fetch_course_resources:retry_without_is_active", {
-          course_id: params.courseId,
-          reason: toErrorMessage(existingResourcesError),
-        });
-
-        const { data: fallbackResources, error: fallbackResourcesError } = await supabaseAdmin
-          .from("course_resources")
-          .select("*")
-          .eq("course_id", params.courseId)
-          .order("display_order", { ascending: true });
-
-        if (fallbackResourcesError) {
-          throw createCourseDetailsError({
-            step,
-            message: "Failed to load course resources.",
-            details: {
-              reason: toErrorMessage(fallbackResourcesError),
-              course_id: params.courseId,
-            },
-            cause: fallbackResourcesError,
-          });
-        }
-
-        resourceRows = (fallbackResources ?? []) as GenericRecord[];
-      } else {
+    if (activeOptionsError) {
+      if (!isMissingColumnError(activeOptionsError, "course_resource_options", "is_active")) {
         throw createCourseDetailsError({
           step,
-          message: "Failed to load course resources.",
+          message: "Failed to load course resource options.",
           details: {
-            reason: toErrorMessage(existingResourcesError),
+            reason: toErrorMessage(activeOptionsError),
             course_id: params.courseId,
           },
-          cause: existingResourcesError,
+          cause: activeOptionsError,
         });
       }
-    } else {
-      resourceRows = (existingResources ?? []) as GenericRecord[];
-    }
 
-    logCourseDetailsStep("fetch_course_resources:after", {
-      course_id: params.courseId,
-      count: resourceRows.length,
-      used_is_active_filter: hasIsActiveColumn,
-    });
-
-    const normalized = resourceRows;
-    if (normalized.length >= 3) {
-      return normalized.slice(0, 3);
-    }
-
-    const templates = await ensureCourseResourceOptions({
-      userId: params.userId,
-      courseId: params.courseId,
-      courseTitle: params.courseTitle,
-      learningFieldTitle: params.learningFieldTitle,
-      preferenceProfile,
-    });
-    logCourseDetailsStep("insert_default_course_resources:after", {
-      course_id: params.courseId,
-      rows: templates.options.length,
-    });
-
-    step = "reload_course_resources";
-    logCourseDetailsStep("reload_course_resources:before", {
-      course_id: params.courseId,
-      with_is_active_filter: hasIsActiveColumn,
-    });
-
-    let refreshedResources: GenericRecord[] = [];
-    if (hasIsActiveColumn) {
-      const { data, error } = await supabaseAdmin
-        .from("course_resources")
+      const { data: fallbackOptions, error: fallbackOptionsError } = await supabaseAdmin
+        .from("course_resource_options")
         .select("*")
         .eq("course_id", params.courseId)
-        .eq("is_active", true)
-        .order("display_order", { ascending: true })
+        .order("option_no", { ascending: true })
         .limit(3);
-
-      if (error) {
+      if (fallbackOptionsError) {
         throw createCourseDetailsError({
           step,
-          message: "Failed to reload resources.",
+          message: "Failed to load course resource options.",
           details: {
-            reason: toErrorMessage(error),
+            reason: toErrorMessage(fallbackOptionsError),
             course_id: params.courseId,
           },
-          cause: error,
+          cause: fallbackOptionsError,
         });
       }
-
-      refreshedResources = (data ?? []) as GenericRecord[];
+      optionRows = (fallbackOptions ?? []) as GenericRecord[];
     } else {
-      const { data, error } = await supabaseAdmin
-        .from("course_resources")
-        .select("*")
-        .eq("course_id", params.courseId)
-        .order("display_order", { ascending: true })
-        .limit(3);
-
-      if (error) {
-        throw createCourseDetailsError({
-          step,
-          message: "Failed to reload resources.",
-          details: {
-            reason: toErrorMessage(error),
-            course_id: params.courseId,
-          },
-          cause: error,
-        });
-      }
-
-      refreshedResources = (data ?? []) as GenericRecord[];
+      optionRows = (activeOptions ?? []) as GenericRecord[];
     }
 
-    const options = templates.options;
-    const optionByOrder = new Map<number, string>();
-    options.forEach((option) => {
-      optionByOrder.set(option.option_no, option.id);
-    });
-    refreshedResources.forEach((row) => {
-      const displayOrder = Math.max(1, Math.floor(toNumberValue(row.display_order) || 1));
-      if (optionByOrder.has(displayOrder)) {
-        row.resource_option_id = optionByOrder.get(displayOrder) ?? null;
-      }
-    });
-
-    const sorted = sortResourceOptionsByPreference(
-      refreshedResources.map((row, index) => ({
-        id: toStringValue(row.id),
+    if (optionRows.length > 0) {
+      console.info("[resource_options] read_source_table", {
         course_id: params.courseId,
-        option_no: Math.max(1, Math.floor(toNumberValue(row.display_order) || index + 1)),
+        table: "course_resource_options",
+      });
+      console.info("[resource_options] legacy_fallback_used", {
+        course_id: params.courseId,
+        used: false,
+      });
+
+      const mappedOptions = optionRows.map((row, index) => ({
+        id: toStringValue(row.id),
+        course_id: toStringValue(row.course_id) || params.courseId,
+        option_no: Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1)),
         title: toStringValue(row.title) || `Resource ${index + 1}`,
         resource_type: (toStringValue(row.resource_type) || "tutorial") as
           | "video"
@@ -1252,34 +1342,74 @@ async function ensureThreeResources(params: {
           | "tutorial"
           | "document"
           | "interactive",
-        provider_name: toStringValue(row.provider_name) || "Pathly",
+        provider: toStringValue(row.provider) || "Unknown",
         url: toStringValue(row.url),
-        description: toNullableString(row.description),
-      })),
-      preferenceProfile,
-    );
-    const rankById = new Map<string, number>();
-    sorted.forEach((item, index) => {
-      rankById.set(item.id, index + 1);
-    });
-    refreshedResources.sort((a, b) => {
-      const rankA = rankById.get(toStringValue(a.id)) ?? 999;
-      const rankB = rankById.get(toStringValue(b.id)) ?? 999;
-      if (rankA !== rankB) {
-        return rankA - rankB;
-      }
-      return (
-        Math.max(1, Math.floor(toNumberValue(a.display_order) || 1)) -
-        Math.max(1, Math.floor(toNumberValue(b.display_order) || 1))
-      );
-    });
+        summary: toNullableString(row.summary),
+      }));
 
-    logCourseDetailsStep("reload_course_resources:after", {
+      const sorted = sortResourceOptionsByPreference(mappedOptions, preferenceProfile);
+      const rankById = new Map<string, number>();
+      sorted.forEach((item, index) => {
+        rankById.set(item.id, index + 1);
+      });
+
+      const normalizedRows = optionRows
+        .map((row, index) => {
+          const displayOrder = Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1));
+          const optionId = toStringValue(row.id);
+          return {
+            ...row,
+            id: optionId,
+            resource_option_id: optionId,
+            display_order: displayOrder,
+            legacy_resource_id: null,
+            option_id: optionId,
+            option_no: displayOrder,
+            course_id: toStringValue(row.course_id) || params.courseId,
+            title: toStringValue(row.title),
+            resource_type: toStringValue(row.resource_type),
+            url: toStringValue(row.url),
+            summary: toNullableString(row.summary),
+            provider: toStringValue(row.provider) || "Unknown",
+          } satisfies GenericRecord;
+        })
+        .sort((a, b) => {
+          const rankA = rankById.get(toStringValue(a.option_id) || toStringValue(a.id)) ?? 999;
+          const rankB = rankById.get(toStringValue(b.option_id) || toStringValue(b.id)) ?? 999;
+          if (rankA !== rankB) {
+            return rankA - rankB;
+          }
+          return (
+            Math.max(1, Math.floor(toNumberValue(a.display_order) || 1)) -
+            Math.max(1, Math.floor(toNumberValue(b.display_order) || 1))
+          );
+        });
+
+      logCourseDetailsStep("fetch_course_resources:after", {
+        course_id: params.courseId,
+        count: normalizedRows.length,
+        source_table: "course_resource_options",
+      });
+      return normalizedRows.slice(0, 3);
+    }
+
+    legacyFallbackUsed = false;
+    console.warn("[migration_cleanup] legacy_table_reference_found", {
+      table: "course_resources",
+      path: "journeyProgression.ensureThreeResources",
+      action: "return_empty_resource_list",
       course_id: params.courseId,
-      count: refreshedResources.length,
     });
-
-    return refreshedResources;
+    console.info("[resource_read] source_table_used", {
+      table: "course_resource_options",
+      course_id: params.courseId,
+      rows: 0,
+    });
+    console.info("[resource_options] legacy_fallback_used", {
+      course_id: params.courseId,
+      used: legacyFallbackUsed,
+    });
+    return [];
   } catch (error) {
     const normalizedError = isCourseDetailsError(error)
       ? error
@@ -1388,25 +1518,43 @@ export async function getCourseDetails(params: {
       learningFieldTitle,
       courseId: params.courseId,
       courseTitle: getCourseTitle(courseRow as GenericRecord),
+      courseDescription: toNullableString((courseRow as GenericRecord).description),
     });
-    const resourceIds = resources.map((resource) => toStringValue(resource.id)).filter(Boolean);
+    const resourceOptionIds = resources
+      .map((resource) => toStringValue(resource.resource_option_id) || toStringValue(resource.id))
+      .filter(Boolean);
+    const legacyResourceIds = resources
+      .filter((resource) => !toStringValue(resource.resource_option_id))
+      .map((resource) => toStringValue(resource.id))
+      .filter(Boolean);
+
+    console.info("[resource_feedback] read_started", {
+      course_id: params.courseId,
+      resource_option_count: resourceOptionIds.length,
+      legacy_resource_count: legacyResourceIds.length,
+      key_mode: "resource_option_id",
+    });
+    console.info("[resource_feedback] resource_option_id", {
+      course_id: params.courseId,
+      resource_option_ids: resourceOptionIds,
+    });
 
     logCourseDetailsStep("fetch_course_resources:after", {
       course_id: params.courseId,
       resource_count: resources.length,
-      resource_ids_count: resourceIds.length,
+      resource_ids_count: resourceOptionIds.length,
     });
 
     step = "fetch_resource_ratings";
     logCourseDetailsStep("fetch_resource_ratings:before", {
-      resource_ids_count: resourceIds.length,
+      resource_ids_count: resourceOptionIds.length,
     });
-    let ratingRows: GenericRecord[] = [];
-    if (resourceIds.length > 0) {
+    let ratingRowsByOption: GenericRecord[] = [];
+    if (resourceOptionIds.length > 0) {
       const { data, error: ratingRowsError } = await supabaseAdmin
         .from("resource_ratings")
         .select("*")
-        .in("resource_id", resourceIds);
+        .in("resource_option_id", resourceOptionIds);
 
       if (ratingRowsError) {
         throw createCourseDetailsError({
@@ -1414,28 +1562,47 @@ export async function getCourseDetails(params: {
           message: "Failed to load resource ratings.",
           details: {
             reason: toErrorMessage(ratingRowsError),
-            resource_ids_count: resourceIds.length,
+            resource_ids_count: resourceOptionIds.length,
+            key_mode: "resource_option_id",
           },
           cause: ratingRowsError,
         });
       }
 
-      ratingRows = (data ?? []) as GenericRecord[];
+      ratingRowsByOption = (data ?? []) as GenericRecord[];
     }
+    let legacyRatingRows: GenericRecord[] = [];
+    if (legacyResourceIds.length > 0) {
+      const { data, error: legacyRatingRowsError } = await supabaseAdmin
+        .from("resource_ratings")
+        .select("*")
+        .in("resource_id", legacyResourceIds);
+
+      if (!legacyRatingRowsError) {
+        legacyRatingRows = (data ?? []) as GenericRecord[];
+      }
+    }
+    const ratingRows = [...ratingRowsByOption, ...legacyRatingRows];
+    console.info("[resource_feedback] rating_aggregate_loaded", {
+      key_mode: "resource_option_id",
+      option_rows: ratingRowsByOption.length,
+      legacy_rows: legacyRatingRows.length,
+      total_rows: ratingRows.length,
+    });
     logCourseDetailsStep("fetch_resource_ratings:after", {
       rating_count: ratingRows.length,
     });
 
     step = "fetch_resource_comments";
     logCourseDetailsStep("fetch_resource_comments:before", {
-      resource_ids_count: resourceIds.length,
+      resource_ids_count: resourceOptionIds.length,
     });
-    let commentRows: GenericRecord[] = [];
-    if (resourceIds.length > 0) {
+    let commentRowsByOption: GenericRecord[] = [];
+    if (resourceOptionIds.length > 0) {
       const { data, error: loadedCommentsError } = await supabaseAdmin
         .from("resource_comments")
         .select("*")
-        .in("resource_id", resourceIds)
+        .in("resource_option_id", resourceOptionIds)
         .eq("is_deleted", false)
         .order("created_at", { ascending: false });
 
@@ -1445,14 +1612,34 @@ export async function getCourseDetails(params: {
           message: "Failed to load resource comments.",
           details: {
             reason: toErrorMessage(loadedCommentsError),
-            resource_ids_count: resourceIds.length,
+            resource_ids_count: resourceOptionIds.length,
+            key_mode: "resource_option_id",
           },
           cause: loadedCommentsError,
         });
       }
 
-      commentRows = (data ?? []) as GenericRecord[];
+      commentRowsByOption = (data ?? []) as GenericRecord[];
     }
+    let legacyCommentRows: GenericRecord[] = [];
+    if (legacyResourceIds.length > 0) {
+      const { data, error: legacyCommentsError } = await supabaseAdmin
+        .from("resource_comments")
+        .select("*")
+        .in("resource_id", legacyResourceIds)
+        .eq("is_deleted", false)
+        .order("created_at", { ascending: false });
+      if (!legacyCommentsError) {
+        legacyCommentRows = (data ?? []) as GenericRecord[];
+      }
+    }
+    const commentRows = [...commentRowsByOption, ...legacyCommentRows];
+    console.info("[resource_feedback] comment_aggregate_loaded", {
+      key_mode: "resource_option_id",
+      option_rows: commentRowsByOption.length,
+      legacy_rows: legacyCommentRows.length,
+      total_rows: commentRows.length,
+    });
     logCourseDetailsStep("fetch_resource_comments:after", {
       comment_count: commentRows.length,
     });
@@ -1488,7 +1675,8 @@ export async function getCourseDetails(params: {
 
     const ratingsByResourceId = new Map<string, GenericRecord[]>();
     ratingRows.forEach((rating) => {
-      const resourceId = toStringValue(rating.resource_id);
+      const resourceId =
+        toStringValue(rating.resource_option_id) || toStringValue(rating.resource_id);
       if (!ratingsByResourceId.has(resourceId)) {
         ratingsByResourceId.set(resourceId, []);
       }
@@ -1497,7 +1685,8 @@ export async function getCourseDetails(params: {
 
     const commentsByResourceId = new Map<string, GenericRecord[]>();
     comments.forEach((comment) => {
-      const resourceId = toStringValue(comment.resource_id);
+      const resourceId =
+        toStringValue(comment.resource_option_id) || toStringValue(comment.resource_id);
       if (!commentsByResourceId.has(resourceId)) {
         commentsByResourceId.set(resourceId, []);
       }
@@ -1512,7 +1701,8 @@ export async function getCourseDetails(params: {
     });
 
     const resourcesPayload: CourseResourcePayload[] = resources.map((resource) => {
-      const resourceId = toStringValue(resource.id);
+      const resourceId =
+        toStringValue(resource.resource_option_id) || toStringValue(resource.id);
       const ratings = ratingsByResourceId.get(resourceId) ?? [];
       const commentsForResource = commentsByResourceId.get(resourceId) ?? [];
 
@@ -1535,9 +1725,9 @@ export async function getCourseDetails(params: {
         resource_option_id: toNullableString(resource.resource_option_id),
         title: toStringValue(resource.title) || "Untitled Resource",
         resource_type: toStringValue(resource.resource_type) || "tutorial",
-        provider_name: toStringValue(resource.provider_name) || "Pathly",
+        provider: toStringValue(resource.provider) || "Pathly",
         url: toStringValue(resource.url),
-        description: toNullableString(resource.description),
+        summary: toNullableString(resource.summary),
         average_rating: averageRating,
         comment_count: commentsForResource.length,
         my_rating: myRatingRecord ? toNumberValue(myRatingRecord.rating) : null,
@@ -1633,6 +1823,12 @@ export async function startCourseProgress(params: {
   let step = "read_payload";
 
   try {
+    console.info("[start_learning] request_received", {
+      user_id: params.userId,
+      journey_path_id: params.journeyPathId,
+      course_id: params.courseId,
+      selected_resource_option_id: params.selectedResourceId,
+    });
     logStartCourseStep("read_payload", {
       user_id: params.userId,
       journey_path_id: params.journeyPathId,
@@ -1668,67 +1864,41 @@ export async function startCourseProgress(params: {
     }
 
     step = "fetch_resource_row";
+    console.info("[start_learning] selected_resource_lookup_started", {
+      selected_resource_option_id: params.selectedResourceId,
+      selected_course_id: params.courseId,
+    });
     logStartCourseStep("fetch_resource_row:before", {
       selected_resource_id: params.selectedResourceId,
       course_id: params.courseId,
-      with_is_active_filter: true,
+      read_source: "course_resource_options_first",
     });
 
     let resourceRow: GenericRecord | null = null;
-    const { data: activeResourceRow, error: activeResourceRowError } = await supabaseAdmin
-      .from("course_resources")
-      .select("*")
-      .eq("id", params.selectedResourceId)
-      .eq("course_id", params.courseId)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
-
-    if (activeResourceRowError) {
-      if (isMissingColumnError(activeResourceRowError, "course_resources", "is_active")) {
-        logStartCourseStep("fetch_resource_row:retry_without_is_active", {
-          reason: toErrorMessage(activeResourceRowError),
-        });
-
-        const { data: fallbackResourceRow, error: fallbackResourceRowError } = await supabaseAdmin
-          .from("course_resources")
-          .select("*")
-          .eq("id", params.selectedResourceId)
-          .eq("course_id", params.courseId)
-          .limit(1)
-          .maybeSingle();
-
-        if (fallbackResourceRowError) {
-          throw createStartCourseError({
-            step,
-            message: "Failed to load selected resource.",
-            details: {
-              reason: toErrorMessage(fallbackResourceRowError),
-              selected_resource_id: params.selectedResourceId,
-              course_id: params.courseId,
-            },
-            cause: fallbackResourceRowError,
-          });
-        }
-
-        resourceRow = (fallbackResourceRow as GenericRecord | null) ?? null;
-      } else {
-        throw createStartCourseError({
-          step,
-          message: "Failed to load selected resource.",
-          details: {
-            reason: toErrorMessage(activeResourceRowError),
-            selected_resource_id: params.selectedResourceId,
-            course_id: params.courseId,
-          },
-          cause: activeResourceRowError,
-        });
-      }
-    } else {
-      resourceRow = (activeResourceRow as GenericRecord | null) ?? null;
+    try {
+      resourceRow = await getResourceRowForCourse({
+        selectedResourceId: params.selectedResourceId,
+        courseId: params.courseId,
+      });
+    } catch (error) {
+      throw createStartCourseError({
+        step,
+        message: "Failed to load selected resource.",
+        details: {
+          reason: toErrorMessage(error),
+          selected_resource_id: params.selectedResourceId,
+          course_id: params.courseId,
+        },
+        cause: error,
+      });
     }
 
     if (!resourceRow) {
+      console.warn("[start_learning] selected_resource_lookup_failed", {
+        selected_resource_option_id: params.selectedResourceId,
+        selected_course_id: params.courseId,
+        reason: "resource_not_found",
+      });
       throw createStartCourseError({
         step,
         message: "Selected resource not found.",
@@ -1739,42 +1909,195 @@ export async function startCourseProgress(params: {
       });
     }
 
+    console.info("[start_learning] selected_resource_lookup_succeeded", {
+      selected_resource_option_id: params.selectedResourceId,
+      selected_course_id: params.courseId,
+    });
+
     logStartCourseStep("fetch_resource_row:after", {
       resource_id: toStringValue(resourceRow.id),
+      resource_option_id: toStringValue(resourceRow.resource_option_id) || null,
+      legacy_resource_id: toStringValue(resourceRow.legacy_resource_id) || null,
       course_id: toStringValue(resourceRow.course_id),
       resource_url: toStringValue(resourceRow.url),
     });
+    console.info("[start_learning] selected_resource_url", {
+      selected_course_id: params.courseId,
+      selected_resource_url: toStringValue(resourceRow.url),
+    });
 
-    step = "start_learning_course_rpc";
-    logStartCourseStep("start_learning_course_rpc:before", {
+    const selectedResourceOptionId =
+      toStringValue(resourceRow.resource_option_id) || toStringValue(resourceRow.id);
+    const selectedLegacyResourceId = toStringValue(resourceRow.legacy_resource_id) || "";
+    const existingSelectedResourceId = toNullableString((progressRow as GenericRecord).selected_resource_id);
+    const selectedResourceIdForProgress =
+      existingSelectedResourceId || selectedResourceOptionId || null;
+
+    step = "progress_write";
+    console.info("[start_learning] progress_write_started", {
       user_id: params.userId,
       journey_path_id: params.journeyPathId,
       course_id: params.courseId,
-      selected_resource_id: params.selectedResourceId,
+      selected_resource_id: selectedResourceIdForProgress,
       status_before: status,
+      legacy_table_access_detected: Boolean(selectedLegacyResourceId),
     });
 
-    const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc("start_learning_course", {
-      p_user_id: params.userId,
-      p_journey_path_id: params.journeyPathId,
-      p_course_id: params.courseId,
-      p_selected_resource_id: params.selectedResourceId,
-    });
+    let rpcData: unknown = null;
+    if (selectedLegacyResourceId) {
+      const { data: rpcResponseData, error: rpcError } = await supabaseAdmin.rpc("start_learning_course", {
+        p_user_id: params.userId,
+        p_journey_path_id: params.journeyPathId,
+        p_course_id: params.courseId,
+        p_selected_resource_id: selectedLegacyResourceId,
+      });
+      rpcData = rpcResponseData;
 
-    if (rpcError) {
-      throw createStartCourseError({
-        step,
-        message: "Failed to start course.",
-        details: {
-          reason: toErrorMessage(rpcError),
+      if (rpcError) {
+        const fallbackNow = new Date().toISOString();
+        const fallbackStatus = status === "unlocked" ? "in_progress" : status;
+        const fallbackPayload: Record<string, unknown> = {
+          status: fallbackStatus,
+          selected_resource_id: selectedResourceIdForProgress,
+          last_activity_at: fallbackNow,
+        };
+        if (!toNullableString((progressRow as GenericRecord).started_at)) {
+          fallbackPayload.started_at = fallbackNow;
+        }
+
+        const { error: fallbackUpdateError } = await supabaseAdmin
+          .from("user_course_progress")
+          .update(fallbackPayload)
+          .eq("user_id", params.userId)
+          .eq("journey_path_id", params.journeyPathId)
+          .eq("course_id", params.courseId);
+
+        if (fallbackUpdateError) {
+          console.error("[start_learning] progress_write_failed", {
+            reason: toErrorMessage(rpcError),
+            fallback_reason: toErrorMessage(fallbackUpdateError),
+            selected_resource_id: selectedResourceIdForProgress,
+          });
+          throw createStartCourseError({
+            step,
+            message: "Progress write failed.",
+            details: {
+              reason: toErrorMessage(rpcError),
+              fallback_reason: toErrorMessage(fallbackUpdateError),
+              user_id: params.userId,
+              journey_path_id: params.journeyPathId,
+              course_id: params.courseId,
+              selected_resource_id: selectedResourceIdForProgress,
+            },
+            cause: rpcError,
+          });
+        }
+
+        rpcData = {
+          status: fallbackStatus,
+          selected_resource_id: selectedResourceIdForProgress,
+          started_at: fallbackPayload.started_at ?? (progressRow as GenericRecord).started_at ?? null,
+          last_activity_at: fallbackNow,
+        };
+      }
+    } else {
+      const fallbackNow = new Date().toISOString();
+      const fallbackStatus = status === "unlocked" ? "in_progress" : status;
+      const fallbackPayload: Record<string, unknown> = {
+        status: fallbackStatus,
+        selected_resource_id: selectedResourceIdForProgress,
+        last_activity_at: fallbackNow,
+      };
+      if (!toNullableString((progressRow as GenericRecord).started_at)) {
+        fallbackPayload.started_at = fallbackNow;
+      }
+
+      const { error: fallbackUpdateError } = await supabaseAdmin
+        .from("user_course_progress")
+        .update(fallbackPayload)
+        .eq("user_id", params.userId)
+        .eq("journey_path_id", params.journeyPathId)
+        .eq("course_id", params.courseId);
+      if (fallbackUpdateError) {
+        console.error("[start_learning] progress_write_failed", {
+          reason: toErrorMessage(fallbackUpdateError),
+          selected_resource_id: selectedResourceIdForProgress,
+        });
+        throw createStartCourseError({
+          step,
+          message: "Progress write failed.",
+          details: {
+            reason: toErrorMessage(fallbackUpdateError),
+            user_id: params.userId,
+            journey_path_id: params.journeyPathId,
+            course_id: params.courseId,
+            selected_resource_id: selectedResourceIdForProgress,
+          },
+          cause: fallbackUpdateError,
+        });
+      }
+
+      rpcData = {
+        status: fallbackStatus,
+        selected_resource_id: selectedResourceIdForProgress,
+        started_at: fallbackPayload.started_at ?? (progressRow as GenericRecord).started_at ?? null,
+        last_activity_at: fallbackNow,
+      };
+    }
+
+    // Ensure first Start Learning persists selected_resource_id for future AI test/resource flows.
+    if (!existingSelectedResourceId && selectedResourceIdForProgress) {
+      const persistNow = new Date().toISOString();
+      const persistPayload: Record<string, unknown> = {
+        selected_resource_id: selectedResourceIdForProgress,
+        last_activity_at: persistNow,
+      };
+      if (!toNullableString((progressRow as GenericRecord).started_at)) {
+        persistPayload.started_at = persistNow;
+      }
+      if (status === "unlocked") {
+        persistPayload.status = "in_progress";
+      }
+
+      const { error: persistError } = await supabaseAdmin
+        .from("user_course_progress")
+        .update(persistPayload)
+        .eq("id", toStringValue((progressRow as GenericRecord).id));
+      if (persistError) {
+        console.error("[start_learning] selected_resource_persist_failed", {
           user_id: params.userId,
           journey_path_id: params.journeyPathId,
           course_id: params.courseId,
-          selected_resource_id: params.selectedResourceId,
-        },
-        cause: rpcError,
+          selected_resource_id: selectedResourceIdForProgress,
+          reason: toErrorMessage(persistError),
+        });
+        throw createStartCourseError({
+          step: "progress_write",
+          message: "Progress write failed.",
+          details: {
+            reason: toErrorMessage(persistError),
+            user_id: params.userId,
+            journey_path_id: params.journeyPathId,
+            course_id: params.courseId,
+            selected_resource_id: selectedResourceIdForProgress,
+          },
+          cause: persistError,
+        });
+      }
+      console.info("[start_learning] selected_resource_persist_succeeded", {
+        user_id: params.userId,
+        journey_path_id: params.journeyPathId,
+        course_id: params.courseId,
+        selected_resource_id: selectedResourceIdForProgress,
       });
     }
+
+    console.info("[start_learning] progress_write_succeeded", {
+      user_id: params.userId,
+      journey_path_id: params.journeyPathId,
+      course_id: params.courseId,
+      selected_resource_id: selectedResourceIdForProgress,
+    });
 
     const rpcRecordRaw = Array.isArray(rpcData) ? (rpcData[0] as GenericRecord | undefined) : (rpcData as GenericRecord | null);
     const rpcRecord = rpcRecordRaw ?? {};
@@ -1786,38 +2109,79 @@ export async function startCourseProgress(params: {
     logStartCourseStep("start_learning_course_rpc:after", {
       status: toStringValue(rpcRecord.status),
       selected_resource_id:
-        toNullableString(rpcRecord.selected_resource_id) ?? params.selectedResourceId,
+        toNullableString(rpcRecord.selected_resource_id) ??
+        selectedResourceIdForProgress ??
+        selectedLegacyResourceId ??
+        null,
       started_at: toNullableString(rpcRecord.started_at),
       last_activity_at: toNullableString(rpcRecord.last_activity_at),
       resource_url_from_rpc: rpcResourceUrl,
     });
 
     const resourceUrl = (rpcResourceUrl || toStringValue(resourceRow.url)).trim();
-    if (!resourceUrl) {
+    const hasValidResourceUrl =
+      /^https?:\/\//i.test(resourceUrl) &&
+      !/example\.com/i.test(resourceUrl) &&
+      resourceUrl.toLowerCase() !== "resource_unavailable";
+    if (!hasValidResourceUrl) {
+      console.error("[start_learning] redirect_failed", {
+        selected_course_id: params.courseId,
+        selected_resource_url: resourceUrl || null,
+      });
       throw createStartCourseError({
         step: "validate_resource_url",
-        message: "Selected resource URL is missing.",
+        message: "Selected resource URL is missing or invalid.",
         details: {
-          selected_resource_id: params.selectedResourceId,
+          selected_resource_id: selectedResourceOptionId,
           course_id: params.courseId,
+          resource_url: resourceUrl || null,
         },
       });
     }
+    console.info("[start_learning] redirect_started", {
+      selected_course_id: params.courseId,
+      selected_resource_url: resourceUrl,
+    });
 
     await recordUserResourceSelection({
       userId: params.userId,
       journeyPathId: params.journeyPathId,
       courseId: params.courseId,
-      legacyResourceId: params.selectedResourceId,
+      legacyResourceId: selectedResourceOptionId,
     });
 
     logStartCourseStep("return_success", {
       resource_url: resourceUrl,
     });
 
+    const { data: updatedProgressRow } = await supabaseAdmin
+      .from("user_course_progress")
+      .select("id, status, selected_resource_id, started_at, last_activity_at")
+      .eq("user_id", params.userId)
+      .eq("journey_path_id", params.journeyPathId)
+      .eq("course_id", params.courseId)
+      .limit(1)
+      .maybeSingle();
+
     return {
       ok: true as const,
       resource_url: resourceUrl,
+      progress: updatedProgressRow
+        ? {
+            id: toStringValue((updatedProgressRow as GenericRecord).id),
+            status: normalizeStatus((updatedProgressRow as GenericRecord).status),
+            selected_resource_id: toNullableString((updatedProgressRow as GenericRecord).selected_resource_id),
+            started_at: toNullableString((updatedProgressRow as GenericRecord).started_at),
+            last_activity_at: toNullableString((updatedProgressRow as GenericRecord).last_activity_at),
+          }
+        : {
+            id: toStringValue((progressRow as GenericRecord).id),
+            status: status === "unlocked" ? "in_progress" : status,
+            selected_resource_id: selectedResourceIdForProgress,
+            started_at:
+              toNullableString((progressRow as GenericRecord).started_at) ?? new Date().toISOString(),
+            last_activity_at: new Date().toISOString(),
+          },
     };
   } catch (error) {
     const normalizedError = isStartCourseError(error)
@@ -1852,7 +2216,7 @@ export type CourseTestQuestion = {
   question_order: number;
   question_text: string;
   prompt: string;
-  question_type: "single_choice" | "fill_blank" | "essay";
+  question_type: "multiple_choice" | "fill_blank" | "short_answer";
   options: string[];
   score: number;
 };
@@ -1862,6 +2226,44 @@ export type CourseTestPayload = {
   journey_path_id: string;
   user_test_id: string;
   test_attempt_id: string;
+  template_id: string;
+  title: string;
+  difficulty_band: DifficultyBand;
+  test_template: {
+    course_id: string;
+    course_title: string;
+    difficulty_band: DifficultyBand;
+    resource_context: {
+      selected_resource_option_id: string | null;
+      selected_resource_title: string | null;
+      selected_resource_type: string | null;
+      selected_resource_provider: string | null;
+      selected_resource_url: string | null;
+      selected_resource_summary: string | null;
+    };
+    metadata: {
+      generated_at: string;
+      attempt_number: number;
+      variant_no: number;
+      prompt_version: string;
+      requirements_met: {
+        include_concept_and_skill_tags: boolean;
+        vary_from_previous_attempts: boolean;
+      };
+      ai_provider: string | null;
+      ai_model: string | null;
+      fallback_used: boolean;
+      reused_existing: boolean;
+    };
+    questions: Array<{
+      id: string;
+      question_order: number;
+      question_text: string;
+      question_type: "multiple_choice" | "fill_blank" | "short_answer";
+      options: string[];
+      score: number;
+    }>;
+  };
   status: CourseNodeStatus;
   required_score: number;
   questions: CourseTestQuestion[];
@@ -1890,10 +2292,10 @@ export type CourseTestSubmitResult = {
   question_results: Array<{
     question_id: string;
     question_order: number;
-    question_type: "single_choice" | "fill_blank" | "essay";
+    question_type: "multiple_choice" | "fill_blank" | "short_answer";
     question_text: string;
-    concept_tag: string | null;
-    skill_tag: string | null;
+    concept_tags: string[];
+    skill_tags: string[];
     user_answer: string;
     correct_answer: string;
     is_correct: boolean;
@@ -2084,8 +2486,12 @@ async function getResourceRowForCourse(params: {
   selectedResourceId: string;
   courseId: string;
 }) {
-  const { data: activeResourceRow, error: activeResourceRowError } = await supabaseAdmin
-    .from("course_resources")
+  console.info("[start_learning] selected_resource_lookup_started", {
+    selected_resource_option_id: params.selectedResourceId,
+    selected_course_id: params.courseId,
+  });
+  const { data: optionRow, error: optionError } = await supabaseAdmin
+    .from("course_resource_options")
     .select("*")
     .eq("id", params.selectedResourceId)
     .eq("course_id", params.courseId)
@@ -2093,30 +2499,91 @@ async function getResourceRowForCourse(params: {
     .limit(1)
     .maybeSingle();
 
-  if (activeResourceRowError) {
-    if (isMissingColumnError(activeResourceRowError, "course_resources", "is_active")) {
-      const { data: fallbackResourceRow, error: fallbackResourceRowError } = await supabaseAdmin
-        .from("course_resources")
-        .select("*")
-        .eq("id", params.selectedResourceId)
-        .eq("course_id", params.courseId)
-        .limit(1)
-        .maybeSingle();
-
-      if (fallbackResourceRowError) {
-        throw new Error("Failed to load selected resource.");
-      }
-
-      return (fallbackResourceRow as GenericRecord | null) ?? null;
+  if (optionError) {
+    if (!isMissingColumnError(optionError, "course_resource_options", "is_active")) {
+      console.error("[start_learning] selected_resource_lookup_failed", {
+        selected_resource_option_id: params.selectedResourceId,
+        selected_course_id: params.courseId,
+        reason: toErrorMessage(optionError),
+      });
+      throw new Error("Failed to load selected resource option.");
     }
 
-    throw new Error("Failed to load selected resource.");
+    const { data: fallbackOptionRow, error: fallbackOptionError } = await supabaseAdmin
+      .from("course_resource_options")
+      .select("*")
+      .eq("id", params.selectedResourceId)
+      .eq("course_id", params.courseId)
+      .limit(1)
+      .maybeSingle();
+    if (fallbackOptionError) {
+      console.error("[start_learning] selected_resource_lookup_failed", {
+        selected_resource_option_id: params.selectedResourceId,
+        selected_course_id: params.courseId,
+        reason: toErrorMessage(fallbackOptionError),
+      });
+      throw new Error("Failed to load selected resource option.");
+    }
+    if (!fallbackOptionRow) {
+      return null;
+    }
+    console.info("[start_learning] source_table_used", {
+      selected_course_id: params.courseId,
+      table: "course_resource_options",
+    });
+    console.info("[resource_read] source_table_used", {
+      course_id: params.courseId,
+      table: "course_resource_options",
+    });
+    console.info("[start_learning] selected_resource_lookup_succeeded", {
+      selected_resource_option_id: params.selectedResourceId,
+      selected_course_id: params.courseId,
+    });
+    return {
+      ...(fallbackOptionRow as GenericRecord),
+      resource_option_id: toStringValue((fallbackOptionRow as GenericRecord).id),
+      legacy_resource_id: null,
+      provider: toStringValue((fallbackOptionRow as GenericRecord).provider) || "Unknown",
+      summary: toNullableString((fallbackOptionRow as GenericRecord).summary),
+    } as GenericRecord;
   }
 
-  return (activeResourceRow as GenericRecord | null) ?? null;
+  if (!optionRow) {
+    console.warn("[migration_cleanup] legacy_table_reference_found", {
+      table: "course_resources",
+      path: "journeyProgression.getResourceRowForCourse",
+      action: "not_used",
+      selected_resource_option_id: params.selectedResourceId,
+      selected_course_id: params.courseId,
+    });
+    return null;
+  }
+
+  console.info("[start_learning] source_table_used", {
+    selected_course_id: params.courseId,
+    table: "course_resource_options",
+  });
+  console.info("[resource_read] source_table_used", {
+    course_id: params.courseId,
+    table: "course_resource_options",
+  });
+  console.info("[start_learning] selected_resource_lookup_succeeded", {
+    selected_resource_option_id: params.selectedResourceId,
+    selected_course_id: params.courseId,
+  });
+  return {
+    ...(optionRow as GenericRecord),
+    resource_option_id: toStringValue((optionRow as GenericRecord).id),
+    legacy_resource_id: null,
+    provider: toStringValue((optionRow as GenericRecord).provider) || "Unknown",
+    summary: toNullableString((optionRow as GenericRecord).summary),
+  } as GenericRecord;
 }
 
-type AiTemplateQuestionType = "single_choice" | "fill_blank" | "essay";
+type AiTemplateQuestionType =
+  | "multiple_choice"
+  | "fill_blank"
+  | "short_answer";
 
 type AiTemplateQuestion = {
   id: string;
@@ -2128,8 +2595,8 @@ type AiTemplateQuestion = {
   acceptable_answers: string[];
   score: number;
   explanation: string | null;
-  skill_tag: string | null;
-  concept_tag: string | null;
+  skill_tags: string[];
+  concept_tags: string[];
 };
 
 function logAiTestStep(step: string, detail?: Record<string, unknown>) {
@@ -2142,13 +2609,30 @@ function logAiTestStep(step: string, detail?: Record<string, unknown>) {
 
 function normalizeAiQuestionType(value: unknown): AiTemplateQuestionType {
   const normalized = toStringValue(value).trim().toLowerCase();
-  if (normalized === "essay") {
-    return "essay";
+  if (
+    normalized === "multiple_choice" ||
+    normalized === "single_choice" ||
+    normalized === "mcq" ||
+    normalized === "true_false" ||
+    normalized === "true/false" ||
+    normalized === "boolean"
+  ) {
+    return "multiple_choice";
   }
-  if (normalized === "fill_blank") {
+  if (normalized === "fill_blank" || normalized === "fill-blank" || normalized === "fill in the blank") {
     return "fill_blank";
   }
-  return "single_choice";
+  if (
+    normalized === "short_answer" ||
+    normalized === "short-answer" ||
+    normalized === "essay"
+  ) {
+    return "short_answer";
+  }
+  if (normalized === "matching" || normalized === "match") {
+    return "fill_blank";
+  }
+  return "multiple_choice";
 }
 
 function parseAiOptions(value: unknown) {
@@ -2184,58 +2668,32 @@ function parseAiAcceptableAnswers(value: unknown, fallback: string) {
   return Array.from(new Set(answers));
 }
 
+function parseAiTagList(value: unknown) {
+  const parsed = parseJsonValue(value);
+  if (Array.isArray(parsed)) {
+    return Array.from(
+      new Set(parsed.map((item) => toStringValue(item).trim()).filter(Boolean)),
+    );
+  }
+  if (typeof parsed === "string") {
+    return Array.from(
+      new Set(
+        parsed
+          .split(/\r?\n|,/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+  return [] as string[];
+}
+
 function normalizeQuestionResultStatus(value: unknown): QuestionResultStatus | null {
   const normalized = toStringValue(value).trim().toLowerCase();
   if (normalized === "correct" || normalized === "partial" || normalized === "incorrect") {
     return normalized;
   }
   return null;
-}
-
-function gradeEssayQuestion13(answerText: string) {
-  const lowered = answerText.toLowerCase();
-  const checkpoints = [
-    "<!doctype html>",
-    "<html",
-    "<head",
-    "<title",
-    "<body",
-    "<h1",
-    "<p",
-    "<a",
-  ];
-  const matched = checkpoints.filter((item) => lowered.includes(item));
-  const earned = Math.min(20, matched.length * 2.5);
-  const explanation =
-    matched.length === checkpoints.length
-      ? "Great structure coverage. You included all required HTML core elements."
-      : `You included ${matched.length}/${checkpoints.length} required elements. Add missing core tags to strengthen your answer.`;
-  return {
-    earned,
-    explanation,
-  };
-}
-
-function gradeEssayQuestion14(answerText: string) {
-  const lowered = answerText.toLowerCase();
-  const listItemCount = (answerText.match(/<li\b/gi) ?? []).length;
-  const checkpoints = [
-    lowered.includes("<ul"),
-    listItemCount >= 3,
-    lowered.includes("<img"),
-    lowered.includes("alt="),
-    lowered.includes("<br"),
-  ];
-  const matchedCount = checkpoints.filter(Boolean).length;
-  const earned = Math.min(20, matchedCount * 4);
-  const explanation =
-    matchedCount === checkpoints.length
-      ? "Great work. You covered list, image accessibility, and line break requirements."
-      : `You met ${matchedCount}/${checkpoints.length} rubric checks. Ensure a <ul>, at least 3 <li>, <img> with alt=, and <br> are present.`;
-  return {
-    earned,
-    explanation,
-  };
 }
 
 async function loadAiTemplateQuestions(templateId: string): Promise<AiTemplateQuestion[]> {
@@ -2262,22 +2720,25 @@ async function loadAiTemplateQuestions(templateId: string): Promise<AiTemplateQu
       const questionOrder = Math.max(1, Math.floor(toNumberValue(row.question_order) || index + 1));
       const questionType = normalizeAiQuestionType(row.question_type);
       const questionText = toStringValue(row.question_text) || `Question ${questionOrder}`;
-      const scoreDefault = questionOrder >= 13 ? 20 : 5;
-      const score = Math.max(1, Math.floor(toNumberValue(row.score) || scoreDefault));
+      const normalizedScoreDefault = 20;
+      const score = Math.max(1, Math.floor(toNumberValue(row.score) || normalizedScoreDefault));
       const correctAnswerText = toStringValue(row.correct_answer_text);
+      const options = questionType === "multiple_choice" ? parseAiOptions(row.options_json) : [];
+      const parsedSkillTags = parseAiTagList(row.skill_tags);
+      const parsedConceptTags = parseAiTagList(row.concept_tags);
 
       return {
         id: toStringValue(row.id),
         question_order: questionOrder,
         question_type: questionType,
         question_text: questionText,
-        options: questionType === "single_choice" ? parseAiOptions(row.options_json) : [],
+        options,
         correct_answer_text: correctAnswerText,
         acceptable_answers: parseAiAcceptableAnswers(row.acceptable_answers_json, correctAnswerText),
         score,
         explanation: toNullableString(row.explanation),
-        skill_tag: toNullableString(row.skill_tag),
-        concept_tag: toNullableString(row.concept_tag),
+        skill_tags: parsedSkillTags,
+        concept_tags: parsedConceptTags,
       } satisfies AiTemplateQuestion;
     })
     .filter((question) => question.id && question.question_text);
@@ -2361,13 +2822,18 @@ async function resolveJourneyPathIdForCourse(params: {
 
 export async function prepareCourseTest(params: {
   userId: string;
-  journeyPathId: string;
+  journeyPathId?: string | null;
   courseId: string;
   selectedResourceId?: string | null;
 }): Promise<CourseTestPayload> {
+  const resolvedJourneyPathId = await resolveJourneyPathIdForCourse({
+    userId: params.userId,
+    courseId: params.courseId,
+    journeyPathId: params.journeyPathId,
+  });
   logAiTestStep("prepare:start", {
     user_id: params.userId,
-    journey_path_id: params.journeyPathId,
+    journey_path_id: resolvedJourneyPathId,
     course_id: params.courseId,
   });
 
@@ -2378,6 +2844,11 @@ export async function prepareCourseTest(params: {
     .limit(1)
     .maybeSingle();
   if (userError || !userRow) {
+    console.error("[ai_test_start] db_lookup_failed", {
+      table: "users",
+      user_id: params.userId,
+      reason: userError ? toErrorMessage(userError) : "row_not_found",
+    });
     throw new Error("User not found.");
   }
 
@@ -2388,12 +2859,17 @@ export async function prepareCourseTest(params: {
     .limit(1)
     .maybeSingle();
   if (courseError || !courseRow) {
+    console.error("[ai_test_start] db_lookup_failed", {
+      table: "courses",
+      course_id: params.courseId,
+      reason: courseError ? toErrorMessage(courseError) : "row_not_found",
+    });
     throw new Error("Course not found.");
   }
 
   const progressRow = await ensureProgressRowForCourse({
     userId: params.userId,
-    journeyPathId: params.journeyPathId,
+    journeyPathId: resolvedJourneyPathId,
     courseId: params.courseId,
   });
   const status = normalizeStatus(progressRow.status);
@@ -2404,16 +2880,100 @@ export async function prepareCourseTest(params: {
     throw new Error("Start learning before taking the AI test.");
   }
 
-  let selectedResourceRow: GenericRecord | null = null;
-  if (params.selectedResourceId?.trim()) {
-    const resource = await getResourceRowForCourse({
-      selectedResourceId: params.selectedResourceId,
-      courseId: params.courseId,
+  const { data: resourceMetadataRows, error: resourceMetadataError } = await supabaseAdmin
+    .from("course_resource_options")
+    .select("id, title, resource_type, provider, url, summary")
+    .eq("course_id", params.courseId)
+    .limit(5);
+  if (resourceMetadataError) {
+    console.warn("[ai_test_template] resource_metadata_lookup_failed", {
+      course_id: params.courseId,
+      reason: toErrorMessage(resourceMetadataError),
     });
-    if (!resource) {
-      throw new Error("Selected resource not found.");
+  }
+  const normalizedResourceMetadata = ((resourceMetadataRows ?? []) as GenericRecord[]).map((row) => ({
+    id: toStringValue(row.id),
+    title: toStringValue(row.title),
+    resource_type: toStringValue(row.resource_type),
+    provider:
+      toStringValue(row.provider) ||
+      null,
+    url: toNullableString(row.url),
+    summary:
+      toNullableString(row.summary),
+  }));
+
+  if (params.selectedResourceId?.trim()) {
+    console.info("[ai_test_resource] frontend_selected_resource_ignored", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      frontend_selected_resource_id: params.selectedResourceId,
+    });
+  }
+
+  console.info("[ai_test_resource] loading_saved_selection_started", {
+    user_id: params.userId,
+    course_id: params.courseId,
+  });
+  const { data: savedSelectionRow, error: savedSelectionError } = await supabaseAdmin
+    .from("user_course_resource_selections")
+    .select("resource_option_id, selected_at")
+    .eq("user_id", params.userId)
+    .eq("course_id", params.courseId)
+    .order("selected_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (savedSelectionError) {
+    throw new Error("Failed to load saved resource selection.");
+  }
+
+  const selectedResourceOptionIdFromDb = toStringValue(
+    (savedSelectionRow as GenericRecord | null)?.resource_option_id,
+  );
+  console.info("[ai_test_resource] loading_saved_selection_result", {
+    user_id: params.userId,
+    course_id: params.courseId,
+    resource_option_id: selectedResourceOptionIdFromDb || null,
+    found: Boolean(savedSelectionRow && selectedResourceOptionIdFromDb),
+  });
+
+  if (!selectedResourceOptionIdFromDb) {
+    console.info("[ai_test_resource] no_saved_resource_selection", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      resource_option_id: null,
+      found: false,
+    });
+  }
+
+  let selectedResourceRow: GenericRecord | null = null;
+  if (selectedResourceOptionIdFromDb) {
+    console.info("[ai_test_resource] loading_resource_option_started", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      resource_option_id: selectedResourceOptionIdFromDb,
+    });
+    const { data: selectedResourceOptionRow, error: selectedResourceOptionError } =
+      await supabaseAdmin
+        .from("course_resource_options")
+        .select("id, course_id, title, resource_type, provider, url, summary")
+        .eq("id", selectedResourceOptionIdFromDb)
+        .eq("course_id", params.courseId)
+        .limit(1)
+        .maybeSingle();
+
+    if (selectedResourceOptionError) {
+      throw new Error("Failed to load selected resource option.");
     }
-    selectedResourceRow = resource;
+
+    selectedResourceRow = (selectedResourceOptionRow as GenericRecord | null) ?? null;
+    console.info("[ai_test_resource] loading_resource_option_result", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      resource_option_id: selectedResourceOptionIdFromDb,
+      found: Boolean(selectedResourceRow),
+    });
   }
 
   const { data: latestAttemptRow, error: latestAttemptError } = await supabaseAdmin
@@ -2430,9 +2990,22 @@ export async function prepareCourseTest(params: {
   }
 
   const attemptNumber = Math.max(0, Math.floor(toNumberValue(latestAttemptRow?.attempt_number))) + 1;
-  const resourceOptionId = await resolveResourceOptionIdFromLegacyResource({
-    courseId: params.courseId,
-    legacyResourceId: params.selectedResourceId ?? null,
+  const resourceOptionId = toStringValue(selectedResourceRow?.id) || null;
+  const selectedMetadata = selectedResourceRow;
+
+  console.info("[ai_test_resource] using_db_resource_context", {
+    user_id: params.userId,
+    course_id: params.courseId,
+    resource_option_id: resourceOptionId,
+    found: Boolean(selectedResourceRow),
+  });
+
+  console.info("[ai_test_template] generation_context", {
+    course_id: params.courseId,
+    selected_resource_option_id: resourceOptionId,
+    selected_resource_title: toNullableString(selectedMetadata?.title),
+    selected_resource_type: toNullableString(selectedMetadata?.resource_type),
+    resource_metadata_count: normalizedResourceMetadata.length,
   });
 
   const resolvedTemplate = await resolveAiTestTemplateForAttempt({
@@ -2441,8 +3014,14 @@ export async function prepareCourseTest(params: {
     courseTitle: getCourseTitle(courseRow as GenericRecord),
     courseDescription: toNullableString((courseRow as GenericRecord).description),
     selectedResourceOptionId: resourceOptionId,
-    selectedResourceTitle: toNullableString(selectedResourceRow?.title),
-    selectedResourceType: toNullableString(selectedResourceRow?.resource_type),
+    selectedResourceTitle: toNullableString(selectedMetadata?.title),
+    selectedResourceType: toNullableString(selectedMetadata?.resource_type),
+    selectedResourceProvider:
+      toNullableString(selectedMetadata?.provider),
+    selectedResourceUrl: toNullableString(selectedMetadata?.url),
+    selectedResourceSummary:
+      toNullableString(selectedMetadata?.summary),
+    resourceMetadata: normalizedResourceMetadata,
     attemptNumber,
   });
   const templateId = resolvedTemplate.templateId;
@@ -2457,25 +3036,69 @@ export async function prepareCourseTest(params: {
 
   const nowIso = new Date().toISOString();
 
+  console.info("[ai_test_template] user_test_insert_started", {
+    course_id: params.courseId,
+    template_id: templateId,
+    attempt_number: attemptNumber,
+  });
+  const primaryUserTestPayload = {
+    user_id: params.userId,
+    course_id: params.courseId,
+    template_id: templateId,
+    status: "started",
+    started_at: nowIso,
+    total_score: 100,
+    attempt_number: attemptNumber,
+    completion_awarded: false,
+  };
+  console.info("[ai_test_template] user_test_insert_payload", primaryUserTestPayload);
   logAiTestStep("attempt_create:before", {
     course_id: params.courseId,
     template_id: templateId,
     attempt_number: attemptNumber,
   });
-  const { data: userTestRow, error: userTestError } = await supabaseAdmin
+  let { data: userTestRow, error: userTestError } = await supabaseAdmin
     .from("ai_user_tests")
-    .insert({
-      user_id: params.userId,
-      course_id: params.courseId,
-      template_id: templateId,
-      status: "in_progress",
-      started_at: nowIso,
-      total_score: 100,
-      attempt_number: attemptNumber,
-    })
+    .insert(primaryUserTestPayload)
     .select("*")
     .limit(1)
     .maybeSingle();
+
+  if (userTestError) {
+    const errorRecord = userTestError as unknown as GenericRecord;
+    console.error("[ai_test_template] user_test_insert_failed", {
+      payload_keys: Object.keys(primaryUserTestPayload),
+      reason: userTestError.message,
+      code: errorRecord.code ?? null,
+      details: errorRecord.details ?? null,
+      hint: errorRecord.hint ?? null,
+    });
+
+    const fallbackPayload = {
+      ...primaryUserTestPayload,
+      status: "in_progress",
+    };
+    console.info("[ai_test_template] user_test_insert_payload", fallbackPayload);
+    const fallbackInsert = await supabaseAdmin
+      .from("ai_user_tests")
+      .insert(fallbackPayload)
+      .select("*")
+      .limit(1)
+      .maybeSingle();
+    userTestRow = fallbackInsert.data;
+    userTestError = fallbackInsert.error;
+
+    if (userTestError) {
+      const fallbackErrorRecord = userTestError as unknown as GenericRecord;
+      console.error("[ai_test_template] user_test_insert_failed", {
+        payload_keys: Object.keys(fallbackPayload),
+        reason: userTestError.message,
+        code: fallbackErrorRecord.code ?? null,
+        details: fallbackErrorRecord.details ?? null,
+        hint: fallbackErrorRecord.hint ?? null,
+      });
+    }
+  }
 
   if (userTestError || !userTestRow) {
     throw new Error("Unable to create AI test attempt right now.");
@@ -2485,6 +3108,12 @@ export async function prepareCourseTest(params: {
   if (!userTestId) {
     throw new Error("Unable to create AI test attempt right now.");
   }
+  console.info("[ai_test_template] user_test_insert_succeeded", {
+    user_test_id: userTestId,
+    template_id: templateId,
+    course_id: params.courseId,
+    attempt_number: attemptNumber,
+  });
   logAiTestStep("attempt_create:after", {
     user_test_id: userTestId,
   });
@@ -2503,16 +3132,34 @@ export async function prepareCourseTest(params: {
     console.warn("[ai_test] progress mark ready_for_test failed", {
       user_id: params.userId,
       course_id: params.courseId,
-      journey_path_id: params.journeyPathId,
+      journey_path_id: resolvedJourneyPathId,
       reason: toErrorMessage(progressUpdateError),
     });
   }
 
-  return {
+  const payload: CourseTestPayload = {
     course_id: params.courseId,
-    journey_path_id: params.journeyPathId,
+    journey_path_id: resolvedJourneyPathId,
     user_test_id: userTestId,
     test_attempt_id: userTestId,
+    template_id: templateId,
+    title: getCourseTitle(courseRow as GenericRecord),
+    difficulty_band: resolvedTemplate.difficultyBand,
+    test_template: {
+      course_id: params.courseId,
+      course_title: getCourseTitle(courseRow as GenericRecord),
+      difficulty_band: resolvedTemplate.difficultyBand,
+      resource_context: resolvedTemplate.resourceContext,
+      metadata: resolvedTemplate.metadata,
+      questions: questions.map((question) => ({
+        id: question.id,
+        question_order: question.question_order,
+        question_text: question.question_text,
+        question_type: question.question_type,
+        options: question.options,
+        score: question.score,
+      })),
+    },
     status: status === "passed" ? "passed" : "ready_for_test",
     required_score: 60,
     questions: questions.map((question) => ({
@@ -2525,6 +3172,23 @@ export async function prepareCourseTest(params: {
       score: question.score,
     })),
   };
+  console.info("[ai_test_template] response_payload", {
+    success: true,
+    user_test_id: payload.user_test_id,
+    template_id: payload.template_id,
+    course_id: payload.course_id,
+    title: payload.title,
+    difficulty_band: payload.difficulty_band,
+    questions_count: payload.questions.length,
+  });
+  console.info("[ai_test_template] response_sent", {
+    user_test_id: userTestId,
+    template_id: templateId,
+    course_id: params.courseId,
+    questions_count: payload.questions.length,
+    difficulty_band: resolvedTemplate.difficultyBand,
+  });
+  return payload;
 }
 
 export async function submitCourseTest(params: {
@@ -2622,22 +3286,23 @@ export async function submitCourseTest(params: {
     user_test_id: params.testAttemptId,
     question_count: questions.length,
   });
-  const questionResults = questions.map((question) => {
+  const questionResults: CourseTestSubmitResult["question_results"] = questions.map((question) => {
     const userAnswer = (answerMap.get(question.id) ?? "").trim();
     const normalizedAnswer = userAnswer.toLowerCase().replace(/\s+/g, " ").trim();
     const maxScore = Math.max(1, question.score);
+    const normalizedQuestionType = normalizeAiQuestionType(question.question_type);
 
-    if (question.question_type === "single_choice") {
+    if (normalizedQuestionType === "multiple_choice") {
       const correct = question.correct_answer_text.trim();
       const isCorrect = userAnswer === correct;
       const earnedScore = isCorrect ? maxScore : 0;
       return {
         question_id: question.id,
         question_order: question.question_order,
-        question_type: question.question_type,
+        question_type: normalizedQuestionType,
         question_text: question.question_text,
-        concept_tag: question.concept_tag,
-        skill_tag: question.skill_tag,
+        concept_tags: question.concept_tags,
+        skill_tags: question.skill_tags,
         user_answer: userAnswer,
         correct_answer: correct,
         is_correct: isCorrect,
@@ -2650,19 +3315,21 @@ export async function submitCourseTest(params: {
       };
     }
 
-    if (question.question_type === "fill_blank") {
+    if (normalizedQuestionType === "short_answer" || normalizedQuestionType === "fill_blank") {
       const acceptableAnswers = question.acceptable_answers
         .map((item) => item.toLowerCase().replace(/\s+/g, " ").trim())
         .filter(Boolean);
-      const isCorrect = acceptableAnswers.includes(normalizedAnswer);
+      const isCorrect =
+        acceptableAnswers.includes(normalizedAnswer) ||
+        question.correct_answer_text.toLowerCase().replace(/\s+/g, " ").trim() === normalizedAnswer;
       const earnedScore = isCorrect ? maxScore : 0;
       return {
         question_id: question.id,
         question_order: question.question_order,
-        question_type: question.question_type,
+        question_type: normalizedQuestionType,
         question_text: question.question_text,
-        concept_tag: question.concept_tag,
-        skill_tag: question.skill_tag,
+        concept_tags: question.concept_tags,
+        skill_tags: question.skill_tags,
         user_answer: userAnswer,
         correct_answer:
           question.correct_answer_text ||
@@ -2678,26 +3345,20 @@ export async function submitCourseTest(params: {
       };
     }
 
-    const essay13 = question.question_order === 13 ? gradeEssayQuestion13(userAnswer) : null;
-    const essay14 = question.question_order === 14 ? gradeEssayQuestion14(userAnswer) : null;
-    const essayEvaluation = essay13 ?? essay14 ?? { earned: 0, explanation: "Essay answer reviewed." };
-    const earnedEssay = Math.max(0, Math.min(maxScore, essayEvaluation.earned));
-    const status: QuestionResultStatus =
-      earnedEssay <= 0 ? "incorrect" : earnedEssay >= maxScore ? "correct" : "partial";
     return {
       question_id: question.id,
       question_order: question.question_order,
-      question_type: question.question_type,
+      question_type: "short_answer",
       question_text: question.question_text,
-      concept_tag: question.concept_tag,
-      skill_tag: question.skill_tag,
+      concept_tags: question.concept_tags,
+      skill_tags: question.skill_tags,
       user_answer: userAnswer,
-      correct_answer: question.correct_answer_text || "Reference answer available in explanation.",
-      is_correct: status === "correct",
-      earned_score: earnedEssay,
+      correct_answer: question.correct_answer_text || "See explanation.",
+      is_correct: false,
+      earned_score: 0,
       max_score: maxScore,
-      result_status: status,
-      explanation: question.explanation ?? essayEvaluation.explanation,
+      result_status: "incorrect" as QuestionResultStatus,
+      explanation: question.explanation ?? "Answer could not be evaluated.",
     };
   });
 
@@ -2874,8 +3535,8 @@ export async function submitCourseTest(params: {
     questionResults: questionResults.map((item) => ({
       question_id: item.question_id,
       result_status: item.result_status,
-      concept_tag: item.concept_tag,
-      skill_tag: item.skill_tag,
+      concept_tags: item.concept_tags,
+      skill_tags: item.skill_tags,
     })),
   });
 
@@ -2947,10 +3608,10 @@ export type CourseTestAttemptDetail = {
   question_results: Array<{
     question_id: string;
     question_order: number;
-    question_type: "single_choice" | "fill_blank" | "essay";
+    question_type: "multiple_choice" | "fill_blank" | "short_answer";
     question_text: string;
-    concept_tag: string | null;
-    skill_tag: string | null;
+    concept_tags: string[];
+    skill_tags: string[];
     options: string[];
     user_answer: string;
     correct_answer: string;
@@ -3200,8 +3861,8 @@ export async function getCourseTestAttemptDetail(params: {
       question_order: question.question_order,
       question_type: question.question_type,
       question_text: question.question_text,
-      concept_tag: question.concept_tag,
-      skill_tag: question.skill_tag,
+      concept_tags: question.concept_tags,
+      skill_tags: question.skill_tags,
       options: question.options,
       user_answer: toStringValue(answerRow?.user_answer_text),
       correct_answer: correctAnswer,

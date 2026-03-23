@@ -1,0 +1,21 @@
+-- Resource pipeline schema alignment for Tavily + DeepSeek resource option generation.
+-- Safe and idempotent.
+
+alter table if exists public.course_resource_options
+  add column if not exists provider text,
+  add column if not exists description text,
+  add column if not exists summary text,
+  add column if not exists difficulty text,
+  add column if not exists estimated_minutes integer,
+  add column if not exists ai_selected boolean not null default true,
+  add column if not exists ai_generated_at timestamptz,
+  add column if not exists created_at timestamptz not null default now(),
+
+alter table if exists public.course_resources
+  add column if not exists is_active boolean not null default true;
+
+create index if not exists idx_course_resource_options_course_active
+  on public.course_resource_options (course_id, is_active, option_no);
+
+create index if not exists idx_course_resources_course_active
+  on public.course_resources (course_id, is_active, display_order);

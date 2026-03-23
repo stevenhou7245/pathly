@@ -1,6 +1,8 @@
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 import { registerRequestSchema } from "@/lib/authValidation";
+import { verifyCaptchaChallenge } from "@/lib/captcha";
+import { sendWelcomeEmail } from "@/lib/email";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
@@ -22,7 +24,20 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 400 });
     }
 
-    const { username, email, password, verificationCode } = parsed.data;
+    const { username, email, password, captchaInput, captchaToken } = parsed.data;
+
+    const captchaResult = verifyCaptchaChallenge({
+      captchaInput,
+      captchaToken,
+    });
+    if (!captchaResult.ok) {
+      const payload = {
+        success: false,
+        message: "CAPTCHA verification failed. Please try again.",
+        refreshCaptcha: true,
+      };
+      return NextResponse.json(payload, { status: 400 });
+    }
 
     const [existingEmailResult, existingUsernameResult] = await Promise.all([
       supabaseAdmin
@@ -63,36 +78,6 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 409 });
     }
 
-    const { data: latestCode, error: latestCodeError } = await supabaseAdmin
-      .from("email_verification_codes")
-      .select("id, code, expires_at, used, created_at")
-      .eq("email", email)
-      .eq("used", false)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (latestCodeError) {
-      const payload: RegisterResponse = {
-        success: false,
-        message: "Unable to verify the verification code right now.",
-      };
-      return NextResponse.json(payload, { status: 500 });
-    }
-
-    const isCodeMissing = !latestCode;
-    const isCodeMismatch = latestCode?.code !== verificationCode;
-    const isCodeExpired =
-      latestCode && new Date(latestCode.expires_at).getTime() <= Date.now();
-
-    if (isCodeMissing || isCodeMismatch || isCodeExpired) {
-      const payload: RegisterResponse = {
-        success: false,
-        message: "Invalid or expired verification code.",
-      };
-      return NextResponse.json(payload, { status: 400 });
-    }
-
     const passwordHash = await bcrypt.hash(password, 10);
     const timestamp = new Date().toISOString();
 
@@ -112,10 +97,20 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 500 });
     }
 
-    await supabaseAdmin
-      .from("email_verification_codes")
-      .update({ used: true })
-      .eq("id", latestCode.id);
+    try {
+      await sendWelcomeEmail({
+        toEmail: email,
+        username,
+      });
+    } catch (welcomeEmailError) {
+      console.warn("[register] welcome_email_failed", {
+        email,
+        reason:
+          welcomeEmailError instanceof Error
+            ? welcomeEmailError.message
+            : String(welcomeEmailError),
+      });
+    }
 
     const payload: RegisterResponse = {
       success: true,

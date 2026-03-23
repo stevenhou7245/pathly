@@ -56,6 +56,26 @@ type CreateLearningFieldApiResponse = {
   learning_field?: {
     id?: unknown;
   };
+  generation?: {
+    source: "ai" | "fallback" | "database";
+    generated: boolean;
+  };
+  learning_steps?: Array<{
+    id: string;
+    step_number: number;
+    title: string;
+    summary: string | null;
+    resources: Array<{
+      type: "video" | "article" | "tutorial" | "interactive" | "document";
+      title: string;
+      url: string;
+    }>;
+  }>;
+};
+
+type DeleteLearningFieldApiResponse = {
+  success: boolean;
+  message?: string;
 };
 
 type MessagesSummaryApiResponse = {
@@ -318,13 +338,17 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const [foldersError, setFoldersError] = useState("");
   const [isLoadingFolders, setIsLoadingFolders] = useState(true);
   const [isAddFieldModalOpen, setIsAddFieldModalOpen] = useState(false);
+  const [isDeleteFieldModalOpen, setIsDeleteFieldModalOpen] = useState(false);
+  const [deleteFieldTarget, setDeleteFieldTarget] = useState<LearningFolder | null>(null);
   const [addFieldValues, setAddFieldValues] = useState<AddFieldValues>({
     learningGoal: "",
     currentLevel: "",
     targetLevel: "",
   });
   const [isAddingField, setIsAddingField] = useState(false);
+  const [isDeletingField, setIsDeletingField] = useState(false);
   const [addFieldError, setAddFieldError] = useState("");
+  const [deleteFieldError, setDeleteFieldError] = useState("");
   const [messagesUnreadCount, setMessagesUnreadCount] = useState(0);
   const [isLoadingActiveSummary, setIsLoadingActiveSummary] = useState(false);
   const [activeSummaryError, setActiveSummaryError] = useState("");
@@ -647,6 +671,29 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       });
 
       try {
+        try {
+          const stepSeedResponse = await fetch(
+            `/api/learning-steps/${encodeURIComponent(params.folderId)}`,
+            {
+              method: "GET",
+              cache: "no-store",
+            },
+          );
+          if (!stepSeedResponse.ok) {
+            logSummarySync("summary_fetch:step_seed_non_blocking_error", {
+              request_id: requestId,
+              folder_id: params.folderId,
+              status: stepSeedResponse.status,
+            });
+          }
+        } catch (error) {
+          logSummarySync("summary_fetch:step_seed_failed", {
+            request_id: requestId,
+            folder_id: params.folderId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+
         const payload = await fetchJsonWithRequestDedupe<LearningSummaryApiResponse>({
           key: `dashboard:learning-summary:${params.fieldId}`,
           url: `/api/dashboard/learning-summary?field_id=${encodeURIComponent(params.fieldId)}`,
@@ -801,6 +848,21 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
     setIsAddFieldModalOpen(false);
   }
 
+  function openDeleteFieldModal(folder: LearningFolder) {
+    setDeleteFieldTarget(folder);
+    setDeleteFieldError("");
+    setIsDeleteFieldModalOpen(true);
+  }
+
+  function closeDeleteFieldModal() {
+    if (isDeletingField) {
+      return;
+    }
+    setIsDeleteFieldModalOpen(false);
+    setDeleteFieldTarget(null);
+    setDeleteFieldError("");
+  }
+
   function handleSelectFolder(folderId: string) {
     setActiveSummaryError("");
     setActiveFolderId(folderId);
@@ -891,6 +953,11 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
         setIsAddingField(false);
         return;
       }
+      console.info("[dashboard] add_field_generation_result", {
+        generation_source: payload.generation?.source ?? "unknown",
+        generated: payload.generation?.generated ?? false,
+        returned_step_count: payload.learning_steps?.length ?? 0,
+      });
 
       const createdId =
         payload.learning_field && typeof payload.learning_field.id === "string"
@@ -913,6 +980,68 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       setAddFieldError("Unable to add this learning field right now.");
     } finally {
       setIsAddingField(false);
+    }
+  }
+
+  async function handleDeleteField() {
+    if (!deleteFieldTarget) {
+      return;
+    }
+
+    setIsDeletingField(true);
+    setDeleteFieldError("");
+
+    try {
+      const response = await fetch(
+        `/api/user/learning-fields/${encodeURIComponent(deleteFieldTarget.id)}`,
+        {
+          method: "DELETE",
+          cache: "no-store",
+        },
+      );
+      const payload = (await response.json()) as DeleteLearningFieldApiResponse;
+      if (!response.ok || !payload.success) {
+        setDeleteFieldError(payload.message ?? "Unable to delete this learning field right now.");
+        return;
+      }
+
+      const remainingFolders = folders.filter((folder) => folder.id !== deleteFieldTarget.id);
+      setFolders(remainingFolders);
+      dashboardRequestCache.delete("dashboard:learning-fields");
+      if (deleteFieldTarget.fieldId) {
+        dashboardRequestCache.delete(`dashboard:learning-summary:${deleteFieldTarget.fieldId}`);
+      }
+
+      if (deleteFieldTarget.fieldId) {
+        setSummaryReadyByField((previous) => {
+          const next = { ...previous };
+          delete next[deleteFieldTarget.fieldId as string];
+          summaryReadyByFieldRef.current = next;
+          return next;
+        });
+      }
+
+      const nextFolderId =
+        activeFolderId === deleteFieldTarget.id ? (remainingFolders[0]?.id ?? "") : activeFolderId;
+      setActiveFolderId(nextFolderId);
+      if (!nextFolderId) {
+        setActiveView("field");
+        setIsLoadingActiveSummary(false);
+        setActiveSummaryError("");
+      }
+
+      setIsDeleteFieldModalOpen(false);
+      setDeleteFieldTarget(null);
+      setDeleteFieldError("");
+
+      await loadLearningFields({
+        forceActiveFolderId: nextFolderId || undefined,
+      });
+      router.refresh();
+    } catch {
+      setDeleteFieldError("Unable to delete this learning field right now.");
+    } finally {
+      setIsDeletingField(false);
     }
   }
 
@@ -1072,10 +1201,12 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
             activeFolderId={activeFolder.id}
             activeView={activeView}
             onSelectFolder={handleSelectFolder}
+            onRequestDeleteFolder={openDeleteFieldModal}
             onSelectView={setActiveView}
             onOpenAddFieldModal={openAddFieldModal}
             messagesUnreadCount={messagesUnreadCount}
             loadingFolderId={activeView === "field" && isLoadingActiveSummary ? activeFolder.id : null}
+            deletingFolderId={isDeletingField ? deleteFieldTarget?.id ?? null : null}
           />
         </div>
 
@@ -1190,6 +1321,48 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      ) : null}
+
+      {isDeleteFieldModalOpen && deleteFieldTarget ? (
+        <div className="fixed inset-0 z-[71] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
+          <div className="w-full max-w-md rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-7 motion-modal-content">
+            <h2 className="text-2xl font-extrabold text-[#1F2937]">Delete learning field?</h2>
+            <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">
+              This will remove this learning field and your related progress from your dashboard.
+              Shared course templates may remain available for future reuse.
+            </p>
+            <p className="mt-3 rounded-xl bg-[#F6FCFF] px-3 py-2 text-sm font-bold text-[#1F2937]">
+              {deleteFieldTarget.name}
+            </p>
+
+            {deleteFieldError ? (
+              <p className="mt-3 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
+                {deleteFieldError}
+              </p>
+            ) : null}
+
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteFieldModal}
+                disabled={isDeletingField}
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDeleteField();
+                }}
+                disabled={isDeletingField}
+                className="btn-3d inline-flex h-11 items-center justify-center border-[#A22020] bg-[#E53935] px-6 text-white shadow-[0_4px_0_#7f1d1d] transition hover:-translate-y-0.5 hover:bg-[#d93431] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isDeletingField ? "Deleting..." : "Delete"}
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

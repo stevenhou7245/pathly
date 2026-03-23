@@ -23,8 +23,8 @@ type WeaknessSignal = {
 export type TestQuestionForWeakness = {
   question_id: string;
   result_status: "correct" | "partial" | "incorrect";
-  concept_tag?: string | null;
-  skill_tag?: string | null;
+  concept_tags?: string[] | null;
+  skill_tags?: string[] | null;
 };
 
 const reviewQuestionSchema = z.object({
@@ -67,31 +67,43 @@ function computeWeaknessSignals(
     if (result.result_status === "correct") {
       return;
     }
-    const conceptTag = toStringValue(result.concept_tag).trim() || "general-foundation";
-    const skillTag = toStringValue(result.skill_tag).trim();
+    const conceptTags =
+      Array.isArray(result.concept_tags) && result.concept_tags.length > 0
+        ? result.concept_tags.map((tag) => toStringValue(tag).trim()).filter(Boolean)
+        : ["general-foundation"];
+    const skillTags =
+      Array.isArray(result.skill_tags) && result.skill_tags.length > 0
+        ? result.skill_tags.map((tag) => toStringValue(tag).trim()).filter(Boolean)
+        : [""];
 
-    const current = byConcept.get(conceptTag) ?? {
-      concept_tag: conceptTag,
-      skill_tag: skillTag,
-      incorrect_count: 0,
-      partial_count: 0,
-      total_observations: 0,
-      weakness_score: 0,
-    };
+    conceptTags.forEach((conceptTag) => {
+      const uniqueSkillTags = skillTags.length > 0 ? skillTags : [""];
+      uniqueSkillTags.forEach((skillTag) => {
+        const signalKey = `${conceptTag}::${skillTag}`;
+        const current = byConcept.get(signalKey) ?? {
+          concept_tag: conceptTag,
+          skill_tag: skillTag,
+          incorrect_count: 0,
+          partial_count: 0,
+          total_observations: 0,
+          weakness_score: 0,
+        };
 
-    current.total_observations += 1;
-    if (result.result_status === "incorrect") {
-      current.incorrect_count += 1;
-    } else if (result.result_status === "partial") {
-      current.partial_count += 1;
-    }
-    current.weakness_score = Number(
-      (
-        (current.incorrect_count * 1 + current.partial_count * 0.5) /
-        Math.max(1, current.total_observations)
-      ).toFixed(4),
-    );
-    byConcept.set(conceptTag, current);
+        current.total_observations += 1;
+        if (result.result_status === "incorrect") {
+          current.incorrect_count += 1;
+        } else if (result.result_status === "partial") {
+          current.partial_count += 1;
+        }
+        current.weakness_score = Number(
+          (
+            (current.incorrect_count * 1 + current.partial_count * 0.5) /
+            Math.max(1, current.total_observations)
+          ).toFixed(4),
+        );
+        byConcept.set(signalKey, current);
+      });
+    });
   });
 
   return [...byConcept.values()].sort((a, b) => b.weakness_score - a.weakness_score);

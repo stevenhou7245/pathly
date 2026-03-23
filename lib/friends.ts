@@ -451,62 +451,58 @@ export async function getProgressSummaryForField(params: {
   userId: string;
   fieldId: string;
 }) {
-  const { data: routes, error: routesError } = await supabaseAdmin
-    .from("field_routes")
-    .select("id")
-    .eq("field_id", params.fieldId);
-
-  if (routesError) {
-    throw new Error("Failed to load routes.");
-  }
-
-  const routeIds = (routes ?? [])
-    .map((route) => toStringValue((route as GenericRecord).id))
-    .filter(Boolean);
-
-  if (routeIds.length === 0) {
-    return {
-      completed_steps_count: 0,
-      total_steps_count: 0,
-      percentage_progress: 0,
-    };
-  }
-
-  const { data: nodes, error: nodesError } = await supabaseAdmin
-    .from("route_nodes")
-    .select("id")
-    .in("route_id", routeIds);
-
-  if (nodesError) {
-    throw new Error("Failed to load route nodes.");
-  }
-
-  const nodeIds = (nodes ?? [])
-    .map((node) => toStringValue((node as GenericRecord).id))
-    .filter(Boolean);
-
-  if (nodeIds.length === 0) {
-    return {
-      completed_steps_count: 0,
-      total_steps_count: 0,
-      percentage_progress: 0,
-    };
-  }
-
-  const { data: completedRows, error: completedRowsError } = await supabaseAdmin
-    .from("user_node_progress")
-    .select("node_id")
+  const { data: latestJourneyPath, error: latestJourneyPathError } = await supabaseAdmin
+    .from("journey_paths")
+    .select("id, total_steps")
     .eq("user_id", params.userId)
-    .in("node_id", nodeIds);
+    .eq("learning_field_id", params.fieldId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  if (completedRowsError) {
-    throw new Error("Failed to load node progress.");
+  if (latestJourneyPathError) {
+    throw new Error("Failed to load journey path.");
+  }
+
+  const journeyPathId = toStringValue((latestJourneyPath as GenericRecord | null)?.id);
+  if (!journeyPathId) {
+    return {
+      completed_steps_count: 0,
+      total_steps_count: 0,
+      percentage_progress: 0,
+    };
+  }
+
+  const { data: progressRows, error: progressRowsError } = await supabaseAdmin
+    .from("user_course_progress")
+    .select("course_id, status")
+    .eq("user_id", params.userId)
+    .eq("journey_path_id", journeyPathId);
+
+  if (progressRowsError) {
+    throw new Error("Failed to load course progress.");
   }
 
   const completedCount = new Set(
-    (completedRows ?? []).map((row) => toStringValue((row as GenericRecord).node_id)),
+    ((progressRows ?? []) as GenericRecord[])
+      .filter((row) => {
+        const status = toStringValue(row.status).toLowerCase();
+        return status === "passed" || status === "completed";
+      })
+      .map((row) => toStringValue(row.course_id))
+      .filter(Boolean),
   ).size;
-  const totalCount = nodeIds.length;
+
+  const declaredTotalSteps = Math.max(
+    0,
+    Math.floor(toNullableNumber((latestJourneyPath as GenericRecord | null)?.total_steps) ?? 0),
+  );
+  const totalCount = Math.max(declaredTotalSteps, (progressRows ?? []).length);
+
+  console.info("[journey_read] source_table_used", {
+    table: "journey_paths",
+    journey_path_id: journeyPathId,
+  });
 
   return {
     completed_steps_count: completedCount,

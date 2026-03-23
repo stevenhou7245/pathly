@@ -8,8 +8,10 @@ import {
   toStringValue,
   type DifficultyBand,
 } from "@/lib/ai/common";
+import { calculateTotalSteps } from "@/lib/learningPath";
 import { loadUserResourcePreferenceProfile, type ResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
+import { installAiPipelineDebugLogFilter } from "@/lib/aiPipelineDebugLogging";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type GenericRecord = Record<string, unknown>;
@@ -35,56 +37,127 @@ export type JourneyTemplateResult = {
 };
 
 const journeyTemplateOutputSchema = z.object({
-  template_name: z.string().min(1),
-  total_steps: z.number().int().min(1).max(20),
-  steps: z
+  journey_plan: z
     .array(
       z.object({
-        step_number: z.number().int().min(1),
-        step_title: z.string().min(1),
-        step_description: z.string().min(1),
-        learning_objective: z.string().min(1),
-        difficulty_level: z
-          .enum(["beginner", "basic", "intermediate", "advanced", "expert"])
-          .default("beginner"),
-        skill_tags: z.array(z.string()).default([]),
-        concept_tags: z.array(z.string()).default([]),
+        title: z.string().min(1),
+        description: z.string().min(1),
+        objective: z.string().min(1),
+        difficulty: z.enum(["beginner", "basic", "intermediate", "advanced", "expert"]),
+        skill_tags: z.array(z.string()),
+        concept_tags: z.array(z.string()),
       }),
     )
-    .min(1),
+    .min(1)
+    .max(20),
 });
 
-function normalizeSteps(steps: JourneyPlanStep[], totalSteps: number) {
-  const sorted = [...steps].sort((a, b) => a.step_number - b.step_number);
-  const trimmed = sorted.slice(0, Math.max(1, totalSteps));
+const journeyTemplateLooseOutputSchema = z.object({
+  journey_plan: z
+    .array(
+      z
+        .object({
+          title: z.string().optional().default(""),
+          description: z.string().optional().default(""),
+          objective: z.string().optional().default(""),
+          difficulty: z.string().optional().default("beginner"),
+          skill_tags: z.array(z.string()).optional().default([]),
+          concept_tags: z.array(z.string()).optional().default([]),
+        })
+        .passthrough(),
+    )
+    .min(1)
+    .max(20),
+});
 
+function normalizeJourneyDifficulty(value: string): DifficultyBand {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "beginner") {
+    return "beginner";
+  }
+  if (normalized === "basic") {
+    return "basic";
+  }
+  if (normalized === "intermediate") {
+    return "intermediate";
+  }
+  if (normalized === "advanced") {
+    return "advanced";
+  }
+  if (normalized === "expert") {
+    return "expert";
+  }
+  if (normalized === "novice" || normalized === "starter" || normalized === "intro") {
+    return "beginner";
+  }
+  if (normalized === "foundation" || normalized === "foundational") {
+    return "basic";
+  }
+  return "beginner";
+}
+
+function normalizeJourneyPlanForValidation(
+  value: z.infer<typeof journeyTemplateLooseOutputSchema>["journey_plan"],
+) {
+  return value.map((step, index) => {
+    const originalDifficulty = toStringValue(step.difficulty);
+    const normalizedDifficulty = normalizeJourneyDifficulty(originalDifficulty);
+    console.info("[journey_template] difficulty_normalized", {
+      step_index: index + 1,
+      original: originalDifficulty || null,
+      normalized: normalizedDifficulty,
+    });
+    return {
+      title: toStringValue(step.title).trim() || `Step ${index + 1}`,
+      description: toStringValue(step.description).trim() || `Complete step ${index + 1}.`,
+      objective: toStringValue(step.objective).trim() || `Practice step ${index + 1}.`,
+      difficulty: normalizedDifficulty,
+      skill_tags: Array.isArray(step.skill_tags)
+        ? step.skill_tags.map((item) => toStringValue(item).trim()).filter(Boolean)
+        : [],
+      concept_tags: Array.isArray(step.concept_tags)
+        ? step.concept_tags.map((item) => toStringValue(item).trim()).filter(Boolean)
+        : [],
+    };
+  });
+}
+
+function normalizeSteps(
+  steps: z.infer<typeof journeyTemplateOutputSchema>["journey_plan"],
+  totalSteps: number,
+) {
+  const trimmed = [...steps].slice(0, Math.max(1, totalSteps));
   return trimmed.map((step, index) => ({
     step_number: index + 1,
-    step_title: step.step_title.trim() || `Step ${index + 1}`,
-    step_description: step.step_description.trim() || `Complete step ${index + 1}.`,
-    learning_objective: step.learning_objective.trim() || `Practice step ${index + 1}.`,
-    difficulty_level: normalizeDifficultyBand(step.difficulty_level),
+    step_title: step.title.trim() || `Step ${index + 1}`,
+    step_description: step.description.trim() || `Complete step ${index + 1}.`,
+    learning_objective: step.objective.trim() || `Practice step ${index + 1}.`,
+    difficulty_level: normalizeDifficultyBand(step.difficulty),
     skill_tags: Array.from(new Set(step.skill_tags.map((tag) => tag.trim()).filter(Boolean))),
     concept_tags: Array.from(new Set(step.concept_tags.map((tag) => tag.trim()).filter(Boolean))),
   }));
 }
 
-function levelRank(level: string) {
-  const normalized = level.toLowerCase().trim();
-  if (normalized === "beginner") return 1;
-  if (normalized === "basic") return 2;
-  if (normalized === "intermediate") return 3;
-  if (normalized === "advanced") return 4;
-  if (normalized === "expert") return 5;
-  return 3;
+function hasGenericStepTitles(steps: JourneyPlanStep[]) {
+  return steps.every((step) => {
+    const normalized = step.step_title.trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    return (
+      /^(milestone|step)\s*\d+$/.test(normalized) ||
+      /applied practice|advanced mastery|guided practice/.test(normalized) ||
+      /foundations\s+\d+$/.test(normalized) ||
+      /course\s+\d+$/.test(normalized)
+    );
+  });
 }
 
 function estimateSteps(startLevel: string, targetLevel: string, desiredTotalSteps?: number | null) {
   if (desiredTotalSteps && Number.isFinite(desiredTotalSteps) && desiredTotalSteps > 0) {
     return Math.max(1, Math.min(20, Math.floor(desiredTotalSteps)));
   }
-  const distance = Math.max(1, Math.abs(levelRank(targetLevel) - levelRank(startLevel)) + 1);
-  return Math.max(3, Math.min(10, distance * 2));
+  return Math.max(3, Math.min(20, calculateTotalSteps(startLevel, targetLevel)));
 }
 
 function buildDeterministicJourneyPlan(input: {
@@ -94,7 +167,7 @@ function buildDeterministicJourneyPlan(input: {
   desiredTotalSteps?: number | null;
 }): z.infer<typeof journeyTemplateOutputSchema> {
   const totalSteps = estimateSteps(input.startLevel, input.targetLevel, input.desiredTotalSteps);
-  const steps: z.infer<typeof journeyTemplateOutputSchema>["steps"] = [];
+  const steps: z.infer<typeof journeyTemplateOutputSchema>["journey_plan"] = [];
 
   const difficultyByIndex: DifficultyBand[] = [
     "beginner",
@@ -103,27 +176,73 @@ function buildDeterministicJourneyPlan(input: {
     "advanced",
     "expert",
   ];
+  const normalizedField = input.fieldTitle.trim().toLowerCase();
+  const fallbackTitleCatalog = (() => {
+    if (normalizedField.includes("ielts")) {
+      return [
+        "IELTS Reading Foundations",
+        "IELTS Listening Strategies",
+        "IELTS Speaking Part 1 Basics",
+        "IELTS Task 2 Writing Structure",
+        "IELTS Reading Skimming and Scanning",
+        "IELTS Listening Distractor Detection",
+        "IELTS Speaking Part 2 Story Flow",
+        "IELTS Writing Task 1 Data Overview",
+        "IELTS Full Mock Test Practice",
+      ];
+    }
+    if (normalizedField.includes("toefl")) {
+      return [
+        "TOEFL Reading Foundations",
+        "TOEFL Listening Note-Taking",
+        "TOEFL Speaking Task 1 Strategies",
+        "TOEFL Independent Writing Basics",
+        "TOEFL Reading Accuracy Drills",
+        "TOEFL Listening Detail Recognition",
+        "TOEFL Speaking Task 2-4 Fluency",
+        "TOEFL Integrated Writing Structure",
+        "TOEFL Timed Mock Test Practice",
+      ];
+    }
+    if (normalizedField === "html" || normalizedField.includes("html")) {
+      return [
+        "HTML Basics",
+        "Semantic HTML",
+        "Forms and Inputs",
+        "HTML Structure Practice",
+        "Tables and Media Embeds",
+        "Accessible Markup Patterns",
+        "HTML Page Layout Workshop",
+      ];
+    }
+    return [];
+  })();
 
   for (let i = 0; i < totalSteps; i += 1) {
     const progress = totalSteps <= 1 ? 0 : i / (totalSteps - 1);
     const difficultyIndex = Math.min(4, Math.max(0, Math.floor(progress * 5)));
     const difficulty = difficultyByIndex[difficultyIndex];
     const stepNo = i + 1;
+    const focusLabel =
+      stepNo <= 2
+        ? "Foundations"
+        : stepNo <= Math.max(3, Math.floor(totalSteps * 0.65))
+        ? "Guided Practice"
+        : "Performance Practice";
+    const catalogTitle = fallbackTitleCatalog[i] ?? "";
+    const stepTitle = catalogTitle || `${input.fieldTitle} ${focusLabel} ${stepNo}`;
     steps.push({
-      step_number: stepNo,
-      step_title: `${input.fieldTitle} Milestone ${stepNo}`,
-      step_description: `Build a stronger ${input.fieldTitle} foundation with milestone ${stepNo}.`,
-      learning_objective: `Reach milestone ${stepNo} from ${input.startLevel} toward ${input.targetLevel}.`,
-      difficulty_level: difficulty,
-      skill_tags: [`${input.fieldTitle.toLowerCase()}-core`, `milestone-${stepNo}`],
-      concept_tags: [`concept-${stepNo}`, `level-${difficulty}`],
+      title: stepTitle,
+      description: `Practice ${input.fieldTitle} through ${focusLabel.toLowerCase()} step ${stepNo}.`,
+      objective: `Move from ${input.startLevel} toward ${input.targetLevel} with ${focusLabel.toLowerCase()} outcomes.`,
+      difficulty,
+      skill_tags: [`${input.fieldTitle.toLowerCase()}-core`, `${focusLabel.toLowerCase().replace(/\s+/g, "-")}-${stepNo}`],
+      concept_tags: [`${input.fieldTitle.toLowerCase()}-concept-${stepNo}`, `level-${difficulty}`],
     });
   }
 
   return {
-    template_name: `${input.fieldTitle} ${input.startLevel} to ${input.targetLevel}`,
-    total_steps: totalSteps,
-    steps,
+    journey_plan: steps.slice(0, totalSteps),
   };
 }
 
@@ -162,6 +281,8 @@ export async function resolveOrCreateJourneyTemplate(params: {
   desiredTotalSteps?: number | null;
   userPreferenceProfile?: ResourcePreferenceProfile | null;
 }): Promise<JourneyTemplateResult> {
+  installAiPipelineDebugLogFilter();
+
   const templateSourceHash = sha256Hash({
     learning_field_id: params.learningFieldId,
     start_level: params.startLevel,
@@ -192,6 +313,12 @@ export async function resolveOrCreateJourneyTemplate(params: {
       if (templateId) {
         const loadedSteps = await loadTemplateSteps(templateId);
         if (loadedSteps.length > 0) {
+          if (hasGenericStepTitles(loadedSteps)) {
+            console.info("[journey_ai] template_reuse_skipped_placeholder_titles", {
+              learning_field_id: params.learningFieldId,
+              template_id: templateId,
+            });
+          } else {
           console.info("[journey_ai] template_reuse", {
             learning_field_id: params.learningFieldId,
             template_id: templateId,
@@ -216,6 +343,7 @@ export async function resolveOrCreateJourneyTemplate(params: {
             },
             steps: loadedSteps,
           };
+          }
         }
       }
     }
@@ -230,44 +358,236 @@ export async function resolveOrCreateJourneyTemplate(params: {
 
   const preferenceProfile =
     params.userPreferenceProfile ?? (await loadUserResourcePreferenceProfile(params.userId));
-  const { output, provenance } = await generateStructuredJson({
-    feature: "journey_template",
-    promptVersion: "journey_template_v1",
-    systemInstruction: [
-      "You are a learning journey planner.",
-      "Return a concise JSON journey plan only.",
-      "Each step must include title, description, objective, difficulty, skill_tags and concept_tags.",
-      "Create progressively harder steps from start to target level.",
-    ].join(" "),
-    input: {
-      learning_field_id: params.learningFieldId,
-      field_title: params.fieldTitle,
-      start_level: params.startLevel,
-      target_level: params.targetLevel,
-      desired_total_steps: params.desiredTotalSteps ?? null,
-      user_preference_profile: preferenceProfile,
-    },
-    outputSchema: journeyTemplateOutputSchema,
-    fallback: () =>
-      buildDeterministicJourneyPlan({
-        fieldTitle: params.fieldTitle,
-        startLevel: params.startLevel,
-        targetLevel: params.targetLevel,
-        desiredTotalSteps: params.desiredTotalSteps ?? null,
-      }),
+  const promptFieldTitle = toStringValue(params.fieldTitle).trim();
+  const promptStartLevel = toStringValue(params.startLevel).trim();
+  const promptTargetLevel = toStringValue(params.targetLevel).trim();
+  const systemInstruction = [
+    "You are a learning journey planner.",
+    "Return JSON only with this exact top-level field: journey_plan (array).",
+    "Each journey_plan item must include: title, description, objective, difficulty, skill_tags, concept_tags.",
+    "Create progressively harder steps from start to target level.",
+    "difficulty must be exactly one of: beginner, basic, intermediate, advanced, expert.",
+    "Use lowercase difficulty values only.",
+    "Do not use capitalized values like Beginner, Intermediate, Advanced, Expert.",
+    "Do not return any difficulty value outside the allowed lowercase enum.",
+    "Every title must be topic-specific and concrete. Avoid generic names like Applied Practice 7.",
+    "Examples for IELTS: IELTS Reading Foundations, IELTS Listening Strategies, IELTS Speaking Part 1 Basics, IELTS Task 2 Writing Structure.",
+    "Examples for TOEFL: TOEFL Reading Foundations, TOEFL Listening Note-Taking, TOEFL Speaking Task 1 Strategies, TOEFL Independent Writing Basics.",
+    "Examples for HTML: HTML Basics, Semantic HTML, Forms and Inputs, HTML Structure Practice.",
+  ].join(" ").trim();
+  const missingPromptFields = [
+    promptFieldTitle ? null : "field_title",
+    promptStartLevel ? null : "start_level",
+    promptTargetLevel ? null : "target_level",
+    systemInstruction ? null : "system_instruction",
+  ].filter((value): value is string => Boolean(value));
+
+  console.info("[journey_template] prompt_ready", {
+    learning_field_id: params.learningFieldId,
+    has_field_title: Boolean(promptFieldTitle),
+    has_start_level: Boolean(promptStartLevel),
+    has_target_level: Boolean(promptTargetLevel),
+    missing_fields: missingPromptFields,
   });
 
-  const normalizedSteps = normalizeSteps(
-    output.steps as JourneyPlanStep[],
-    Math.max(1, Math.floor(output.total_steps)),
+  let output: z.infer<typeof journeyTemplateOutputSchema>;
+  let provenance: AiProvenance;
+  let debug: { ai_called: boolean; raw_response_text: string | null; parsed_output_json: unknown | null };
+
+  if (missingPromptFields.length > 0) {
+    console.error("[journey_template] api_request_started", {
+      learning_field_id: params.learningFieldId,
+      skipped: true,
+      reason: "missing_required_prompt_input",
+    });
+    console.error("[journey_template] api_request_succeeded", {
+      learning_field_id: params.learningFieldId,
+      provider: "deterministic",
+      model: "deterministic-fallback",
+      fallback_used: true,
+    });
+    console.error("[journey_template] raw_response_received", {
+      learning_field_id: params.learningFieldId,
+      raw_response_text: null,
+      parsed_output_json: null,
+    });
+    output = buildDeterministicJourneyPlan({
+      fieldTitle: promptFieldTitle || "Learning",
+      startLevel: promptStartLevel || "Beginner",
+      targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
+      desiredTotalSteps: params.desiredTotalSteps ?? null,
+    });
+    provenance = {
+      provider: "deterministic",
+      model: "deterministic-fallback",
+      prompt_version: "journey_template_v1",
+      generated_at: new Date().toISOString(),
+      fallback_used: true,
+      failure_reason: `Missing prompt fields: ${missingPromptFields.join(", ")}`,
+    };
+    debug = {
+      ai_called: false,
+      raw_response_text: null,
+      parsed_output_json: output,
+    };
+  } else {
+    console.info("[journey_template] api_request_started", {
+      learning_field_id: params.learningFieldId,
+      field_title: promptFieldTitle,
+      start_level: promptStartLevel,
+      target_level: promptTargetLevel,
+      desired_total_steps: params.desiredTotalSteps ?? null,
+    });
+    const generation = await generateStructuredJson({
+      feature: "journey_template",
+      promptVersion: "journey_template_v1",
+      systemInstruction,
+      input: {
+        learning_field_id: params.learningFieldId,
+        field_title: promptFieldTitle,
+        start_level: promptStartLevel,
+        target_level: promptTargetLevel,
+        desired_total_steps: params.desiredTotalSteps ?? null,
+        user_preference_profile: preferenceProfile,
+      },
+      outputSchema: journeyTemplateLooseOutputSchema,
+      fallback: () =>
+        buildDeterministicJourneyPlan({
+          fieldTitle: promptFieldTitle || "Learning",
+          startLevel: promptStartLevel || "Beginner",
+          targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
+          desiredTotalSteps: params.desiredTotalSteps ?? null,
+        }),
+    });
+    const looseOutput = generation.output;
+    provenance = generation.provenance;
+    debug = generation.debug;
+
+    console.info("[journey_template] api_request_succeeded", {
+      learning_field_id: params.learningFieldId,
+      provider: provenance.provider,
+      model: provenance.model,
+      fallback_used: provenance.fallback_used,
+      failure_reason: provenance.failure_reason,
+    });
+    console.info("[journey_template] raw_response_received", {
+      learning_field_id: params.learningFieldId,
+      raw_response_text: debug.raw_response_text,
+      parsed_output_json: debug.parsed_output_json,
+    });
+
+    console.info("[journey_template] normalization_started", {
+      learning_field_id: params.learningFieldId,
+      step_count: looseOutput.journey_plan.length,
+    });
+    const normalizedOutput = {
+      journey_plan: normalizeJourneyPlanForValidation(looseOutput.journey_plan),
+    };
+    console.info("[journey_template] normalization_completed", {
+      learning_field_id: params.learningFieldId,
+      step_count: normalizedOutput.journey_plan.length,
+    });
+
+    const strictParsed = journeyTemplateOutputSchema.safeParse(normalizedOutput);
+    if (!strictParsed.success) {
+      console.error("[journey_template] schema_validation_failed", {
+        learning_field_id: params.learningFieldId,
+        issue: strictParsed.error.issues[0]?.message ?? "Unknown schema issue",
+        issues: strictParsed.error.issues,
+      });
+      output = buildDeterministicJourneyPlan({
+        fieldTitle: promptFieldTitle || "Learning",
+        startLevel: promptStartLevel || "Beginner",
+        targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
+        desiredTotalSteps: params.desiredTotalSteps ?? null,
+      });
+      provenance = {
+        provider: "deterministic",
+        model: "deterministic-fallback",
+        prompt_version: "journey_template_v1",
+        generated_at: new Date().toISOString(),
+        fallback_used: true,
+        failure_reason: "schema_validation_failed_after_normalization",
+      };
+      debug = {
+        ai_called: true,
+        raw_response_text: debug.raw_response_text,
+        parsed_output_json: normalizedOutput,
+      };
+    } else {
+      console.info("[journey_template] schema_validation_succeeded", {
+        learning_field_id: params.learningFieldId,
+        step_count: strictParsed.data.journey_plan.length,
+      });
+      output = strictParsed.data;
+    }
+  }
+
+  if (missingPromptFields.length > 0) {
+    console.info("[journey_template] normalization_started", {
+      learning_field_id: params.learningFieldId,
+      step_count: output.journey_plan.length,
+    });
+    const normalizedOutput = {
+      journey_plan: normalizeJourneyPlanForValidation(output.journey_plan),
+    };
+    console.info("[journey_template] normalization_completed", {
+      learning_field_id: params.learningFieldId,
+      step_count: normalizedOutput.journey_plan.length,
+    });
+    const strictParsed = journeyTemplateOutputSchema.safeParse(normalizedOutput);
+    if (!strictParsed.success) {
+      console.error("[journey_template] schema_validation_failed", {
+        learning_field_id: params.learningFieldId,
+        issue: strictParsed.error.issues[0]?.message ?? "Unknown schema issue",
+        issues: strictParsed.error.issues,
+      });
+      output = buildDeterministicJourneyPlan({
+        fieldTitle: promptFieldTitle || "Learning",
+        startLevel: promptStartLevel || "Beginner",
+        targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
+        desiredTotalSteps: params.desiredTotalSteps ?? null,
+      });
+    } else {
+      console.info("[journey_template] schema_validation_succeeded", {
+        learning_field_id: params.learningFieldId,
+        step_count: strictParsed.data.journey_plan.length,
+      });
+      output = strictParsed.data;
+    }
+  }
+
+  console.info("[journey_template] parsed_journey_plan_count", {
+    learning_field_id: params.learningFieldId,
+    count: Array.isArray(output.journey_plan) ? output.journey_plan.length : 0,
+  });
+
+  const estimatedTotal = estimateSteps(
+    promptStartLevel || "Beginner",
+    promptTargetLevel || "Intermediate",
+    params.desiredTotalSteps ?? null,
   );
+  const normalizedSteps = normalizeSteps(
+    output.journey_plan,
+    Math.max(1, estimatedTotal),
+  );
+  console.info("[journey_template] generation_result", {
+    learning_field_id: params.learningFieldId,
+    field_title: params.fieldTitle,
+    ai_called: debug.ai_called,
+    provider: provenance.provider,
+    model: provenance.model,
+    fallback_used: provenance.fallback_used,
+    raw_ai_response_text: debug.raw_response_text,
+    parsed_ai_json: debug.parsed_output_json,
+    normalized_step_count: normalizedSteps.length,
+  });
   const normalizedTotalSteps = normalizedSteps.length;
   const sourceHash = sha256Hash({
     base_hash: templateSourceHash,
     output: {
-      template_name: output.template_name,
+      journey_plan: normalizedSteps,
       total_steps: normalizedTotalSteps,
-      steps: normalizedSteps,
     },
   });
 
@@ -279,7 +599,7 @@ export async function resolveOrCreateJourneyTemplate(params: {
       .from("learning_field_templates")
       .insert({
         learning_field_id: params.learningFieldId,
-        template_name: output.template_name,
+        template_name: `${promptFieldTitle || "Learning"} ${promptStartLevel || "Start"} to ${promptTargetLevel || "Target"}`,
         start_level: params.startLevel,
         target_level: params.targetLevel,
         desired_total_steps: params.desiredTotalSteps ?? null,
@@ -300,9 +620,15 @@ export async function resolveOrCreateJourneyTemplate(params: {
         ),
         template_json: JSON.parse(
           toStableJson({
-            template_name: output.template_name,
+            journey_plan: normalizedSteps.map((step) => ({
+              title: step.step_title,
+              description: step.step_description,
+              objective: step.learning_objective,
+              difficulty: step.difficulty_level,
+              skill_tags: step.skill_tags,
+              concept_tags: step.concept_tags,
+            })),
             total_steps: normalizedTotalSteps,
-            steps: normalizedSteps,
           }),
         ),
         ai_provider: provenance.provider,
@@ -396,37 +722,25 @@ export async function instantiateUserLearningJourney(params: {
   template: JourneyTemplateResult;
 }) {
   try {
-    const payload = {
-      user_id: params.userId,
+    console.info("[migration_cleanup] replaced_with_source_of_truth", {
+      old_table: "user_learning_journeys",
+      new_table: "journey_paths",
       journey_path_id: params.journeyPathId,
-      learning_field_id: params.learningFieldId,
-      learning_field_template_id: params.template.template_id,
-      start_level: params.startLevel,
-      target_level: params.targetLevel,
-      total_steps: params.totalSteps,
-      current_step: Math.max(1, params.currentStep),
-      status: params.currentStep >= params.totalSteps ? "completed" : "active",
-      template_version: params.template.template_version,
-      source_hash: params.template.source_hash,
-      generation_input_json: {
-        start_level: params.startLevel,
-        target_level: params.targetLevel,
-      },
-      adaptation_json: {
-        reused_existing: params.template.reused_existing,
-      },
-      ai_provider: params.template.ai_provenance.provider,
-      ai_model: params.template.ai_provenance.model,
-      ai_prompt_version: params.template.ai_provenance.prompt_version,
-      ai_generated_at: params.template.ai_provenance.generated_at,
-      updated_at: new Date().toISOString(),
-    };
+      user_id: params.userId,
+    });
 
     const { error } = await supabaseAdmin
-      .from("user_learning_journeys")
-      .upsert(payload, {
-        onConflict: "user_id,journey_path_id",
-      });
+      .from("journey_paths")
+      .update({
+        user_id: params.userId,
+        learning_field_id: params.learningFieldId,
+        starting_point: params.startLevel,
+        destination: params.targetLevel,
+        total_steps: Math.max(1, params.totalSteps),
+      })
+      .eq("id", params.journeyPathId)
+      .eq("user_id", params.userId)
+      .eq("learning_field_id", params.learningFieldId);
 
     if (error) {
       throw error;

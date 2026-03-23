@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
 import { isStartCourseError, startCourseProgress } from "@/lib/journeyProgression";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,13 @@ type StartCourseResponse = {
   success: boolean;
   message?: string;
   resource_url?: string;
+  progress?: {
+    id: string;
+    status: "locked" | "unlocked" | "in_progress" | "ready_for_test" | "passed";
+    selected_resource_id: string | null;
+    started_at: string | null;
+    last_activity_at: string | null;
+  };
 };
 
 export async function POST(request: Request) {
@@ -52,11 +60,79 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 400 });
     }
 
-    console.info("[api/course/start] payload", {
+    console.info("[start_learning] request_received", {
       user_id: sessionUser.id,
       course_id: parsed.data.course_id,
       journey_path_id: parsed.data.journey_path_id,
       selected_resource_id: parsed.data.selected_resource_id,
+    });
+    // Validate selected resource against source-of-truth options table.
+    const { data: selectedOptionRow, error: selectedOptionError } = await supabaseAdmin
+      .from("course_resource_options")
+      .select("id, course_id, title, resource_type")
+      .eq("id", parsed.data.selected_resource_id)
+      .eq("course_id", parsed.data.course_id)
+      .limit(1)
+      .maybeSingle();
+    if (selectedOptionError || !selectedOptionRow) {
+      console.error("[start_learning] selected_resource_lookup_failed", {
+        user_id: sessionUser.id,
+        course_id: parsed.data.course_id,
+        journey_path_id: parsed.data.journey_path_id,
+        selected_resource_id: parsed.data.selected_resource_id,
+        reason: selectedOptionError ? selectedOptionError.message : "resource_not_found",
+        code:
+          (selectedOptionError as unknown as Record<string, unknown> | null)?.code ?? null,
+        details:
+          (selectedOptionError as unknown as Record<string, unknown> | null)?.details ?? null,
+        hint: (selectedOptionError as unknown as Record<string, unknown> | null)?.hint ?? null,
+      });
+      const payload: StartCourseResponse = {
+        success: false,
+        message: "Selected resource not found.",
+      };
+      return NextResponse.json(payload, { status: 400 });
+    }
+    console.info("[start_learning] selected_resource_lookup_succeeded", {
+      user_id: sessionUser.id,
+      course_id: parsed.data.course_id,
+      journey_path_id: parsed.data.journey_path_id,
+      selected_resource_id: parsed.data.selected_resource_id,
+      selected_resource_title: (selectedOptionRow as Record<string, unknown>).title ?? null,
+    });
+
+    const selectedAt = new Date().toISOString();
+    const selectionUpsertPayload = {
+      user_id: sessionUser.id,
+      course_id: parsed.data.course_id,
+      resource_option_id: parsed.data.selected_resource_id,
+      selected_at: selectedAt,
+    };
+    const { error: selectionUpsertError } = await supabaseAdmin
+      .from("user_course_resource_selections")
+      .upsert(selectionUpsertPayload, { onConflict: "user_id,course_id" });
+    if (selectionUpsertError) {
+      console.error("[resource_selection] upsert_failed", {
+        user_id: sessionUser.id,
+        course_id: parsed.data.course_id,
+        resource_option_id: parsed.data.selected_resource_id,
+        selected_at: selectedAt,
+        reason: selectionUpsertError.message,
+        code: (selectionUpsertError as unknown as Record<string, unknown>).code ?? null,
+        details: (selectionUpsertError as unknown as Record<string, unknown>).details ?? null,
+        hint: (selectionUpsertError as unknown as Record<string, unknown>).hint ?? null,
+      });
+      const payload: StartCourseResponse = {
+        success: false,
+        message: "Unable to save selected resource right now.",
+      };
+      return NextResponse.json(payload, { status: 500 });
+    }
+    console.info("[resource_selection] upsert_succeeded", {
+      user_id: sessionUser.id,
+      course_id: parsed.data.course_id,
+      resource_option_id: parsed.data.selected_resource_id,
+      selected_at: selectedAt,
     });
 
     currentStep = "start_course_progress";
@@ -75,7 +151,7 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 403 });
     }
 
-    console.info("[api/course/start] success", {
+    console.info("[start_learning] request_succeeded", {
       user_id: sessionUser.id,
       course_id: parsed.data.course_id,
       journey_path_id: parsed.data.journey_path_id,
@@ -87,13 +163,14 @@ export async function POST(request: Request) {
       success: true,
       message: "Course started.",
       resource_url: started.resource_url,
+      progress: started.progress,
     };
     return NextResponse.json(payload);
   } catch (error) {
     const failedStep = isStartCourseError(error) ? error.step : currentStep;
     const message = error instanceof Error ? error.message : String(error);
 
-    console.error("[api/course/start] failed", {
+    console.error("[start_learning] request_failed", {
       route_step: currentStep,
       failed_step: failedStep,
       message,
@@ -101,17 +178,32 @@ export async function POST(request: Request) {
       error,
     });
 
-    if (
-      isStartCourseError(error) &&
-      (message === "Selected resource not found." ||
-        message === "Selected resource URL is missing." ||
-        message === "Failed to load selected resource.")
-    ) {
+    if (isStartCourseError(error)) {
+      let status = 400;
+      let responseMessage = message;
+
+      if (error.step === "fetch_resource_row") {
+        responseMessage =
+          message === "Selected resource not found."
+            ? "Selected resource lookup failed."
+            : message;
+        status = 400;
+      } else if (error.step === "validate_resource_url") {
+        responseMessage = "Selected resource is missing a valid URL.";
+        status = 400;
+      } else if (error.step === "progress_write" || error.step === "start_learning_course_rpc") {
+        responseMessage = "Progress write failed.";
+        status = 500;
+      } else if (message.toLowerCase().includes("legacy")) {
+        responseMessage = "Legacy lookup path failure.";
+        status = 500;
+      }
+
       const payload: StartCourseResponse = {
         success: false,
-        message,
+        message: responseMessage,
       };
-      return NextResponse.json(payload, { status: 400 });
+      return NextResponse.json(payload, { status });
     }
 
     const payload: StartCourseResponse = {

@@ -4,11 +4,11 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getPasswordRuleChecks,
+  validateCaptchaInput,
   validateConfirmPassword,
   validateEmail,
   validatePassword,
   validateUsername,
-  validateVerificationCode,
 } from "@/lib/clientValidation";
 
 type FormValues = {
@@ -16,7 +16,8 @@ type FormValues = {
   email: string;
   password: string;
   confirmPassword: string;
-  verificationCode: string;
+  captchaInput: string;
+  captchaToken: string;
 };
 
 type FormErrors = Partial<Record<keyof FormValues, string>>;
@@ -27,7 +28,8 @@ const EMPTY_FORM: FormValues = {
   email: "",
   password: "",
   confirmPassword: "",
-  verificationCode: "",
+  captchaInput: "",
+  captchaToken: "",
 };
 
 export default function RegisterForm() {
@@ -36,11 +38,12 @@ export default function RegisterForm() {
   const [errors, setErrors] = useState<FormErrors>({});
   const [touched, setTouched] = useState<FormTouched>({});
   const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [codeMessage, setCodeMessage] = useState("");
-  const [isCodeMessageError, setIsCodeMessageError] = useState(false);
+  const [captchaSvgDataUrl, setCaptchaSvgDataUrl] = useState("");
+  const [captchaMessage, setCaptchaMessage] = useState("");
+  const [isCaptchaMessageError, setIsCaptchaMessageError] = useState(false);
   const [submitMessage, setSubmitMessage] = useState("");
   const [isSubmitMessageError, setIsSubmitMessageError] = useState(false);
-  const [isSendingCode, setIsSendingCode] = useState(false);
+  const [isCaptchaLoading, setIsCaptchaLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const redirectTimeoutRef = useRef<number | null>(null);
 
@@ -50,12 +53,59 @@ export default function RegisterForm() {
   );
 
   useEffect(() => {
+    void loadCaptcha(false);
     return () => {
       if (redirectTimeoutRef.current !== null) {
         window.clearTimeout(redirectTimeoutRef.current);
       }
     };
   }, []);
+
+  async function loadCaptcha(clearInput: boolean) {
+    setIsCaptchaLoading(true);
+    try {
+      const response = await fetch("/api/auth/captcha", {
+        method: "GET",
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as {
+        success: boolean;
+        captchaToken?: string;
+        captchaSvgDataUrl?: string;
+        message?: string;
+      };
+      if (!response.ok || !payload.success || !payload.captchaToken || !payload.captchaSvgDataUrl) {
+        setCaptchaMessage(payload.message || "Unable to load CAPTCHA. Please refresh.");
+        setIsCaptchaMessageError(true);
+        setCaptchaSvgDataUrl("");
+        setFormValues((prev) => ({
+          ...prev,
+          captchaToken: "",
+          captchaInput: clearInput ? "" : prev.captchaInput,
+        }));
+        return;
+      }
+      setCaptchaSvgDataUrl(payload.captchaSvgDataUrl);
+      setCaptchaMessage("");
+      setIsCaptchaMessageError(false);
+      setFormValues((prev) => ({
+        ...prev,
+        captchaToken: payload.captchaToken!,
+        captchaInput: clearInput ? "" : prev.captchaInput,
+      }));
+    } catch {
+      setCaptchaMessage("Unable to load CAPTCHA. Please refresh.");
+      setIsCaptchaMessageError(true);
+      setCaptchaSvgDataUrl("");
+      setFormValues((prev) => ({
+        ...prev,
+        captchaToken: "",
+        captchaInput: clearInput ? "" : prev.captchaInput,
+      }));
+    } finally {
+      setIsCaptchaLoading(false);
+    }
+  }
 
   function validate(values: FormValues): FormErrors {
     const nextErrors: FormErrors = {};
@@ -85,9 +135,13 @@ export default function RegisterForm() {
       nextErrors.confirmPassword = confirmError;
     }
 
-    const verificationError = validateVerificationCode(values.verificationCode);
-    if (verificationError) {
-      nextErrors.verificationCode = verificationError;
+    const captchaError = validateCaptchaInput(values.captchaInput);
+    if (captchaError) {
+      nextErrors.captchaInput = captchaError;
+    }
+
+    if (!values.captchaToken.trim()) {
+      nextErrors.captchaToken = "CAPTCHA challenge unavailable. Please refresh.";
     }
 
     return nextErrors;
@@ -98,7 +152,11 @@ export default function RegisterForm() {
   }
 
   function handleChange(field: keyof FormValues, value: string) {
-    const nextValues = { ...formValues, [field]: value };
+    const normalizedValue =
+      field === "captchaInput"
+        ? value.toUpperCase().replace(/\s+/g, "")
+        : value;
+    const nextValues = { ...formValues, [field]: normalizedValue };
     setFormValues(nextValues);
     setErrors(validate(nextValues));
     markTouched(field);
@@ -126,9 +184,10 @@ export default function RegisterForm() {
   }
 
   function hasFieldValue(field: keyof FormValues) {
-    return field === "password"
-      ? formValues.password.length > 0
-      : formValues[field].trim().length > 0;
+    if (field === "password") {
+      return formValues.password.length > 0;
+    }
+    return formValues[field].trim().length > 0;
   }
 
   function getInputClassName(field: keyof FormValues) {
@@ -141,61 +200,6 @@ export default function RegisterForm() {
       return `${baseClassName} border-[#58CC02] bg-[#f8ffef] focus:border-[#58CC02] focus:ring-[#58CC02]/20`;
     }
     return `${baseClassName} border-[#1F2937]/15 focus:border-[#58CC02] focus:ring-[#58CC02]/20`;
-  }
-
-  async function handleSendCode() {
-    const emailError =
-      validateEmail(formValues.email, "Please enter your email before sending a code.") ||
-      (formValues.email.trim() &&
-      validateEmail(formValues.email)
-        ? "Please enter a valid email address before sending a code."
-        : undefined);
-
-    markTouched("email");
-
-    if (emailError) {
-      setErrors((prev) => ({ ...prev, email: emailError }));
-      setCodeMessage("");
-      setIsCodeMessageError(true);
-      return;
-    }
-
-    setIsSendingCode(true);
-    setErrors((prev) => ({ ...prev, email: undefined }));
-
-    try {
-      const response = await fetch("/api/auth/send-verification-code", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: formValues.email.trim() }),
-      });
-
-      const payload = (await response.json()) as {
-        success: boolean;
-        message: string;
-        devCode?: string;
-      };
-
-      if (!response.ok || !payload.success) {
-        setCodeMessage(payload.message || "Failed to send verification code.");
-        setIsCodeMessageError(true);
-        return;
-      }
-
-      const message = payload.devCode
-        ? `${payload.message} (dev code: ${payload.devCode})`
-        : payload.message;
-
-      setCodeMessage(message);
-      setIsCodeMessageError(false);
-    } catch {
-      setCodeMessage("Failed to send verification code.");
-      setIsCodeMessageError(true);
-    } finally {
-      setIsSendingCode(false);
-    }
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -222,29 +226,35 @@ export default function RegisterForm() {
           email: formValues.email.trim(),
           password: formValues.password,
           confirmPassword: formValues.confirmPassword,
-          verificationCode: formValues.verificationCode.trim(),
+          captchaInput: formValues.captchaInput.trim(),
+          captchaToken: formValues.captchaToken,
         }),
       });
 
       const payload = (await response.json()) as {
         success: boolean;
         message: string;
+        refreshCaptcha?: boolean;
       };
 
       if (!response.ok || !payload.success) {
         setSubmitMessage(payload.message || "Failed to create account.");
         setIsSubmitMessageError(true);
+        if (payload.refreshCaptcha) {
+          await loadCaptcha(true);
+        }
         return;
       }
 
       setSubmitMessage("Account created successfully! Redirecting to login...");
       setIsSubmitMessageError(false);
-      setCodeMessage("");
-      setIsCodeMessageError(false);
+      setCaptchaMessage("");
+      setIsCaptchaMessageError(false);
       setFormValues(EMPTY_FORM);
       setErrors({});
       setTouched({});
       setHasSubmitted(false);
+      await loadCaptcha(true);
 
       redirectTimeoutRef.current = window.setTimeout(() => {
         router.push("/login");
@@ -262,7 +272,7 @@ export default function RegisterForm() {
   const validClassName =
     "mt-2 rounded-xl bg-[#ecffe1] px-3 py-2 text-sm font-semibold text-[#2f7d14]";
   const formIsValid = Object.keys(validate(formValues)).length === 0;
-  const shouldDisableSubmit = isSubmitting || isSendingCode || !formIsValid;
+  const shouldDisableSubmit = isSubmitting || isCaptchaLoading || !formIsValid;
 
   return (
     <div className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_20px_28px_rgba(31,41,55,0.12)] sm:p-8">
@@ -392,47 +402,63 @@ export default function RegisterForm() {
 
         <div>
           <label
-            htmlFor="register-code"
+            htmlFor="register-captcha"
             className="mb-2 block text-sm font-bold text-[#1F2937]"
           >
-            Email Verification Code
+            CAPTCHA
           </label>
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="rounded-2xl border-2 border-[#1F2937]/15 bg-[#f8fbff] p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="overflow-hidden rounded-xl border-2 border-[#1F2937]/20 bg-white p-2">
+                {captchaSvgDataUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={captchaSvgDataUrl} alt="CAPTCHA challenge" className="h-[74px] w-[220px]" />
+                ) : (
+                  <div className="flex h-[74px] w-[220px] items-center justify-center text-sm font-semibold text-[#1F2937]/55">
+                    {isCaptchaLoading ? "Loading CAPTCHA..." : "CAPTCHA unavailable"}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadCaptcha(true)}
+                disabled={isCaptchaLoading || isSubmitting}
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isCaptchaLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
             <input
-              id="register-code"
+              id="register-captcha"
               type="text"
-              value={formValues.verificationCode}
-              onChange={(event) => handleChange("verificationCode", event.target.value)}
-              onBlur={() => handleBlur("verificationCode")}
-              className={getInputClassName("verificationCode")}
-              placeholder="Enter code"
-              aria-invalid={shouldShowError("verificationCode")}
+              value={formValues.captchaInput}
+              onChange={(event) => handleChange("captchaInput", event.target.value)}
+              onBlur={() => handleBlur("captchaInput")}
+              className={`${getInputClassName("captchaInput")} mt-3`}
+              placeholder="Type the characters above"
+              aria-invalid={shouldShowError("captchaInput")}
+              autoComplete="off"
             />
-            <button
-              type="button"
-              onClick={handleSendCode}
-              disabled={isSendingCode || isSubmitting}
-              className="btn-3d btn-3d-white inline-flex h-12 shrink-0 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {isSendingCode ? "Sending..." : "Send Code"}
-            </button>
           </div>
-          {codeMessage ? (
+
+          {captchaMessage ? (
             <p
               className={`mt-2 rounded-xl px-3 py-2 text-sm font-semibold ${
-                isCodeMessageError
+                isCaptchaMessageError
                   ? "bg-[#fff1f1] text-[#c62828]"
                   : "bg-[#ecffe1] text-[#2f7d14]"
               }`}
             >
-              {codeMessage}
+              {captchaMessage}
             </p>
           ) : null}
-          {shouldShowError("verificationCode") ? (
-            <p className={errorClassName}>{errors.verificationCode}</p>
+
+          {shouldShowError("captchaInput") ? (
+            <p className={errorClassName}>{errors.captchaInput}</p>
           ) : null}
-          {shouldShowValid("verificationCode") ? (
-            <p className={validClassName}>Code format looks correct.</p>
+          {errors.captchaToken ? <p className={errorClassName}>{errors.captchaToken}</p> : null}
+          {shouldShowValid("captchaInput") ? (
+            <p className={validClassName}>CAPTCHA format looks correct.</p>
           ) : null}
         </div>
 
@@ -459,4 +485,3 @@ export default function RegisterForm() {
     </div>
   );
 }
-

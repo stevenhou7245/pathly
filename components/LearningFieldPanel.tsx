@@ -57,9 +57,9 @@ type CourseResource = {
   id: string;
   title: string;
   resource_type: string;
-  provider_name: string;
+  provider: string;
   url: string;
-  description: string | null;
+  summary: string | null;
   average_rating: number;
   comment_count: number;
   my_rating: number | null;
@@ -108,7 +108,7 @@ type CourseTestQuestion = {
   id: string;
   question_order: number;
   question_text: string;
-  question_type: "single_choice" | "fill_blank" | "essay";
+  question_type: "multiple_choice" | "fill_blank" | "short_answer";
   options: string[];
   score: number;
 };
@@ -149,7 +149,7 @@ type CourseTestSubmitApiResponse = {
     question_results: Array<{
       question_id: string;
       question_order: number;
-      question_type: "single_choice" | "fill_blank" | "essay";
+      question_type: "multiple_choice" | "fill_blank" | "short_answer";
       question_text: string;
       user_answer: string;
       correct_answer: string;
@@ -199,7 +199,7 @@ type CourseTestAttemptDetailApiResponse = {
     question_results: Array<{
       question_id: string;
       question_order: number;
-      question_type: "single_choice" | "fill_blank" | "essay";
+      question_type: "multiple_choice" | "fill_blank" | "short_answer";
       question_text: string;
       options: string[];
       user_answer: string;
@@ -233,7 +233,7 @@ type AiTestReviewResult = {
   question_results: Array<{
     question_id: string;
     question_order: number;
-    question_type: "single_choice" | "fill_blank" | "essay";
+    question_type: "multiple_choice" | "fill_blank" | "short_answer";
     question_text: string;
     options?: string[];
     user_answer: string;
@@ -1199,7 +1199,7 @@ export default function LearningFieldPanel({
       if (!response) {
         return true;
       }
-      if (question.question_type === "fill_blank" || question.question_type === "essay") {
+      if (question.question_type === "fill_blank" || question.question_type === "short_answer") {
         return response.answerText.trim().length === 0;
       }
       return response.selectedOptionIndex === null || response.selectedOptionIndex === undefined;
@@ -1233,11 +1233,11 @@ export default function LearningFieldPanel({
           answers: testQuestions.map((question) => ({
             question_id: question.id,
             selected_option_index:
-              question.question_type === "single_choice"
+              question.question_type === "multiple_choice"
                 ? testResponses[question.id]?.selectedOptionIndex ?? undefined
                 : undefined,
             user_answer_text:
-              question.question_type === "single_choice"
+              question.question_type === "multiple_choice"
                 ? testResponses[question.id]?.selectedOptionIndex !== null &&
                   testResponses[question.id]?.selectedOptionIndex !== undefined
                   ? question.options[testResponses[question.id]?.selectedOptionIndex ?? -1] ?? ""
@@ -1686,10 +1686,10 @@ export default function LearningFieldPanel({
                             {index + 1}. {resource.title}
                           </p>
                           <p className="mt-1 text-xs font-bold uppercase tracking-wide text-[#1F2937]/60">
-                            {formatResourceType(resource.resource_type)} · {resource.provider_name}
+                            {formatResourceType(resource.resource_type)} · {resource.provider}
                           </p>
                           <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">
-                            {resource.description ?? "No description available."}
+                            {resource.summary ?? "No summary available."}
                           </p>
                           <p className="mt-2 text-xs font-semibold text-[#1F2937]/65">
                             Rating: {resource.average_rating.toFixed(1)} / 5 · Comments: {resource.comment_count}
@@ -1865,7 +1865,7 @@ export default function LearningFieldPanel({
                             placeholder="Type your answer"
                           />
                         </div>
-                      ) : question.question_type === "essay" ? (
+                      ) : question.question_type === "short_answer" ? (
                         <div className="mt-3">
                           <textarea
                             value={testResponses[question.id]?.answerText ?? ""}
@@ -2092,3 +2092,4 @@ export default function LearningFieldPanel({
     </section>
   );
 }
+

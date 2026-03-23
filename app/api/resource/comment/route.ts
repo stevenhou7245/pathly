@@ -62,8 +62,13 @@ export async function POST(request: Request) {
     }
 
     step = "validate_resource";
+    console.info("[resource_feedback] comment_submit_started", {
+      user_id: sessionUser.id,
+      resource_option_id: parsed.data.resource_id,
+      key_mode: "resource_option_id",
+    });
     const { data: resourceRow, error: resourceError } = await supabaseAdmin
-      .from("course_resources")
+      .from("course_resource_options")
       .select("id")
       .eq("id", parsed.data.resource_id)
       .limit(1)
@@ -81,11 +86,21 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 404 });
     }
 
+    console.info("[resource_read] source_table_used", {
+      table: "course_resource_options",
+      resource_id: parsed.data.resource_id,
+    });
+    console.info("[resource_feedback] key_mode", {
+      key_mode: "resource_option_id",
+      resource_option_id: parsed.data.resource_id,
+    });
+
     step = "create_comment";
     const nowIso = new Date().toISOString();
     const { data: created, error: createError } = await supabaseAdmin
       .from("resource_comments")
       .insert({
+        resource_option_id: parsed.data.resource_id,
         resource_id: parsed.data.resource_id,
         user_id: sessionUser.id,
         comment_text: parsed.data.comment_text,
@@ -106,12 +121,20 @@ export async function POST(request: Request) {
       success: true,
       comment: {
         id: toStringValue((created as Record<string, unknown>).id),
-        resource_id: toStringValue((created as Record<string, unknown>).resource_id),
+        resource_id:
+          toStringValue((created as Record<string, unknown>).resource_option_id) ||
+          toStringValue((created as Record<string, unknown>).resource_id),
         comment_text: toStringValue((created as Record<string, unknown>).comment_text),
         created_at: toStringValue((created as Record<string, unknown>).created_at),
         username: sessionUser.username,
       },
     };
+    console.info("[resource_feedback] comment_submit_succeeded", {
+      user_id: sessionUser.id,
+      resource_option_id: parsed.data.resource_id,
+      key_mode: "resource_option_id",
+      comment_id: payload.comment?.id ?? null,
+    });
     return NextResponse.json(payload, { status: 201 });
   } catch (error) {
     console.error("Resource comment failed:", {

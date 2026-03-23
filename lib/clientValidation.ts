@@ -3,7 +3,7 @@ const USERNAME_REGEX = /^[A-Za-z0-9]+$/;
 const LETTER_REGEX = /[A-Za-z]/;
 const NUMBER_REGEX = /[0-9]/;
 const SPECIAL_CHAR_REGEX = /[^A-Za-z0-9]/;
-const VERIFICATION_CODE_REGEX = /^\d{6}$/;
+const CAPTCHA_REGEX = /^[A-Z2-9]{5,6}$/;
 
 export type PasswordRuleCheck = {
   key: "length" | "letter" | "number" | "special";
@@ -101,16 +101,16 @@ export function validateConfirmPassword(
   return undefined;
 }
 
-export function validateVerificationCode(
+export function validateCaptchaInput(
   value: string,
-  requiredMessage = "Verification code is required.",
+  requiredMessage = "CAPTCHA is required.",
 ) {
-  const verificationCode = value.trim();
-  if (!verificationCode) {
+  const captchaInput = value.trim().toUpperCase().replace(/\s+/g, "");
+  if (!captchaInput) {
     return requiredMessage;
   }
-  if (!VERIFICATION_CODE_REGEX.test(verificationCode)) {
-    return "Verification code must be a 6-digit number.";
+  if (!CAPTCHA_REGEX.test(captchaInput)) {
+    return "CAPTCHA must be 5-6 uppercase letters or digits.";
   }
   return undefined;
 }

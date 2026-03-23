@@ -67,8 +67,13 @@ export async function POST(request: Request) {
     }
 
     step = "validate_resource";
+    console.info("[resource_feedback] rating_submit_started", {
+      user_id: sessionUser.id,
+      resource_option_id: parsed.data.resource_id,
+      key_mode: "resource_option_id",
+    });
     const { data: resourceRow, error: resourceError } = await supabaseAdmin
-      .from("course_resources")
+      .from("course_resource_options")
       .select("id")
       .eq("id", parsed.data.resource_id)
       .limit(1)
@@ -86,12 +91,22 @@ export async function POST(request: Request) {
       return NextResponse.json(payload, { status: 404 });
     }
 
+    console.info("[resource_read] source_table_used", {
+      table: "course_resource_options",
+      resource_id: parsed.data.resource_id,
+    });
+    console.info("[resource_feedback] key_mode", {
+      key_mode: "resource_option_id",
+      resource_option_id: parsed.data.resource_id,
+    });
+
     step = "upsert_rating";
     const nowIso = new Date().toISOString();
     const { error: upsertError } = await supabaseAdmin
       .from("resource_ratings")
       .upsert(
         {
+          resource_option_id: parsed.data.resource_id,
           resource_id: parsed.data.resource_id,
           user_id: sessionUser.id,
           rating: parsed.data.rating,
@@ -111,7 +126,7 @@ export async function POST(request: Request) {
     const { data: ratings, error: ratingsError } = await supabaseAdmin
       .from("resource_ratings")
       .select("rating")
-      .eq("resource_id", parsed.data.resource_id);
+      .eq("resource_option_id", parsed.data.resource_id);
 
     if (ratingsError) {
       throw new Error("Failed to recalculate rating.");
@@ -131,6 +146,14 @@ export async function POST(request: Request) {
       rating_count: ratingCount,
       my_rating: parsed.data.rating,
     };
+    console.info("[resource_feedback] rating_submit_succeeded", {
+      user_id: sessionUser.id,
+      resource_option_id: parsed.data.resource_id,
+      key_mode: "resource_option_id",
+      rating: parsed.data.rating,
+      rating_count: ratingCount,
+      average_rating: averageRating,
+    });
     return NextResponse.json(payload);
   } catch (error) {
     console.error("Resource rating failed:", {

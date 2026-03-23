@@ -42,9 +42,9 @@ type GetCourseDetailsResponse = {
       resource_option_id: string | null;
       title: string;
       resource_type: string;
-      provider_name: string;
+      provider: string;
       url: string;
-      description: string | null;
+      summary: string | null;
       average_rating: number;
       comment_count: number;
       my_rating: number | null;

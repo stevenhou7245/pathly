@@ -21,18 +21,19 @@ export const passwordSchema = z
   .regex(/[0-9]/, "Password must include at least one number.")
   .regex(/[^A-Za-z0-9]/, "Password must include at least one special character.");
 
-export const verificationCodeSchema = z
+export const captchaInputSchema = z
   .string()
   .trim()
-  .regex(/^\d{6}$/, "Verification code must be a 6-digit number.");
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => /^[A-Z2-9]{5,6}$/.test(value),
+    "CAPTCHA input must be 5-6 uppercase letters or digits.",
+  );
 
-export const sendVerificationCodeSchema = z.object({
-  email: emailSchema,
-});
-
-export const sendResetCodeSchema = z.object({
-  email: emailSchema,
-});
+export const captchaTokenSchema = z
+  .string()
+  .trim()
+  .min(1, "CAPTCHA token is required.");
 
 export const loginRequestSchema = z.object({
   email: emailSchema,
@@ -42,18 +43,8 @@ export const loginRequestSchema = z.object({
 export const resetPasswordRequestSchema = z
   .object({
     email: emailSchema,
-    verificationCode: verificationCodeSchema,
-    newPassword: passwordSchema,
-    confirmNewPassword: z.string().min(1, "Confirm new password is required."),
-  })
-  .superRefine((value, ctx) => {
-    if (value.confirmNewPassword !== value.newPassword) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["confirmNewPassword"],
-        message: "Passwords do not match.",
-      });
-    }
+    captchaInput: captchaInputSchema,
+    captchaToken: captchaTokenSchema,
   });
 
 export const registerRequestSchema = z
@@ -62,7 +53,8 @@ export const registerRequestSchema = z
     email: emailSchema,
     password: passwordSchema,
     confirmPassword: z.string().min(1, "Confirm password is required."),
-    verificationCode: verificationCodeSchema,
+    captchaInput: captchaInputSchema,
+    captchaToken: captchaTokenSchema,
   })
   .superRefine((value, ctx) => {
     if (value.confirmPassword !== value.password) {

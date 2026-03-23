@@ -1,75 +1,124 @@
-import { Resend } from "resend";
+import { sendEmail, type SendEmailResult } from "@/lib/emailSender";
+import {
+  renderAutomatedLearningEmail,
+  renderLearningNudgeEmail,
+  renderWelcomeEmail,
+} from "@/lib/emailTemplates";
 
-type SendVerificationEmailResult =
+export type SendEmailModeResult =
   | {
       mode: "email";
+      providerMessageId: string | null;
     }
   | {
       mode: "development";
     };
 
-export async function sendVerificationCodeEmail(params: {
-  toEmail: string;
-  code: string;
-}) {
-  return sendAuthCodeEmail({
-    toEmail: params.toEmail,
-    code: params.code,
-    subject: "Your Pathly verification code",
-    heading: "Pathly Email Verification",
-    description: "Your verification code is:",
-  });
+function toSendModeResult(result: Extract<SendEmailResult, { ok: true }>): SendEmailModeResult {
+  if (result.mode === "development") {
+    return { mode: "development" };
+  }
+  return {
+    mode: "email",
+    providerMessageId: result.providerMessageId,
+  };
 }
 
-export async function sendResetCodeEmail(params: {
+async function dispatchOrThrow(params: {
   toEmail: string;
-  code: string;
-}) {
-  return sendAuthCodeEmail({
-    toEmail: params.toEmail,
-    code: params.code,
-    subject: "Your Pathly password reset code",
-    heading: "Pathly Password Reset",
-    description: "Your password reset code is:",
-  });
-}
-
-async function sendAuthCodeEmail(params: {
-  toEmail: string;
-  code: string;
   subject: string;
-  heading: string;
-  description: string;
+  html: string;
+  text: string;
+  tags: string[];
 }) {
-  const { toEmail, code } = params;
-  const apiKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.FROM_EMAIL;
+  const result = await sendEmail({
+    toEmail: params.toEmail,
+    subject: params.subject,
+    html: params.html,
+    text: params.text,
+    tags: params.tags,
+  });
 
-  if (!apiKey || !fromEmail) {
-    const result: SendVerificationEmailResult = { mode: "development" };
-    return result;
+  if (!result.ok) {
+    throw new Error(result.errorMessage || "Failed to send email.");
   }
 
-  const resend = new Resend(apiKey);
-
-  await resend.emails.send({
-    from: fromEmail,
-    to: toEmail,
-    subject: params.subject,
-    text: `${params.description} ${code}. It expires in 10 minutes.`,
-    html: `
-      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #1F2937;">
-        <h2 style="margin-bottom: 12px;">${params.heading}</h2>
-        <p>${params.description}</p>
-        <p style="font-size: 28px; font-weight: 700; letter-spacing: 6px; margin: 12px 0;">
-          ${code}
-        </p>
-        <p>This code expires in 10 minutes.</p>
-      </div>
-    `,
-  });
-
-  const result: SendVerificationEmailResult = { mode: "email" };
-  return result;
+  return toSendModeResult(result);
 }
 
+export async function sendWelcomeEmail(params: {
+  toEmail: string;
+  username?: string | null;
+}) {
+  const content = renderWelcomeEmail({
+    username: params.username,
+  });
+  return dispatchOrThrow({
+    toEmail: params.toEmail,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+    tags: ["lifecycle", "welcome"],
+  });
+}
+
+export async function sendLearningNudgeEmail(params: {
+  toEmail: string;
+  username?: string | null;
+  subject: string;
+  preheader: string;
+  headline: string;
+  intro: string;
+  actionItems: string[];
+  ctaLabel: string;
+  ctaUrl: string;
+}) {
+  const content = renderLearningNudgeEmail({
+    subject: params.subject,
+    preheader: params.preheader,
+    headline: params.headline,
+    intro: params.intro,
+    actionItems: params.actionItems,
+    ctaLabel: params.ctaLabel,
+    ctaUrl: params.ctaUrl,
+    username: params.username,
+  });
+  return dispatchOrThrow({
+    toEmail: params.toEmail,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+    tags: ["automation", "learning-nudge"],
+  });
+}
+
+export async function sendAutomatedLearningEmail(params: {
+  toEmail: string;
+  subject: string;
+  preheader: string;
+  greeting: string;
+  encouragement: string;
+  nextStep: string;
+  ctaLabel: string;
+  ctaUrl: string;
+  scenarioLabel: string;
+  tags?: string[];
+}) {
+  const content = renderAutomatedLearningEmail({
+    subject: params.subject,
+    preheader: params.preheader,
+    greeting: params.greeting,
+    encouragement: params.encouragement,
+    nextStep: params.nextStep,
+    ctaLabel: params.ctaLabel,
+    ctaUrl: params.ctaUrl,
+    scenarioLabel: params.scenarioLabel,
+  });
+  return dispatchOrThrow({
+    toEmail: params.toEmail,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+    tags: params.tags ?? ["automation", "learning"],
+  });
+}

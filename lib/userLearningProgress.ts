@@ -26,11 +26,13 @@ export type UserLearningFieldSummary = {
   percentage_progress: number;
 };
 
-type FieldGraphBundle = {
-  learningFieldsById: Map<string, GenericRecord>;
-  routesByFieldId: Map<string, GenericRecord[]>;
-  nodesByRouteId: Map<string, GenericRecord[]>;
-  nodeIds: string[];
+type JourneyRouteNode = {
+  id: string;
+  route_id: string;
+  course_id: string;
+  title: string;
+  description: string | null;
+  order_index: number;
 };
 
 function toStringValue(value: unknown) {
@@ -42,7 +44,16 @@ function toNullableString(value: unknown) {
 }
 
 function toNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
 }
 
 function getFieldTitle(field: GenericRecord | undefined) {
@@ -61,144 +72,95 @@ function getFieldTitle(field: GenericRecord | undefined) {
 }
 
 function getRouteTitle(route: GenericRecord) {
-  const title = toStringValue(route.title);
-  if (title) {
-    return title;
+  const explicit = toStringValue(route.title);
+  if (explicit) {
+    return explicit;
   }
-  const name = toStringValue(route.name);
-  if (name) {
-    return name;
-  }
-  return "Route";
+  const start = toStringValue(route.starting_point).trim() || "Current level";
+  const end = toStringValue(route.destination).trim() || "Target level";
+  return `${start} -> ${end}`;
 }
 
-function sortNodes(nodes: GenericRecord[]) {
-  return [...nodes].sort((a, b) => {
-    const aOrder = toNumber(a.order_index) || toNumber(a.position);
-    const bOrder = toNumber(b.order_index) || toNumber(b.position);
-    return aOrder - bOrder;
+async function loadJourneyPathRows(params: { userId: string; fieldIds: string[] }) {
+  if (params.fieldIds.length === 0) {
+    return [] as GenericRecord[];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("journey_paths")
+    .select("id, user_id, learning_field_id, total_steps, created_at, starting_point, destination")
+    .eq("user_id", params.userId)
+    .in("learning_field_id", params.fieldIds);
+
+  if (error) {
+    throw new Error("Failed to load journey paths.");
+  }
+
+  console.info("[journey_read] source_table_used", {
+    table: "journey_paths",
+    user_id: params.userId,
+    field_count: params.fieldIds.length,
   });
+
+  return (data ?? []) as GenericRecord[];
 }
 
-async function loadFieldGraphBundle(fieldIds: string[]): Promise<FieldGraphBundle> {
-  if (fieldIds.length === 0) {
-    return {
-      learningFieldsById: new Map<string, GenericRecord>(),
-      routesByFieldId: new Map<string, GenericRecord[]>(),
-      nodesByRouteId: new Map<string, GenericRecord[]>(),
-      nodeIds: [],
-    };
-  }
-
-  const { data: learningFields, error: learningFieldsError } = await supabaseAdmin
-    .from("learning_fields")
-    .select("*")
-    .in("id", fieldIds);
-
-  if (learningFieldsError) {
-    throw new Error("Failed to load learning fields.");
-  }
-
-  const learningFieldsById = new Map<string, GenericRecord>();
-  (learningFields ?? []).forEach((field) => {
-    learningFieldsById.set(toStringValue((field as GenericRecord).id), field as GenericRecord);
-  });
-
-  const { data: routes, error: routesError } = await supabaseAdmin
-    .from("field_routes")
-    .select("*")
-    .in("field_id", fieldIds);
-
-  if (routesError) {
-    throw new Error("Failed to load field routes.");
-  }
-
-  const routesByFieldId = new Map<string, GenericRecord[]>();
-  const routeIds: string[] = [];
-
-  (routes ?? []).forEach((route) => {
-    const routeRecord = route as GenericRecord;
-    const fieldId = toStringValue(routeRecord.field_id);
-    const routeId = toStringValue(routeRecord.id);
-    if (!fieldId || !routeId) {
-      return;
-    }
-
-    if (!routesByFieldId.has(fieldId)) {
-      routesByFieldId.set(fieldId, []);
-    }
-    routesByFieldId.get(fieldId)?.push(routeRecord);
-    routeIds.push(routeId);
-  });
-
+async function loadJourneyNodesByRouteIds(routeIds: string[]) {
   if (routeIds.length === 0) {
-    return {
-      learningFieldsById,
-      routesByFieldId,
-      nodesByRouteId: new Map<string, GenericRecord[]>(),
-      nodeIds: [],
-    };
+    return [] as JourneyRouteNode[];
   }
 
-  const { data: nodes, error: nodesError } = await supabaseAdmin
-    .from("route_nodes")
-    .select("*")
-    .in("route_id", routeIds);
+  const { data, error } = await supabaseAdmin
+    .from("journey_path_courses")
+    .select("id, journey_path_id, course_id, step_number, title, description")
+    .in("journey_path_id", routeIds)
+    .order("step_number", { ascending: true });
 
-  if (nodesError) {
-    throw new Error("Failed to load route nodes.");
+  if (error) {
+    throw new Error("Failed to load journey path courses.");
   }
 
-  const nodesByRouteId = new Map<string, GenericRecord[]>();
-  const nodeIds: string[] = [];
-
-  (nodes ?? []).forEach((node) => {
-    const nodeRecord = node as GenericRecord;
-    const routeId = toStringValue(nodeRecord.route_id);
-    const nodeId = toStringValue(nodeRecord.id);
-    if (!routeId || !nodeId) {
-      return;
-    }
-
-    if (!nodesByRouteId.has(routeId)) {
-      nodesByRouteId.set(routeId, []);
-    }
-    nodesByRouteId.get(routeId)?.push(nodeRecord);
-    nodeIds.push(nodeId);
+  console.info("[journey_read] source_table_used", {
+    table: "journey_path_courses",
+    route_count: routeIds.length,
   });
 
-  for (const [routeId, routeNodes] of nodesByRouteId.entries()) {
-    nodesByRouteId.set(routeId, sortNodes(routeNodes));
-  }
-
-  return {
-    learningFieldsById,
-    routesByFieldId,
-    nodesByRouteId,
-    nodeIds,
-  };
+  return ((data ?? []) as GenericRecord[])
+    .map((row) => {
+      const routeId = toStringValue(row.journey_path_id);
+      const courseId = toStringValue(row.course_id);
+      const step = Math.max(1, Math.floor(toNumber(row.step_number) || 1));
+      if (!routeId || !courseId) {
+        return null;
+      }
+      return {
+        id: toStringValue(row.id) || `${routeId}:${courseId}:${step}`,
+        route_id: routeId,
+        course_id: courseId,
+        title: toStringValue(row.title) || `Step ${step}`,
+        description: toNullableString(row.description),
+        order_index: step,
+      } satisfies JourneyRouteNode;
+    })
+    .filter(Boolean) as JourneyRouteNode[];
 }
 
-async function getCompletedNodeIdSet(userId: string, nodeIds: string[]) {
-  if (nodeIds.length === 0) {
-    return new Set<string>();
+async function getProgressRowsForRouteIds(params: { userId: string; routeIds: string[] }) {
+  if (params.routeIds.length === 0) {
+    return [] as GenericRecord[];
   }
 
-  const { data: progressRows, error: progressRowsError } = await supabaseAdmin
-    .from("user_node_progress")
-    .select("node_id")
-    .eq("user_id", userId)
-    .in("node_id", nodeIds);
+  const { data, error } = await supabaseAdmin
+    .from("user_course_progress")
+    .select("journey_path_id, course_id, status")
+    .eq("user_id", params.userId)
+    .in("journey_path_id", params.routeIds);
 
-  if (progressRowsError) {
-    throw new Error("Failed to load node progress.");
+  if (error) {
+    throw new Error("Failed to load course progress.");
   }
 
-  return new Set<string>(
-    (progressRows ?? [])
-      .map((row) => toStringValue((row as GenericRecord).node_id))
-      .filter(Boolean),
-  );
+  return (data ?? []) as GenericRecord[];
 }
 
 export async function getUserLearningFieldsSummary(
@@ -215,35 +177,79 @@ export async function getUserLearningFieldsSummary(
   }
 
   const typedRows = (userLearningFields ?? []) as LearningFieldRow[];
-  const fieldIds = Array.from(new Set(typedRows.map((row) => row.field_id)));
+  const fieldIds = Array.from(new Set(typedRows.map((row) => row.field_id).filter(Boolean)));
 
-  const graphBundle = await loadFieldGraphBundle(fieldIds);
-  const completedNodeSet = await getCompletedNodeIdSet(userId, graphBundle.nodeIds);
+  const [learningFieldsResult, journeyPaths] = await Promise.all([
+    supabaseAdmin.from("learning_fields").select("*").in("id", fieldIds),
+    loadJourneyPathRows({ userId, fieldIds }),
+  ]);
+
+  if (learningFieldsResult.error) {
+    throw new Error("Failed to load learning fields.");
+  }
+
+  const learningFieldsById = new Map<string, GenericRecord>();
+  ((learningFieldsResult.data ?? []) as GenericRecord[]).forEach((field) => {
+    learningFieldsById.set(toStringValue(field.id), field);
+  });
+
+  const pathByFieldId = new Map<string, GenericRecord>();
+  journeyPaths.forEach((path) => {
+    const fieldId = toStringValue(path.learning_field_id);
+    const previous = pathByFieldId.get(fieldId);
+    if (!previous || (toStringValue(path.created_at) > toStringValue(previous.created_at))) {
+      pathByFieldId.set(fieldId, path);
+    }
+  });
+
+  const routeIds = journeyPaths.map((path) => toStringValue(path.id)).filter(Boolean);
+  const [nodes, progressRows] = await Promise.all([
+    loadJourneyNodesByRouteIds(routeIds),
+    getProgressRowsForRouteIds({ userId, routeIds }),
+  ]);
+
+  const completedByRoute = new Map<string, Set<string>>();
+  progressRows.forEach((row) => {
+    const status = toStringValue(row.status).toLowerCase();
+    if (status !== "passed" && status !== "completed") {
+      return;
+    }
+    const routeId = toStringValue(row.journey_path_id);
+    const courseId = toStringValue(row.course_id);
+    if (!routeId || !courseId) {
+      return;
+    }
+    const existing = completedByRoute.get(routeId) ?? new Set<string>();
+    existing.add(courseId);
+    completedByRoute.set(routeId, existing);
+  });
+
+  const nodeCountByRoute = new Map<string, number>();
+  nodes.forEach((node) => {
+    nodeCountByRoute.set(node.route_id, (nodeCountByRoute.get(node.route_id) ?? 0) + 1);
+  });
 
   return typedRows.map((row) => {
-    const routes = graphBundle.routesByFieldId.get(row.field_id) ?? [];
-    const routeIds = routes
-      .map((route) => toStringValue(route.id))
-      .filter(Boolean);
-    const nodes = routeIds.flatMap((routeId) => graphBundle.nodesByRouteId.get(routeId) ?? []);
-    const totalSteps = nodes.length;
-    const completedSteps = nodes.reduce((count, node) => {
-      const nodeId = toStringValue(node.id);
-      return completedNodeSet.has(nodeId) ? count + 1 : count;
-    }, 0);
+    const latestPath = pathByFieldId.get(row.field_id);
+    const routeId = toStringValue(latestPath?.id);
+    const completedCount = completedByRoute.get(routeId)?.size ?? 0;
+    const totalCount = Math.max(
+      nodeCountByRoute.get(routeId) ?? 0,
+      Math.floor(toNumber(latestPath?.total_steps) || 0),
+    );
     const percentage =
-      totalSteps === 0 ? 0 : Number(((completedSteps / totalSteps) * 100).toFixed(1));
+      totalCount === 0 ? 0 : Number(((completedCount / totalCount) * 100).toFixed(1));
 
     return {
       id: row.id,
       field_id: row.field_id,
-      field_title: getFieldTitle(graphBundle.learningFieldsById.get(row.field_id)),
+      field_title: getFieldTitle(learningFieldsById.get(row.field_id)),
       current_level: row.current_level,
       target_level: row.target_level,
-      active_route_id: row.active_route_id,
+      active_route_id: row.active_route_id || routeId || null,
       started_at: row.started_at,
-      completed_steps_count: completedSteps,
-      total_steps_count: totalSteps,
+      completed_steps_count: completedCount,
+      total_steps_count: totalCount,
       percentage_progress: percentage,
     };
   });
@@ -270,10 +276,7 @@ export async function findLearningFieldByGoal(learningGoal: string) {
     return null;
   }
 
-  const { data, error } = await supabaseAdmin
-    .from("learning_fields")
-    .select("*");
-
+  const { data, error } = await supabaseAdmin.from("learning_fields").select("*");
   if (error) {
     throw new Error("Failed to load learning fields.");
   }
@@ -284,7 +287,6 @@ export async function findLearningFieldByGoal(learningGoal: string) {
     const name = toStringValue(field.name).trim().toLowerCase();
     return title === normalizedGoal || name === normalizedGoal;
   });
-
   if (exactMatch) {
     return exactMatch;
   }
@@ -300,21 +302,27 @@ export async function findLearningFieldByGoal(learningGoal: string) {
 
 export async function ensureRouteBelongsToField(routeId: string, fieldId: string) {
   const { data: route, error } = await supabaseAdmin
-    .from("field_routes")
-    .select("id, field_id")
+    .from("journey_paths")
+    .select("id, learning_field_id")
     .eq("id", routeId)
     .limit(1)
-    .maybeSingle<{ id: string; field_id: string }>();
+    .maybeSingle<{ id: string; learning_field_id: string }>();
 
   if (error) {
-    throw new Error("Failed to validate route.");
+    throw new Error("Failed to validate journey path.");
   }
-
   if (!route) {
     return false;
   }
 
-  return route.field_id === fieldId;
+  console.info("[migration_cleanup] replaced_with_source_of_truth", {
+    old_table: "field_routes",
+    new_table: "journey_paths",
+    route_id: routeId,
+    field_id: fieldId,
+  });
+
+  return route.learning_field_id === fieldId;
 }
 
 export async function getUserLearningFieldById(userId: string, id: string) {
@@ -329,8 +337,7 @@ export async function getUserLearningFieldById(userId: string, id: string) {
   if (error) {
     throw new Error("Failed to load learning field.");
   }
-
-  return (data as GenericRecord | null);
+  return data as GenericRecord | null;
 }
 
 export async function getUserLearningFieldByFieldId(userId: string, fieldId: string) {
@@ -346,8 +353,7 @@ export async function getUserLearningFieldByFieldId(userId: string, fieldId: str
   if (error) {
     throw new Error("Failed to load learning field.");
   }
-
-  return (data as GenericRecord | null);
+  return data as GenericRecord | null;
 }
 
 export async function createUserLearningField(params: {
@@ -379,7 +385,6 @@ export async function createUserLearningField(params: {
   if (error) {
     throw new Error("Failed to create user learning field.");
   }
-
   return data as GenericRecord;
 }
 
@@ -400,7 +405,6 @@ export async function updateUserLearningField(params: {
   if (error) {
     throw new Error("Failed to update user learning field.");
   }
-
   return data as GenericRecord | null;
 }
 
@@ -410,57 +414,78 @@ export async function getUserFieldProgress(userId: string, fieldId: string) {
     return null;
   }
 
-  const graphBundle = await loadFieldGraphBundle([fieldId]);
-  const completedNodeSet = await getCompletedNodeIdSet(userId, graphBundle.nodeIds);
+  const { data: journeyPaths, error: journeyPathsError } = await supabaseAdmin
+    .from("journey_paths")
+    .select("id, learning_field_id, starting_point, destination, total_steps, created_at")
+    .eq("user_id", userId)
+    .eq("learning_field_id", fieldId)
+    .order("created_at", { ascending: false });
 
-  const fieldRecord = graphBundle.learningFieldsById.get(fieldId);
-  const routes = graphBundle.routesByFieldId.get(fieldId) ?? [];
+  if (journeyPathsError) {
+    throw new Error("Failed to load journey paths.");
+  }
+
+  console.info("[journey_read] source_table_used", {
+    table: "journey_paths",
+    user_id: userId,
+    field_id: fieldId,
+  });
+
+  const routes = (journeyPaths ?? []) as GenericRecord[];
+  const routeIds = routes.map((route) => toStringValue(route.id)).filter(Boolean);
+  const nodes = await loadJourneyNodesByRouteIds(routeIds);
+  const progressRows = await getProgressRowsForRouteIds({ userId, routeIds });
+
+  const completedKey = new Set(
+    progressRows
+      .filter((row) => {
+        const status = toStringValue(row.status).toLowerCase();
+        return status === "passed" || status === "completed";
+      })
+      .map((row) => `${toStringValue(row.journey_path_id)}:${toStringValue(row.course_id)}`),
+  );
 
   const formattedRoutes = routes.map((route) => {
     const routeId = toStringValue(route.id);
-    const nodes = graphBundle.nodesByRouteId.get(routeId) ?? [];
-
+    const routeNodes = nodes
+      .filter((node) => node.route_id === routeId)
+      .sort((a, b) => a.order_index - b.order_index);
     return {
       id: routeId,
       title: getRouteTitle(route),
-      field_id: toStringValue(route.field_id),
-      nodes: nodes.map((node) => ({
-        id: toStringValue(node.id),
-        route_id: toStringValue(node.route_id),
-        title: toNullableString(node.title) ?? "Untitled Node",
-        type: toNullableString(node.type),
-        link: toNullableString(node.link),
-        description: toNullableString(node.description),
-        order_index:
-          typeof node.order_index === "number"
-            ? node.order_index
-            : typeof node.position === "number"
-              ? node.position
-              : null,
+      field_id: toStringValue(route.learning_field_id),
+      nodes: routeNodes.map((node) => ({
+        id: node.id,
+        route_id: routeId,
+        title: node.title,
+        type: "course",
+        link: null,
+        description: node.description,
+        order_index: node.order_index,
       })),
     };
   });
 
-  const totalSteps = formattedRoutes.reduce((count, route) => count + route.nodes.length, 0);
-  const completedSteps = formattedRoutes.reduce((count, route) => {
-    return (
-      count +
-      route.nodes.reduce((routeCount, node) => {
-        return completedNodeSet.has(node.id) ? routeCount + 1 : routeCount;
-      }, 0)
-    );
-  }, 0);
+  const completedNodeIds = nodes
+    .filter((node) => completedKey.has(`${node.route_id}:${node.course_id}`))
+    .map((node) => node.id);
+  const totalSteps = nodes.length;
+  const completedSteps = completedNodeIds.length;
+
+  const activeRouteId =
+    toNullableString(userField.active_route_id) || toStringValue(routes[0]?.id) || null;
+  const fieldRecord = await ensureLearningFieldExists(fieldId);
 
   return {
     field_id: fieldId,
-    field_title: getFieldTitle(fieldRecord),
+    field_title: getFieldTitle(fieldRecord ?? undefined),
     current_level: toNullableString(userField.current_level),
     target_level: toNullableString(userField.target_level),
-    active_route_id: toNullableString(userField.active_route_id),
+    active_route_id: activeRouteId,
     status: toNullableString(userField.status),
     started_at: toNullableString(userField.started_at),
     routes: formattedRoutes,
-    completed_node_ids: Array.from(completedNodeSet),
+    completed_node_ids: completedNodeIds,
     summary: {
       completed_steps_count: completedSteps,
       total_steps_count: totalSteps,
@@ -471,15 +496,31 @@ export async function getUserFieldProgress(userId: string, fieldId: string) {
 }
 
 export async function markNodeCompletedForUser(userId: string, nodeId: string) {
-  const { data: node, error: nodeError } = await supabaseAdmin
-    .from("route_nodes")
-    .select("id, route_id")
+  const nodeLookup = await supabaseAdmin
+    .from("journey_path_courses")
+    .select("id, journey_path_id, course_id")
     .eq("id", nodeId)
     .limit(1)
-    .maybeSingle<{ id: string; route_id: string }>();
+    .maybeSingle<{ id: string; journey_path_id: string; course_id: string }>();
+  let node = nodeLookup.data ?? null;
+  const nodeError = nodeLookup.error;
 
   if (nodeError) {
-    throw new Error("Failed to validate node.");
+    throw new Error("Failed to validate journey step.");
+  }
+
+  if (!node) {
+    const fallbackByCourse = await supabaseAdmin
+      .from("journey_path_courses")
+      .select("id, journey_path_id, course_id")
+      .eq("course_id", nodeId)
+      .order("step_number", { ascending: true })
+      .limit(1)
+      .maybeSingle<{ id: string; journey_path_id: string; course_id: string }>();
+    if (fallbackByCourse.error) {
+      throw new Error("Failed to validate journey step.");
+    }
+    node = fallbackByCourse.data ?? null;
   }
 
   if (!node) {
@@ -490,62 +531,85 @@ export async function markNodeCompletedForUser(userId: string, nodeId: string) {
   }
 
   const { data: route, error: routeError } = await supabaseAdmin
-    .from("field_routes")
-    .select("id, field_id")
-    .eq("id", node.route_id)
+    .from("journey_paths")
+    .select("id, user_id, learning_field_id")
+    .eq("id", node.journey_path_id)
     .limit(1)
-    .maybeSingle<{ id: string; field_id: string }>();
+    .maybeSingle<{ id: string; user_id: string; learning_field_id: string }>();
 
   if (routeError) {
-    throw new Error("Failed to validate route.");
+    throw new Error("Failed to validate journey path.");
   }
-
   if (!route) {
     return {
       ok: false as const,
       reason: "ROUTE_NOT_FOUND",
     };
   }
+  if (route.user_id !== userId) {
+    return {
+      ok: false as const,
+      reason: "FIELD_NOT_ENROLLED",
+      field_id: route.learning_field_id,
+    };
+  }
 
-  const userField = await getUserLearningFieldByFieldId(userId, route.field_id);
+  const userField = await getUserLearningFieldByFieldId(userId, route.learning_field_id);
   if (!userField) {
     return {
       ok: false as const,
       reason: "FIELD_NOT_ENROLLED",
-      field_id: route.field_id,
+      field_id: route.learning_field_id,
     };
   }
 
   const { data: existingProgress, error: existingProgressError } = await supabaseAdmin
-    .from("user_node_progress")
-    .select("node_id")
+    .from("user_course_progress")
+    .select("id, status")
     .eq("user_id", userId)
-    .eq("node_id", nodeId)
+    .eq("journey_path_id", node.journey_path_id)
+    .eq("course_id", node.course_id)
     .limit(1)
-    .maybeSingle<{ node_id: string }>();
+    .maybeSingle();
 
   if (existingProgressError) {
-    throw new Error("Failed to validate node progress.");
+    throw new Error("Failed to validate course progress.");
   }
 
-  if (!existingProgress) {
-    const { error: insertProgressError } = await supabaseAdmin
-      .from("user_node_progress")
+  const nowIso = new Date().toISOString();
+  if (existingProgress) {
+    const existingStatus = toStringValue((existingProgress as GenericRecord).status).toLowerCase();
+    if (existingStatus !== "passed" && existingStatus !== "completed") {
+      const { error: updateError } = await supabaseAdmin
+        .from("user_course_progress")
+        .update({
+          status: "passed",
+          last_activity_at: nowIso,
+        })
+        .eq("id", toStringValue((existingProgress as GenericRecord).id));
+      if (updateError) {
+        throw new Error("Failed to mark course as completed.");
+      }
+    }
+  } else {
+    const { error: insertError } = await supabaseAdmin
+      .from("user_course_progress")
       .insert({
         user_id: userId,
-        node_id: nodeId,
-        completed_at: new Date().toISOString(),
+        journey_path_id: node.journey_path_id,
+        course_id: node.course_id,
+        status: "passed",
+        last_activity_at: nowIso,
       });
-
-    if (insertProgressError) {
-      throw new Error("Failed to mark node as completed.");
+    if (insertError) {
+      throw new Error("Failed to mark course as completed.");
     }
   }
 
   return {
     ok: true as const,
     already_completed: Boolean(existingProgress),
-    field_id: route.field_id,
-    node_id: nodeId,
+    field_id: route.learning_field_id,
+    node_id: node.id,
   };
 }

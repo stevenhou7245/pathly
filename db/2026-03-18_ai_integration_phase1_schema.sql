@@ -104,7 +104,7 @@ create table if not exists public.course_resource_options (
   resource_type text not null check (
     resource_type in ('video', 'article', 'tutorial', 'document', 'interactive')
   ),
-  provider_name text not null,
+  provider text not null,
   url text not null,
   description text,
   source_hash text,

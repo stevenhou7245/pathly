@@ -8,10 +8,12 @@ type DashboardSidebarProps = {
   activeFolderId: string;
   activeView: DashboardView;
   onSelectFolder: (folderId: string) => void;
+  onRequestDeleteFolder: (folder: LearningFolder) => void;
   onSelectView: (view: Exclude<DashboardView, "field">) => void;
   onOpenAddFieldModal: () => void;
   messagesUnreadCount?: number;
   loadingFolderId?: string | null;
+  deletingFolderId?: string | null;
 };
 
 type UtilityItem = {
@@ -70,10 +72,12 @@ export default function DashboardSidebar({
   activeFolderId,
   activeView,
   onSelectFolder,
+  onRequestDeleteFolder,
   onSelectView,
   onOpenAddFieldModal,
   messagesUnreadCount = 0,
   loadingFolderId = null,
+  deletingFolderId = null,
 }: DashboardSidebarProps) {
   return (
     <>
@@ -81,22 +85,37 @@ export default function DashboardSidebar({
         <div className="no-scrollbar flex gap-2 overflow-x-auto rounded-2xl border-2 border-[#1F2937]/10 bg-white/85 p-2 shadow-sm">
           {folders.map((folder) => {
             const isActive = activeView === "field" && activeFolderId === folder.id;
+            const isDeleting = deletingFolderId === folder.id;
             return (
-              <button
-                key={folder.id}
-                type="button"
-                onClick={() => onSelectFolder(folder.id)}
-                className={`inline-flex shrink-0 items-center gap-2 rounded-full border-2 px-3 py-2 text-sm font-bold transition ${
-                  isActive
-                    ? "border-[#1F2937] bg-[#58CC02] text-white shadow-[0_3px_0_#1f2937]"
-                    : "border-[#1F2937]/15 bg-white text-[#1F2937] hover:border-[#58CC02]/40 hover:bg-[#58CC02]/10"
-                }`}
-              >
-                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#FFD84D] text-[11px] font-extrabold text-[#1F2937]">
-                  {folder.iconLabel}
-                </span>
-                {folder.name}
-              </button>
+              <div key={folder.id} className="relative inline-flex shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onSelectFolder(folder.id)}
+                  className={`inline-flex items-center gap-2 rounded-full border-2 px-3 py-2 pr-9 text-sm font-bold transition ${
+                    isActive
+                      ? "border-[#1F2937] bg-[#58CC02] text-white shadow-[0_3px_0_#1f2937]"
+                      : "border-[#1F2937]/15 bg-white text-[#1F2937] hover:border-[#58CC02]/40 hover:bg-[#58CC02]/10"
+                  }`}
+                >
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#FFD84D] text-[11px] font-extrabold text-[#1F2937]">
+                    {folder.iconLabel}
+                  </span>
+                  {folder.name}
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${folder.name}`}
+                  disabled={isDeleting}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onRequestDeleteFolder(folder);
+                  }}
+                  className="absolute right-1 top-1 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/90 text-xs font-extrabold text-[#1F2937]/70 transition hover:border-[#c62828]/40 hover:bg-[#ffeaea] hover:text-[#c62828] disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  X
+                </button>
+              </div>
             );
           })}
           <button
@@ -149,31 +168,46 @@ export default function DashboardSidebar({
             {folders.map((folder) => {
               const isActive = activeView === "field" && activeFolderId === folder.id;
               const isLoadingMilestones = loadingFolderId === folder.id;
+              const isDeleting = deletingFolderId === folder.id;
               return (
-                <button
-                  key={folder.id}
-                  type="button"
-                  onClick={() => onSelectFolder(folder.id)}
-                  className={`group w-full rounded-2xl border-2 px-3 py-3 text-left transition ${
-                    isActive
-                      ? "border-[#1F2937] bg-[#58CC02]/15 shadow-[0_4px_0_#1f2937]"
-                      : "border-[#1F2937]/12 bg-white hover:-translate-y-0.5 hover:border-[#58CC02]/45 hover:shadow-[0_4px_0_rgba(88,204,2,0.25)]"
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-[#1F2937]/15 bg-[#FFD84D] text-xs font-extrabold text-[#1F2937]">
-                      {folder.iconLabel}
-                    </span>
-                    <div>
-                      <p className="text-sm font-extrabold text-[#1F2937]">{folder.name}</p>
-                      <p className="text-xs font-semibold text-[#1F2937]/60">
-                        {isLoadingMilestones
-                          ? "Loading milestones..."
-                          : `${folder.completedSteps}/${folder.totalSteps} milestones`}
-                      </p>
+                <div key={folder.id} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => onSelectFolder(folder.id)}
+                    className={`group w-full rounded-2xl border-2 px-3 py-3 text-left transition ${
+                      isActive
+                        ? "border-[#1F2937] bg-[#58CC02]/15 shadow-[0_4px_0_#1f2937]"
+                        : "border-[#1F2937]/12 bg-white hover:-translate-y-0.5 hover:border-[#58CC02]/45 hover:shadow-[0_4px_0_rgba(88,204,2,0.25)]"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-[#1F2937]/15 bg-[#FFD84D] text-xs font-extrabold text-[#1F2937]">
+                        {folder.iconLabel}
+                      </span>
+                      <div>
+                        <p className="text-sm font-extrabold text-[#1F2937]">{folder.name}</p>
+                        <p className="text-xs font-semibold text-[#1F2937]/60">
+                          {isLoadingMilestones
+                            ? "Loading milestones..."
+                            : `${folder.completedSteps}/${folder.totalSteps} milestones`}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${folder.name}`}
+                    disabled={isDeleting}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onRequestDeleteFolder(folder);
+                    }}
+                    className="absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/95 text-sm font-extrabold text-[#1F2937]/75 transition hover:border-[#c62828]/40 hover:bg-[#ffeaea] hover:text-[#c62828] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    X
+                  </button>
+                </div>
               );
             })}
             <button

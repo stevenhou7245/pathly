@@ -25,13 +25,8 @@ const NORMALIZED_LEVEL_MAP: Record<string, LearningLevel> = {
   expert: "Expert",
 };
 
-const GAP_TO_STEP_COUNT: Record<number, number> = {
-  0: 3,
-  1: 5,
-  2: 9,
-  3: 14,
-  4: 20,
-};
+const BASE_STEPS = 3;
+const EXTRA_STEPS_PER_GAP = 2;
 
 function toFiniteInteger(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -68,12 +63,19 @@ export function calculateTotalSteps(currentLevel: unknown, targetLevel: unknown)
   const currentValue = LEVEL_TO_VALUE[normalizedCurrent];
   const targetValue = LEVEL_TO_VALUE[normalizedTarget];
 
-  const gap = Math.max(0, Math.min(4, targetValue - currentValue));
-  return GAP_TO_STEP_COUNT[gap] ?? GAP_TO_STEP_COUNT[0];
+  const distance = Math.max(0, Math.min(4, targetValue - currentValue));
+  if (distance <= 0) {
+    return BASE_STEPS;
+  }
+
+  // Treat each required progression stage as a gap unit.
+  // Example: Basic -> Advanced has 3 stages (Basic, Intermediate, Advanced) => 3 + 3*2 = 9.
+  const effectiveGap = distance + 1;
+  return BASE_STEPS + effectiveGap * EXTRA_STEPS_PER_GAP;
 }
 
 export function normalizePathState(totalStepsValue: unknown, currentStepIndexValue: unknown) {
-  const fallbackTotal = GAP_TO_STEP_COUNT[0];
+  const fallbackTotal = BASE_STEPS;
   const parsedTotal = toFiniteInteger(totalStepsValue);
   const totalSteps = parsedTotal > 0 ? parsedTotal : fallbackTotal;
 
