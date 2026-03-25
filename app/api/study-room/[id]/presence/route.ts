@@ -13,22 +13,28 @@ const presencePatchSchema = z.object({
   focus_mode: z.boolean().optional(),
 });
 
-type PresenceResponse = {
-  success: boolean;
-  message?: string;
-  participants?: Awaited<ReturnType<typeof listStudyRoomParticipantWorkspaceState>> extends {
-    ok: true;
-    participants: infer T;
-  }
-    ? T
-    : never;
-  participant?: Awaited<ReturnType<typeof updateStudyRoomPresenceState>> extends {
-    ok: true;
-    participant: infer T;
-  }
-    ? T
-    : never;
+type PresenceParticipants = Extract<
+  Awaited<ReturnType<typeof listStudyRoomParticipantWorkspaceState>>,
+  { ok: true }
+>["participants"];
+
+type PresenceParticipant = Extract<
+  Awaited<ReturnType<typeof updateStudyRoomPresenceState>>,
+  { ok: true }
+>["participant"];
+
+type PresenceSuccessResponse = {
+  success: true;
+  participants?: PresenceParticipants;
+  participant?: PresenceParticipant;
 };
+
+type PresenceErrorResponse = {
+  success: false;
+  message: string;
+};
+
+type PresenceResponse = PresenceSuccessResponse | PresenceErrorResponse;
 
 export async function GET(
   _request: Request,

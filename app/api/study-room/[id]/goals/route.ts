@@ -13,22 +13,25 @@ const goalsPatchSchema = z.object({
   goal_status: z.enum(["not_started", "in_progress", "completed"]),
 });
 
-type GoalsResponse = {
-  success: boolean;
-  message?: string;
-  participants?: Awaited<ReturnType<typeof listStudyRoomParticipantWorkspaceState>> extends {
-    ok: true;
-    participants: infer T;
-  }
-    ? T
-    : never;
-  participant?: Awaited<ReturnType<typeof updateStudyRoomGoal>> extends {
-    ok: true;
-    participant: infer T;
-  }
-    ? T
-    : never;
+type GoalsParticipants = Extract<
+  Awaited<ReturnType<typeof listStudyRoomParticipantWorkspaceState>>,
+  { ok: true }
+>["participants"];
+
+type GoalsParticipant = Extract<Awaited<ReturnType<typeof updateStudyRoomGoal>>, { ok: true }>["participant"];
+
+type GoalsSuccessResponse = {
+  success: true;
+  participants?: GoalsParticipants;
+  participant?: GoalsParticipant;
 };
+
+type GoalsErrorResponse = {
+  success: false;
+  message: string;
+};
+
+type GoalsResponse = GoalsSuccessResponse | GoalsErrorResponse;
 
 export async function GET(
   _request: Request,
