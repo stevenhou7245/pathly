@@ -36,6 +36,8 @@ type MembershipContext = {
   goalStatus: StudyRoomGoalStatus;
 };
 
+type RoomMembershipMode = "active_only" | "active_or_closed_historical";
+
 export type StudyRoomParticipantWorkspaceState = {
   id: string;
   room_id: string;
@@ -417,7 +419,11 @@ async function loadUsernamesByIds(userIds: string[]) {
   return usernamesById;
 }
 
-async function requireRoomMembership(params: { roomId: string; userId: string }) {
+async function requireRoomMembership(params: {
+  roomId: string;
+  userId: string;
+  membershipMode?: RoomMembershipMode;
+}) {
   const { data: roomRow, error: roomError } = await supabaseAdmin
     .from("study_rooms")
     .select("id, creator_id, status")
@@ -444,7 +450,14 @@ async function requireRoomMembership(params: { roomId: string; userId: string })
     };
   }
 
-  const { data: participantRow, error: participantError } = await supabaseAdmin
+  const membershipMode = params.membershipMode ?? "active_only";
+  const roomStatus = toStringValue((roomRow as GenericRecord).status) || "active";
+  const normalizedRoomStatus = roomStatus.trim().toLowerCase();
+  const allowsClosedHistoricalMembership =
+    membershipMode === "active_or_closed_historical" &&
+    (normalizedRoomStatus === "closed" || normalizedRoomStatus === "expired" || normalizedRoomStatus === "ended");
+
+  const { data: activeParticipantRow, error: activeParticipantError } = await supabaseAdmin
     .from("study_room_participants")
     .select(
       "id, room_id, user_id, role, joined_at, left_at, presence_state, focus_mode, focus_started_at, last_active_at, current_streak_seconds, total_focus_seconds, session_seconds, goal_text, goal_status",
@@ -455,19 +468,50 @@ async function requireRoomMembership(params: { roomId: string; userId: string })
     .order("joined_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (participantError) {
-    const details = toErrorDetails(participantError);
+  if (activeParticipantError) {
+    const details = toErrorDetails(activeParticipantError);
     console.error("[study_room_workspace] participant_lookup_failed", {
       table: "study_room_participants",
-      query: "requireRoomMembership.participant",
+      query: "requireRoomMembership.active_participant",
       room_id: params.roomId,
       user_id: params.userId,
+      membership_mode: membershipMode,
       ...details,
     });
     throw new Error(
       `Failed to load study room participant. table=study_room_participants room_id=${params.roomId} user_id=${params.userId} reason=${details.message}`,
     );
   }
+
+  let participantRow = activeParticipantRow as GenericRecord | null;
+  if (!participantRow && allowsClosedHistoricalMembership) {
+    const { data: historicalParticipantRow, error: historicalParticipantError } = await supabaseAdmin
+      .from("study_room_participants")
+      .select(
+        "id, room_id, user_id, role, joined_at, left_at, presence_state, focus_mode, focus_started_at, last_active_at, current_streak_seconds, total_focus_seconds, session_seconds, goal_text, goal_status",
+      )
+      .eq("room_id", params.roomId)
+      .eq("user_id", params.userId)
+      .order("joined_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (historicalParticipantError) {
+      const details = toErrorDetails(historicalParticipantError);
+      console.error("[study_room_workspace] participant_lookup_failed", {
+        table: "study_room_participants",
+        query: "requireRoomMembership.historical_participant",
+        room_id: params.roomId,
+        user_id: params.userId,
+        membership_mode: membershipMode,
+        ...details,
+      });
+      throw new Error(
+        `Failed to load study room participant history. table=study_room_participants room_id=${params.roomId} user_id=${params.userId} reason=${details.message}`,
+      );
+    }
+    participantRow = (historicalParticipantRow as GenericRecord | null) ?? null;
+  }
+
   if (!participantRow) {
     return {
       ok: false as const,
@@ -479,7 +523,7 @@ async function requireRoomMembership(params: { roomId: string; userId: string })
     roomId: toStringValue((roomRow as GenericRecord).id),
     userId: params.userId,
     creatorId: toStringValue((roomRow as GenericRecord).creator_id),
-    roomStatus: toStringValue((roomRow as GenericRecord).status) || "active",
+    roomStatus,
     participantId: toStringValue((participantRow as GenericRecord).id),
     joinedAt: toNullableString((participantRow as GenericRecord).joined_at),
     focusMode: toBoolean((participantRow as GenericRecord).focus_mode),
@@ -723,7 +767,11 @@ export async function updateStudyRoomGoal(params: {
   };
 }
 
-export async function getStudyRoomNotes(params: { userId: string; roomId: string }) {
+export async function getStudyRoomNotes(params: {
+  userId: string;
+  roomId: string;
+  membershipMode?: RoomMembershipMode;
+}) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
@@ -1068,7 +1116,11 @@ export async function deleteStudyRoomNoteEntry(params: {
   };
 }
 
-export async function listStudyRoomResources(params: { userId: string; roomId: string }) {
+export async function listStudyRoomResources(params: {
+  userId: string;
+  roomId: string;
+  membershipMode?: RoomMembershipMode;
+}) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
@@ -1378,7 +1430,11 @@ export async function removeStudyRoomResource(params: {
   };
 }
 
-export async function listStudyRoomAiMessages(params: { userId: string; roomId: string }) {
+export async function listStudyRoomAiMessages(params: {
+  userId: string;
+  roomId: string;
+  membershipMode?: RoomMembershipMode;
+}) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;

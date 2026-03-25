@@ -285,6 +285,19 @@ type StudyRoomLeaveSaveResponse = {
   };
 };
 
+type NotebookApiResponse = {
+  success: boolean;
+  message?: string;
+  notebook?: {
+    id: string;
+    name: string;
+  };
+  notebooks?: Array<{
+    id: string;
+    name: string;
+  }>;
+};
+
 type FriendsApiResponse = {
   success: boolean;
   message?: string;
@@ -888,9 +901,15 @@ export default function StudyRoomsPanel({
   >("");
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [leaveSaveModalMode, setLeaveSaveModalMode] = useState<"before_leave" | "room_closed">(
+    "before_leave",
+  );
   const [leaveSaveContent, setLeaveSaveContent] = useState<StudyRoomLeaveSavableContent | null>(null);
   const [leaveSaveNotebooks, setLeaveSaveNotebooks] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedLeaveNotebookId, setSelectedLeaveNotebookId] = useState("");
+  const [showCreateLeaveNotebook, setShowCreateLeaveNotebook] = useState(false);
+  const [newLeaveNotebookName, setNewLeaveNotebookName] = useState("");
+  const [isCreatingLeaveNotebook, setIsCreatingLeaveNotebook] = useState(false);
   const [isLoadingLeaveSaveContent, setIsLoadingLeaveSaveContent] = useState(false);
   const [selectedLeaveItemIds, setSelectedLeaveItemIds] = useState<string[]>([]);
   const [leaveNotebookTopic, setLeaveNotebookTopic] = useState("");
@@ -909,6 +928,8 @@ export default function StudyRoomsPanel({
   const loadRoomDataRef = useRef<(roomId: string) => Promise<void>>(async () => {});
   const loadWorkspaceExtrasRef = useRef<(roomId: string) => Promise<void>>(async () => {});
   const realtimeSubscriptionRunRef = useRef(0);
+  const roomStatusRef = useRef("");
+  const autoCloseSaveModalEventKeysRef = useRef<Set<string>>(new Set());
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) ?? null,
@@ -1003,6 +1024,9 @@ export default function StudyRoomsPanel({
     );
   }, [myNoteEntryId, noteEntries, roomDetail]);
   const selectedLeaveItemCount = selectedLeaveItemIds.length;
+  const normalizedLeaveNotebookName = newLeaveNotebookName.trim();
+  const canResolveLeaveNotebookForSave =
+    Boolean(selectedLeaveNotebookId) || normalizedLeaveNotebookName.length > 0;
 
   useEffect(() => {
     participantsRef.current = participants;
@@ -1011,6 +1035,10 @@ export default function StudyRoomsPanel({
   useEffect(() => {
     viewerUserIdRef.current = roomDetail?.viewer_user_id ?? "";
   }, [roomDetail?.viewer_user_id]);
+
+  useEffect(() => {
+    roomStatusRef.current = roomDetail?.status ?? "";
+  }, [roomDetail?.status]);
 
   function scrollMessagesToBottom() {
     const container = messagesContainerRef.current;
@@ -1805,10 +1833,27 @@ export default function StudyRoomsPanel({
       table: "study_rooms",
       event: "UPDATE",
       filter: `id=eq.${activeRoomId}`,
-      onEvent: () => {
+      onEvent: ({ new: newRow, old: oldRow }) => {
+        const nextStatus = toSafeString(newRow?.status).trim().toLowerCase();
+        const previousStatus =
+          toSafeString(oldRow?.status).trim().toLowerCase() ||
+          roomStatusRef.current.trim().toLowerCase();
+        const endedAt = toSafeNullableString(newRow?.ended_at) ?? "no-ended-at";
+        const closeEventKey = `${activeRoomId}:${endedAt}`;
         console.info("[study_room_realtime] room_state_changed", {
           room_id: activeRoomId,
+          previous_status: previousStatus || null,
+          next_status: nextStatus || null,
         });
+        if (nextStatus === "active") {
+          clearAutoSaveModalCloseEventKeysForRoom(activeRoomId);
+        }
+        if (nextStatus === "closed" && previousStatus !== "closed") {
+          void openAutoSaveModalForClosedRoom({
+            roomId: activeRoomId,
+            eventKey: closeEventKey,
+          });
+        }
         void loadRoomDataRef.current(activeRoomId);
         void loadWorkspaceExtrasRef.current(activeRoomId);
       },
@@ -2153,6 +2198,8 @@ export default function StudyRoomsPanel({
       setLeaveSaveNotebooks(notebooks);
       setSelectedLeaveItemIds([]);
       setSelectedLeaveNotebookId(notebooks[0]?.id ?? "");
+      setShowCreateLeaveNotebook(notebooks.length === 0);
+      setNewLeaveNotebookName("");
       const defaultTopic = `${roomDetail?.name ?? "Study Room"} Entry`;
       setLeaveNotebookTopic(defaultTopic);
     } catch (error) {
@@ -2160,6 +2207,8 @@ export default function StudyRoomsPanel({
       setPanelError(message);
       setLeaveSaveNotebooks([]);
       setSelectedLeaveNotebookId("");
+      setShowCreateLeaveNotebook(true);
+      setNewLeaveNotebookName("");
       setLeaveSaveContent({
         room_id: roomId,
         shared_notes: [],
@@ -2171,12 +2220,107 @@ export default function StudyRoomsPanel({
     }
   }
 
+  async function createLeaveNotebookInline() {
+    const notebookName = newLeaveNotebookName.trim();
+    if (!notebookName) {
+      setPanelError("Please enter a notebook name.");
+      return null;
+    }
+
+    setIsCreatingLeaveNotebook(true);
+    setPanelError("");
+    try {
+      const response = await fetch("/api/notebooks", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: notebookName,
+        }),
+      });
+      const payload = (await response.json()) as NotebookApiResponse;
+      if (!response.ok || !payload.success || !payload.notebook?.id) {
+        throw new Error(payload.message ?? "Unable to create notebook.");
+      }
+
+      const createdNotebook = {
+        id: payload.notebook.id,
+        name: payload.notebook.name,
+      };
+      setLeaveSaveNotebooks((previous) => {
+        const exists = previous.some((item) => item.id === createdNotebook.id);
+        if (exists) {
+          return previous;
+        }
+        return [createdNotebook, ...previous];
+      });
+      setSelectedLeaveNotebookId(createdNotebook.id);
+      setShowCreateLeaveNotebook(false);
+      setNewLeaveNotebookName("");
+      setPanelMessage(`Notebook "${createdNotebook.name}" created.`);
+      return createdNotebook;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to create notebook.";
+      setPanelError(message);
+      return null;
+    } finally {
+      setIsCreatingLeaveNotebook(false);
+    }
+  }
+
+  async function openAutoSaveModalForClosedRoom(params: { roomId: string; eventKey: string }) {
+    const { roomId, eventKey } = params;
+    if (!roomId || !eventKey) {
+      return;
+    }
+    const hasShownForRoom = Array.from(autoCloseSaveModalEventKeysRef.current).some((key) =>
+      key.startsWith(`${roomId}:`),
+    );
+    if (hasShownForRoom) {
+      return;
+    }
+    if (autoCloseSaveModalEventKeysRef.current.has(eventKey)) {
+      return;
+    }
+    autoCloseSaveModalEventKeysRef.current.add(eventKey);
+    console.info("[study_room_close_save] modal_triggered", {
+      room_id: roomId,
+      event_key: eventKey,
+    });
+    setLeaveSaveModalMode("room_closed");
+    setShowLeaveConfirm(true);
+    setPanelMessage("Room closed. Save any content you want before leaving.");
+    await loadLeaveSaveContent(roomId);
+  }
+
+  function clearAutoSaveModalCloseEventKeysForRoom(roomId: string) {
+    if (!roomId) {
+      return;
+    }
+    const next = new Set<string>();
+    autoCloseSaveModalEventKeysRef.current.forEach((key) => {
+      if (!key.startsWith(`${roomId}:`)) {
+        next.add(key);
+      }
+    });
+    autoCloseSaveModalEventKeysRef.current = next;
+  }
+
   async function handleOpenLeaveModal() {
     if (!activeRoomId) {
       return;
     }
+    setLeaveSaveModalMode("before_leave");
     setShowLeaveConfirm(true);
     await loadLeaveSaveContent(activeRoomId);
+  }
+
+  function closeLeaveSaveModalWithoutSaving() {
+    setShowLeaveConfirm(false);
+    setIsSavingLeaveSelections(false);
+    setIsCreatingLeaveNotebook(false);
+    setPanelError("");
   }
 
   async function handleSaveSelectedBeforeLeave() {
@@ -2189,12 +2333,20 @@ export default function StudyRoomsPanel({
       return;
     }
     if (selectedLeaveItemIds.length === 0) {
-      setPanelError("Select at least one item to save, or choose Leave Without Saving.");
+      setPanelError("Select at least one item to save, or choose Skip.");
       return;
     }
-    if (!selectedLeaveNotebookId) {
-      setPanelError("Select a notebook to save into.");
-      return;
+    let notebookIdForSave = selectedLeaveNotebookId;
+    if (!notebookIdForSave) {
+      if (!normalizedLeaveNotebookName) {
+        setPanelError("Select a notebook or create a new one before saving.");
+        return;
+      }
+      const createdNotebook = await createLeaveNotebookInline();
+      if (!createdNotebook?.id) {
+        return;
+      }
+      notebookIdForSave = createdNotebook.id;
     }
 
     setIsSavingLeaveSelections(true);
@@ -2206,7 +2358,7 @@ export default function StudyRoomsPanel({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          notebook_id: selectedLeaveNotebookId,
+          notebook_id: notebookIdForSave,
           entry_topic: normalizedTopic,
           selected_item_ids: selectedLeaveItemIds,
         }),
@@ -2220,10 +2372,20 @@ export default function StudyRoomsPanel({
           ? `Saved into "${payload.notebook.name}" as entry "${payload.entry.topic}".`
           : "Room content saved to your notebook entry.",
       );
-      await executeLeaveRoom();
+      if (leaveSaveModalMode === "before_leave") {
+        await executeLeaveRoom();
+      } else {
+        setShowLeaveConfirm(false);
+        setPanelMessage(
+          payload.notebook && payload.entry
+            ? `Saved into "${payload.notebook.name}" as entry "${payload.entry.topic}".`
+            : "Room content saved to your notebook entry.",
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save selected room content.";
       setPanelError(message);
+    } finally {
       setIsSavingLeaveSelections(false);
     }
   }
@@ -2244,11 +2406,14 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to close room.");
       }
 
-      await onRoomsUpdated();
       setPanelMessage("Study room closed.");
-      const nextRoom = rooms.find((room) => room.id !== activeRoomId);
-      onSelectRoom(nextRoom?.id ?? "");
-      setIsWorkspaceOpen(Boolean(nextRoom?.id));
+      const closeEventKey = `${activeRoomId}:manual-close`;
+      await openAutoSaveModalForClosedRoom({
+        roomId: activeRoomId,
+        eventKey: closeEventKey,
+      });
+      await loadRoomData(activeRoomId);
+      await loadWorkspaceExtras(activeRoomId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to close room.";
       setPanelError(message);
@@ -2984,16 +3149,27 @@ export default function StudyRoomsPanel({
                                 )}`
                               : "No personal note saved yet."}
                           </p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void handleSaveNotes();
-                            }}
-                            disabled={isSavingNotes || !canModifyRoomContent}
-                            className="btn-3d btn-3d-green inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
-                          >
-                            {isSavingNotes ? "Saving..." : "Save My Note"}
-                          </button>
+                          <div className="ml-auto flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNotesDraft("");
+                              }}
+                              className="inline-flex h-8 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white px-3 text-[11px] font-extrabold text-[#1F2937]/75 transition hover:bg-[#F5F7FA]"
+                            >
+                              Clear
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleSaveNotes();
+                              }}
+                              disabled={isSavingNotes || !canModifyRoomContent}
+                              className="btn-3d btn-3d-green inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                              {isSavingNotes ? "Saving..." : "Save My Note"}
+                            </button>
+                          </div>
                         </div>
                       </div>
 
@@ -3494,9 +3670,15 @@ export default function StudyRoomsPanel({
       {showLeaveConfirm && roomDetail ? (
         <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/35 px-4">
           <div className="w-full max-w-3xl rounded-[1.5rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_8px_0_#1F2937,0_18px_26px_rgba(31,41,55,0.16)]">
-            <p className="text-xl font-extrabold text-[#1F2937]">Save room content before leaving?</p>
+            <p className="text-xl font-extrabold text-[#1F2937]">
+              {leaveSaveModalMode === "room_closed"
+                ? "Room closed: save room content?"
+                : "Save room content before leaving?"}
+            </p>
             <p className="mt-2 text-sm font-semibold text-[#1F2937]/72">
-              Select shared notes, resources, and AI Tutor exchanges you want to save into your personal notebook.
+              {leaveSaveModalMode === "room_closed"
+                ? "This room is now closed. Select shared notes, resources, and AI Tutor exchanges to save into your personal notebook."
+                : "Select shared notes, resources, and AI Tutor exchanges you want to save into your personal notebook."}
             </p>
 
             <div className="mt-3 rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
@@ -3505,18 +3687,62 @@ export default function StudyRoomsPanel({
                   <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
                     Choose Notebook
                   </label>
-                  <select
-                    value={selectedLeaveNotebookId}
-                    onChange={(event) => setSelectedLeaveNotebookId(event.target.value)}
-                    className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                  >
-                    <option value="">Select notebook</option>
-                    {leaveSaveNotebooks.map((notebook) => (
-                      <option key={notebook.id} value={notebook.id}>
-                        {notebook.name}
-                      </option>
-                    ))}
-                  </select>
+                  {leaveSaveNotebooks.length > 0 ? (
+                    <>
+                      <select
+                        value={selectedLeaveNotebookId}
+                        onChange={(event) => {
+                          setSelectedLeaveNotebookId(event.target.value);
+                          if (event.target.value) {
+                            setShowCreateLeaveNotebook(false);
+                          }
+                        }}
+                        className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                      >
+                        <option value="">Select notebook</option>
+                        {leaveSaveNotebooks.map((notebook) => (
+                          <option key={notebook.id} value={notebook.id}>
+                            {notebook.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowCreateLeaveNotebook((previous) => !previous);
+                          setSelectedLeaveNotebookId("");
+                        }}
+                        className="mt-2 inline-flex h-8 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white px-3 text-[11px] font-extrabold text-[#1F2937]/78 transition hover:bg-[#F5F7FA]"
+                      >
+                        {showCreateLeaveNotebook ? "Use Existing Notebook" : "Create New Notebook"}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-xs font-semibold text-[#1F2937]/70">
+                      You don&apos;t have a notebook yet. Create one now to save your selected Study Room content.
+                    </p>
+                  )}
+
+                  {(showCreateLeaveNotebook || leaveSaveNotebooks.length === 0) ? (
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        value={newLeaveNotebookName}
+                        onChange={(event) => setNewLeaveNotebookName(event.target.value)}
+                        placeholder="Notebook name"
+                        className="w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void createLeaveNotebookInline();
+                        }}
+                        disabled={isCreatingLeaveNotebook || !normalizedLeaveNotebookName}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-3 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isCreatingLeaveNotebook ? "Creating..." : "Create"}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
                 <div>
                   <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
@@ -3530,11 +3756,6 @@ export default function StudyRoomsPanel({
                   />
                 </div>
               </div>
-              {leaveSaveNotebooks.length === 0 && !isLoadingLeaveSaveContent ? (
-                <p className="mt-2 text-xs font-semibold text-[#c62828]">
-                  No notebook found. Create one in Notes page first.
-                </p>
-              ) : null}
               <p className="mt-1 text-xs font-semibold text-[#1F2937]/62">
                 Selected items: {selectedLeaveItemCount}
               </p>
@@ -3687,21 +3908,23 @@ export default function StudyRoomsPanel({
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setShowLeaveConfirm(false)}
+                onClick={closeLeaveSaveModalWithoutSaving}
                 className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm"
               >
-                Cancel
+                Skip
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void executeLeaveRoom();
-                }}
-                disabled={isLeavingRoom || isSavingLeaveSelections}
-                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {isLeavingRoom ? "Leaving..." : "Leave Without Saving"}
-              </button>
+              {leaveSaveModalMode === "before_leave" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void executeLeaveRoom();
+                  }}
+                  disabled={isLeavingRoom || isSavingLeaveSelections}
+                  className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isLeavingRoom ? "Leaving..." : "Leave Without Saving"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => {
@@ -3709,10 +3932,10 @@ export default function StudyRoomsPanel({
                 }}
                 disabled={
                   isSavingLeaveSelections ||
+                  isCreatingLeaveNotebook ||
                   isLeavingRoom ||
                   isLoadingLeaveSaveContent ||
-                  !selectedLeaveNotebookId ||
-                  leaveSaveNotebooks.length === 0
+                  !canResolveLeaveNotebookForSave
                 }
                 className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >

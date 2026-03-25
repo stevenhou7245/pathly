@@ -219,7 +219,8 @@ async function markRoomExpired(roomId: string) {
   const { error } = await supabaseAdmin
     .from("study_rooms")
     .update({
-      status: "expired",
+      status: "closed",
+      ended_at: nowIso,
     })
     .eq("id", roomId)
     .eq("status", "active");
@@ -232,12 +233,37 @@ async function markRoomExpired(roomId: string) {
       ...toErrorDetails(error),
     });
   }
-  if (!error) {
-    console.info("[study_room] duration_expired", {
+  if (error) {
+    return;
+  }
+
+  const participantsCloseResult = await supabaseAdmin
+    .from("study_room_participants")
+    .update({
+      left_at: nowIso,
+      presence_state: "offline",
+      focus_mode: false,
+      focus_started_at: null,
+      current_streak_seconds: 0,
+      last_active_at: nowIso,
+    })
+    .eq("room_id", roomId)
+    .is("left_at", null);
+  if (participantsCloseResult.error) {
+    console.warn("[study_room] duration_close_participants_update_failed", {
+      table: "study_room_participants",
+      query: "markRoomExpired",
       room_id: roomId,
       at: nowIso,
+      ...toErrorDetails(participantsCloseResult.error),
     });
   }
+
+  console.info("[study_room] duration_expired", {
+    room_id: roomId,
+    at: nowIso,
+    converted_to_status: "closed",
+  });
 }
 
 async function loadRoomById(roomId: string) {
@@ -262,9 +288,10 @@ async function ensureRoomLifecycle(room: ReturnType<typeof sanitizeRoomRow>) {
       active: false,
       room: {
         ...room,
-        status: "expired",
+        status: "closed",
+        ended_at: new Date().toISOString(),
       },
-      code: "ROOM_EXPIRED" as const,
+      code: "ROOM_CLOSED" as const,
     } as const;
   }
 
@@ -272,7 +299,7 @@ async function ensureRoomLifecycle(room: ReturnType<typeof sanitizeRoomRow>) {
     return {
       active: false,
       room,
-      code: "ROOM_EXPIRED" as const,
+      code: "ROOM_CLOSED" as const,
     } as const;
   }
 

@@ -81,12 +81,6 @@ export async function POST(request: Request) {
           { status: 409 },
         );
       }
-      if (result.code === "ROOM_EXPIRED") {
-        return NextResponse.json<JoinRoomResponse>(
-          { success: false, message: "This study room has expired and is waiting for the creator." },
-          { status: 400 },
-        );
-      }
       return NextResponse.json<JoinRoomResponse>(
         { success: false, message: "This study room has already been closed." },
         { status: 400 },

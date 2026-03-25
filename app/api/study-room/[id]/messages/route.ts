@@ -164,12 +164,6 @@ export async function POST(
           { status: 404 },
         );
       }
-      if (result.code === "ROOM_EXPIRED") {
-        return NextResponse.json<StudyRoomMessagesResponse>(
-          { success: false, message: "This study room has expired and is waiting for creator action." },
-          { status: 400 },
-        );
-      }
       if (result.code === "ROOM_CLOSED") {
         return NextResponse.json<StudyRoomMessagesResponse>(
           { success: false, message: "This study room has been closed." },

@@ -648,14 +648,17 @@ export async function loadStudyRoomSavableContent(params: {
     getStudyRoomNotes({
       userId: params.userId,
       roomId: params.roomId,
+      membershipMode: "active_or_closed_historical",
     }),
     listStudyRoomResources({
       userId: params.userId,
       roomId: params.roomId,
+      membershipMode: "active_or_closed_historical",
     }),
     listStudyRoomAiMessages({
       userId: params.userId,
       roomId: params.roomId,
+      membershipMode: "active_or_closed_historical",
     }),
   ]);
 
