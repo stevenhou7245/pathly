@@ -2,6 +2,7 @@
 
 import { mapStudyRoomRealtimeMessage } from "@/lib/chatRealtime";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type StudyRoomListItem = {
@@ -299,6 +300,16 @@ function appendStudyRoomMessageUnique(
     return previous;
   }
   return [...previous, incoming].sort((a, b) =>
+    (a.created_at ?? "").localeCompare(b.created_at ?? ""),
+  );
+}
+
+function upsertStudyRoomMessageByCreatedAt(
+  previous: StudyRoomMessage[],
+  incoming: StudyRoomMessage,
+) {
+  const withoutSameId = previous.filter((message) => message.id !== incoming.id);
+  return [...withoutSameId, incoming].sort((a, b) =>
     (a.created_at ?? "").localeCompare(b.created_at ?? ""),
   );
 }
@@ -1369,267 +1380,372 @@ export default function StudyRoomsPanel({
       return;
     }
 
-    const channel = supabaseClient
-      .channel(`study-room:${activeRoomId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "study_room_messages",
-          filter: `room_id=eq.${activeRoomId}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const mapped = mapStudyRoomRealtimeMessage(payload.new);
-          if (!mapped.id || mapped.room_id !== activeRoomId) {
-            return;
-          }
+    console.info("[study_room_realtime] subscription_start", {
+      room_id: activeRoomId,
+      pattern: "friend-chat-style per-table channels",
+    });
 
-          const senderIsParticipant =
-            participantsRef.current.length === 0 ||
-            participantsRef.current.some((row) => row.user_id === mapped.sender_id);
-          if (!senderIsParticipant) {
-            console.warn("[study_room_realtime] unauthorized_sender_ignored", {
+    const channels: RealtimeChannel[] = [];
+    const subscribeTableChannel = (params: {
+      channelName: string;
+      table: string;
+      event: "*" | "INSERT" | "UPDATE" | "DELETE";
+      filter: string;
+      onEvent: (payload: {
+        eventType: "INSERT" | "UPDATE" | "DELETE";
+        new: Record<string, unknown> | null;
+        old: Record<string, unknown> | null;
+      }) => void;
+      onError?: () => void;
+    }) => {
+      const channel = supabaseClient
+        .channel(params.channelName)
+        .on(
+          "postgres_changes",
+          {
+            event: params.event,
+            schema: "public",
+            table: params.table,
+            filter: params.filter,
+          },
+          (payload) => {
+            if (!active) {
+              return;
+            }
+            params.onEvent({
+              eventType: payload.eventType as "INSERT" | "UPDATE" | "DELETE",
+              new: (payload.new ?? null) as Record<string, unknown> | null,
+              old: (payload.old ?? null) as Record<string, unknown> | null,
+            });
+          },
+        )
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            console.info("[study_room_realtime] subscription_succeeded", {
               room_id: activeRoomId,
-              sender_id: mapped.sender_id,
+              table: params.table,
+              channel: params.channelName,
             });
             return;
           }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.error("[study_room_realtime] subscription_failed", {
+              room_id: activeRoomId,
+              table: params.table,
+              channel: params.channelName,
+              status,
+            });
+            params.onError?.();
+          }
+        });
+      channels.push(channel);
+    };
 
-          console.info("[study_room_realtime] message_received", {
-            room_id: mapped.room_id,
-            sender_id: mapped.sender_id,
-            message_id: mapped.id,
-            type: mapped.type,
-          });
-
-          setMessages((previous) =>
-            appendStudyRoomMessageUnique(previous, {
-              id: mapped.id,
-              room_id: mapped.room_id,
-              sender_id: mapped.sender_id,
-              body: mapped.body,
-              created_at: mapped.created_at,
-              type: mapped.type,
-            }),
-          );
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "study_room_participants",
-          filter: `room_id=eq.${activeRoomId}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const eventType = payload.eventType;
-          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
-          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
-          const changedParticipantId = toSafeString(newRow?.id ?? oldRow?.id);
-
-          console.info("[study_room_realtime] participants_changed", {
-            room_id: activeRoomId,
-            event_type: eventType,
-            participant_id: changedParticipantId || null,
-          });
-
-          if (eventType === "DELETE") {
-            setParticipants((previous) =>
-              normalizeParticipantsByJoinedAt(
-                previous.filter((item) => item.id !== changedParticipantId),
-              ),
-            );
-            void loadRoomData(activeRoomId);
-            return;
-          }
-
-          if ((eventType === "INSERT" || eventType === "UPDATE") && newRow) {
-            setParticipants((previous) => mergeParticipantRealtimeRow({
-              previous,
-              row: newRow,
-            }));
-            if (eventType === "INSERT") {
-              void loadRoomData(activeRoomId);
-            }
-            return;
-          }
-
-          void loadRoomData(activeRoomId);
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "study_room_note_entries",
-          filter: `room_id=eq.${activeRoomId}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const eventType = payload.eventType;
-          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
-          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
-          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
-          if (!changedId) {
-            return;
-          }
-          if (eventType === "DELETE") {
-            setNoteEntries((previous) =>
-              normalizeNoteEntriesByCreatedAt(previous.filter((entry) => entry.id !== changedId)),
-            );
-            setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
-            return;
-          }
-          if (!newRow) {
-            return;
-          }
-          const isDeleted = toSafeBoolean(newRow.is_deleted);
-          setNoteEntries((previous) =>
-            mergeNoteEntryRealtimeRow({
-              previous,
-              row: newRow,
-              roomId: activeRoomId,
-              participants: participantsRef.current,
-            }),
-          );
-          if (isDeleted) {
-            setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
-            return;
-          }
-          const authorUserId = toSafeString(newRow.author_user_id);
-          if (authorUserId && authorUserId === viewerUserIdRef.current) {
-            setMyNoteEntryId(changedId);
-          }
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "study_room_resources",
-          filter: `room_id=eq.${activeRoomId}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const eventType = payload.eventType;
-          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
-          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
-          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
-          if (!changedId) {
-            return;
-          }
-          if (eventType === "DELETE") {
-            setResources((previous) =>
-              normalizeResourcesByCreatedAt(previous.filter((resource) => resource.id !== changedId)),
-            );
-            return;
-          }
-          if (!newRow) {
-            return;
-          }
-          setResources((previous) =>
-            mergeResourceRealtimeRow({
-              previous,
-              row: newRow,
-              roomId: activeRoomId,
-              participants: participantsRef.current,
-            }),
-          );
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "study_room_ai_messages",
-          filter: `room_id=eq.${activeRoomId}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const eventType = payload.eventType;
-          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
-          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
-          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
-          if (!changedId) {
-            return;
-          }
-          if (eventType === "DELETE") {
-            setAiMessages((previous) =>
-              normalizeAiMessagesByCreatedAt(previous.filter((message) => message.id !== changedId)),
-            );
-            return;
-          }
-          if (!newRow) {
-            return;
-          }
-          setAiMessages((previous) =>
-            mergeAiMessageRealtimeRow({
-              previous,
-              row: newRow,
-              roomId: activeRoomId,
-              participants: participantsRef.current,
-            }),
-          );
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "study_rooms",
-          filter: `id=eq.${activeRoomId}`,
-        },
-        () => {
-          console.info("[study_room_realtime] room_state_changed", {
-            room_id: activeRoomId,
-          });
-          void loadRoomData(activeRoomId);
-        },
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          console.info("[study_room_realtime] subscription_succeeded", {
-            room_id: activeRoomId,
+    subscribeTableChannel({
+      channelName: `study-room-messages:${activeRoomId}`,
+      table: "study_room_messages",
+      event: "*",
+      filter: `room_id=eq.${activeRoomId}`,
+      onEvent: ({ eventType, new: newRow, old: oldRow }) => {
+        const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+        if (!changedId) {
+          return;
+        }
+        console.info("[study_room_realtime] message_event", {
+          room_id: activeRoomId,
+          event_type: eventType,
+          message_id: changedId,
+        });
+        if (eventType === "DELETE") {
+          setMessages((previous) => {
+            const next = previous.filter((message) => message.id !== changedId);
+            console.info("[study_room_realtime] message_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              count: next.length,
+            });
+            return next;
           });
           return;
         }
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          console.error("[study_room_realtime] subscription_failed", {
-            room_id: activeRoomId,
-            status,
-          });
+        if (!newRow) {
+          return;
         }
-      });
+        const mapped = mapStudyRoomRealtimeMessage(newRow);
+        if (!mapped.id || mapped.room_id !== activeRoomId) {
+          return;
+        }
+        setMessages((previous) => {
+          const next = upsertStudyRoomMessageByCreatedAt(previous, {
+            id: mapped.id,
+            room_id: mapped.room_id,
+            sender_id: mapped.sender_id,
+            body: mapped.body,
+            created_at: mapped.created_at,
+            type: mapped.type,
+          });
+          console.info("[study_room_realtime] message_state_updated", {
+            room_id: activeRoomId,
+            event_type: eventType,
+            count: next.length,
+          });
+          return next;
+        });
+      },
+      onError: () => {
+        void loadRoomData(activeRoomId);
+      },
+    });
+
+    subscribeTableChannel({
+      channelName: `study-room-participants:${activeRoomId}`,
+      table: "study_room_participants",
+      event: "*",
+      filter: `room_id=eq.${activeRoomId}`,
+      onEvent: ({ eventType, new: newRow, old: oldRow }) => {
+        const changedParticipantId = toSafeString(newRow?.id ?? oldRow?.id);
+        console.info("[study_room_realtime] participant_event", {
+          room_id: activeRoomId,
+          event_type: eventType,
+          participant_id: changedParticipantId || null,
+          timestamp_field: "joined_at",
+        });
+        if (!changedParticipantId) {
+          return;
+        }
+        if (eventType === "DELETE") {
+          setParticipants((previous) => {
+            const next = normalizeParticipantsByJoinedAt(
+              previous.filter((item) => item.id !== changedParticipantId),
+            );
+            console.info("[study_room_realtime] participant_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              count: next.length,
+            });
+            return next;
+          });
+          void loadRoomData(activeRoomId);
+          return;
+        }
+        if (!newRow) {
+          return;
+        }
+        setParticipants((previous) => {
+          const next = mergeParticipantRealtimeRow({
+            previous,
+            row: newRow,
+          });
+          console.info("[study_room_realtime] participant_state_updated", {
+            room_id: activeRoomId,
+            event_type: eventType,
+            count: next.length,
+          });
+          return next;
+        });
+        if (eventType === "INSERT") {
+          void loadRoomData(activeRoomId);
+        }
+      },
+      onError: () => {
+        void loadRoomData(activeRoomId);
+      },
+    });
+
+    subscribeTableChannel({
+      channelName: `study-room-notes:${activeRoomId}`,
+      table: "study_room_note_entries",
+      event: "*",
+      filter: `room_id=eq.${activeRoomId}`,
+      onEvent: ({ eventType, new: newRow, old: oldRow }) => {
+        const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+        if (!changedId) {
+          return;
+        }
+        console.info("[study_room_realtime] note_event", {
+          room_id: activeRoomId,
+          event_type: eventType,
+          note_entry_id: changedId,
+        });
+        if (eventType === "DELETE") {
+          setNoteEntries((previous) => {
+            const next = normalizeNoteEntriesByCreatedAt(
+              previous.filter((entry) => entry.id !== changedId),
+            );
+            console.info("[study_room_realtime] note_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              count: next.length,
+            });
+            return next;
+          });
+          setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
+          return;
+        }
+        if (!newRow) {
+          return;
+        }
+        const isDeleted = toSafeBoolean(newRow.is_deleted);
+        setNoteEntries((previous) => {
+          const next = mergeNoteEntryRealtimeRow({
+            previous,
+            row: newRow,
+            roomId: activeRoomId,
+            participants: participantsRef.current,
+          });
+          console.info("[study_room_realtime] note_state_updated", {
+            room_id: activeRoomId,
+            event_type: eventType,
+            count: next.length,
+          });
+          return next;
+        });
+        if (isDeleted) {
+          setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
+          return;
+        }
+        const authorUserId = toSafeString(newRow.author_user_id);
+        if (authorUserId && authorUserId === viewerUserIdRef.current) {
+          setMyNoteEntryId(changedId);
+        }
+      },
+      onError: () => {
+        void loadWorkspaceExtras(activeRoomId);
+      },
+    });
+
+    subscribeTableChannel({
+      channelName: `study-room-resources:${activeRoomId}`,
+      table: "study_room_resources",
+      event: "*",
+      filter: `room_id=eq.${activeRoomId}`,
+      onEvent: ({ eventType, new: newRow, old: oldRow }) => {
+        const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+        if (!changedId) {
+          return;
+        }
+        console.info("[study_room_realtime] resource_event", {
+          room_id: activeRoomId,
+          event_type: eventType,
+          resource_id: changedId,
+        });
+        if (eventType === "DELETE") {
+          setResources((previous) => {
+            const next = normalizeResourcesByCreatedAt(
+              previous.filter((resource) => resource.id !== changedId),
+            );
+            console.info("[study_room_realtime] resource_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              count: next.length,
+            });
+            return next;
+          });
+          return;
+        }
+        if (!newRow) {
+          return;
+        }
+        setResources((previous) => {
+          const next = mergeResourceRealtimeRow({
+            previous,
+            row: newRow,
+            roomId: activeRoomId,
+            participants: participantsRef.current,
+          });
+          console.info("[study_room_realtime] resource_state_updated", {
+            room_id: activeRoomId,
+            event_type: eventType,
+            count: next.length,
+          });
+          return next;
+        });
+      },
+      onError: () => {
+        void loadWorkspaceExtras(activeRoomId);
+      },
+    });
+
+    subscribeTableChannel({
+      channelName: `study-room-ai:${activeRoomId}`,
+      table: "study_room_ai_messages",
+      event: "*",
+      filter: `room_id=eq.${activeRoomId}`,
+      onEvent: ({ eventType, new: newRow, old: oldRow }) => {
+        const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+        if (!changedId) {
+          return;
+        }
+        console.info("[study_room_realtime] ai_event", {
+          room_id: activeRoomId,
+          event_type: eventType,
+          ai_message_id: changedId,
+        });
+        if (eventType === "DELETE") {
+          setAiMessages((previous) => {
+            const next = normalizeAiMessagesByCreatedAt(
+              previous.filter((message) => message.id !== changedId),
+            );
+            console.info("[study_room_realtime] ai_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              count: next.length,
+            });
+            return next;
+          });
+          return;
+        }
+        if (!newRow) {
+          return;
+        }
+        setAiMessages((previous) => {
+          const next = mergeAiMessageRealtimeRow({
+            previous,
+            row: newRow,
+            roomId: activeRoomId,
+            participants: participantsRef.current,
+          });
+          console.info("[study_room_realtime] ai_state_updated", {
+            room_id: activeRoomId,
+            event_type: eventType,
+            count: next.length,
+          });
+          return next;
+        });
+      },
+      onError: () => {
+        void loadWorkspaceExtras(activeRoomId);
+      },
+    });
+
+    subscribeTableChannel({
+      channelName: `study-room-state:${activeRoomId}`,
+      table: "study_rooms",
+      event: "UPDATE",
+      filter: `id=eq.${activeRoomId}`,
+      onEvent: () => {
+        console.info("[study_room_realtime] room_state_changed", {
+          room_id: activeRoomId,
+        });
+        void loadRoomData(activeRoomId);
+        void loadWorkspaceExtras(activeRoomId);
+      },
+      onError: () => {
+        void loadRoomData(activeRoomId);
+      },
+    });
 
     return () => {
       active = false;
       console.info("[study_room_realtime] subscription_cleanup", {
         room_id: activeRoomId,
       });
-      void channel.unsubscribe();
-      if (supabaseClient) {
+      channels.forEach((channel) => {
+        void channel.unsubscribe();
         void supabaseClient.removeChannel(channel);
-      }
+      });
     };
-  }, [activeRoomId, loadRoomData]);
+  }, [activeRoomId, loadRoomData, loadWorkspaceExtras]);
 
   async function handleCreateRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

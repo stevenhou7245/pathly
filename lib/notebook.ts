@@ -117,6 +117,16 @@ function toErrorDetails(error: unknown) {
   };
 }
 
+function isLegacyNotebookTopicRequiredError(error: unknown) {
+  const details = toErrorDetails(error);
+  if (details.code !== "23502") {
+    return false;
+  }
+  const message = details.message.toLowerCase();
+  const detailsText = (details.details ?? "").toLowerCase();
+  return message.includes("topic") || detailsText.includes("topic");
+}
+
 function compareIsoAsc(a: string | null, b: string | null) {
   return (a ?? "").localeCompare(b ?? "");
 }
@@ -367,18 +377,39 @@ export async function createUserNotebook(params: { userId: string; name: string 
     throw new Error("Notebook name is required.");
   }
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     user_id: params.userId,
     name: normalizedName,
     is_deleted: false,
   };
 
-  const { data, error } = await supabaseAdmin
+  let { data, error } = await supabaseAdmin
     .from("user_notebooks")
     .insert(payload)
     .select("id, user_id, name, created_at, updated_at, is_deleted")
     .limit(1)
     .maybeSingle();
+
+  if (error && isLegacyNotebookTopicRequiredError(error)) {
+    const compatibilityPayload = {
+      ...payload,
+      // Backward compatibility only for environments where user_notebooks.topic is still NOT NULL.
+      topic: normalizedName,
+    };
+    console.warn("[user_notebook] legacy_topic_fallback_insert", {
+      table: "user_notebooks",
+      user_id: params.userId,
+      payload_keys: Object.keys(compatibilityPayload),
+    });
+    const retry = await supabaseAdmin
+      .from("user_notebooks")
+      .insert(compatibilityPayload)
+      .select("id, user_id, name, created_at, updated_at, is_deleted")
+      .limit(1)
+      .maybeSingle();
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error || !data) {
     const details = toErrorDetails(error);
