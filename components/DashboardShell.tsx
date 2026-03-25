@@ -256,6 +256,21 @@ function toIconLabel(value: string) {
   return `${words[0][0]}${words[1][0]}`.toUpperCase();
 }
 
+function toRealtimeLogDetails(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(error);
+  } catch {
+    serialized = "[unserializable]";
+  }
+  return {
+    error,
+    error_message: message,
+    error_serialized: serialized,
+  };
+}
+
 function createPlaceholderFolder(): LearningFolder {
   return {
     id: "empty-folder",
@@ -511,13 +526,16 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       return;
     }
 
+    const subscriptionRun = `${currentUserId}:${Date.now()}`;
     let active = true;
     let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
     try {
       supabaseClient = getSupabaseBrowserClient();
     } catch (error) {
       console.warn("[dashboard_badge_realtime] client_init_failed", {
-        reason: error instanceof Error ? error.message : String(error),
+        current_user_id: currentUserId,
+        subscription_run: subscriptionRun,
+        ...toRealtimeLogDetails(error),
       });
       return;
     }
@@ -529,8 +547,14 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       void loadMessagesUnreadCount();
     };
 
+    console.info("[dashboard_badge_realtime] subscription_start", {
+      current_user_id: currentUserId,
+      subscription_run: subscriptionRun,
+      channel: `dashboard-badges-${currentUserId}`,
+    });
+
     const channel = supabaseClient
-      .channel(`dashboard-badges:${currentUserId}`)
+      .channel(`dashboard-badges-${currentUserId}`)
       .on(
         "postgres_changes",
         {
@@ -573,17 +597,29 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
         },
         refreshUnreadBadges,
       )
-      .subscribe((status) => {
+      .subscribe((status, error) => {
+        console.info("[dashboard_badge_realtime] subscription_status", {
+          current_user_id: currentUserId,
+          subscription_run: subscriptionRun,
+          status,
+          ...(error ? toRealtimeLogDetails(error) : {}),
+        });
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           console.error("[dashboard_badge_realtime] subscription_failed", {
             current_user_id: currentUserId,
+            subscription_run: subscriptionRun,
             status,
+            ...(error ? toRealtimeLogDetails(error) : {}),
           });
         }
       });
 
     return () => {
       active = false;
+      console.info("[dashboard_badge_realtime] subscription_cleanup", {
+        current_user_id: currentUserId,
+        subscription_run: subscriptionRun,
+      });
       void channel.unsubscribe();
       if (supabaseClient) {
         void supabaseClient.removeChannel(channel);

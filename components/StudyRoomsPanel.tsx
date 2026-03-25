@@ -388,6 +388,21 @@ function toSafeNullableNonNegativeInt(value: unknown) {
   return null;
 }
 
+function toRealtimeLogDetails(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(error);
+  } catch {
+    serialized = "[unserializable]";
+  }
+  return {
+    error,
+    error_message: message,
+    error_serialized: serialized,
+  };
+}
+
 function normalizePresenceState(value: unknown): StudyRoomParticipant["presence_state"] {
   const normalized = toSafeString(value).trim().toLowerCase();
   if (normalized === "idle" || normalized === "focus" || normalized === "offline") {
@@ -891,6 +906,9 @@ export default function StudyRoomsPanel({
   const [newMessagesCount, setNewMessagesCount] = useState(0);
   const participantsRef = useRef<StudyRoomParticipant[]>([]);
   const viewerUserIdRef = useRef("");
+  const loadRoomDataRef = useRef<(roomId: string) => Promise<void>>(async () => {});
+  const loadWorkspaceExtrasRef = useRef<(roomId: string) => Promise<void>>(async () => {});
+  const realtimeSubscriptionRunRef = useRef(0);
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) ?? null,
@@ -1129,6 +1147,14 @@ export default function StudyRoomsPanel({
   );
 
   useEffect(() => {
+    loadRoomDataRef.current = loadRoomData;
+  }, [loadRoomData]);
+
+  useEffect(() => {
+    loadWorkspaceExtrasRef.current = loadWorkspaceExtras;
+  }, [loadWorkspaceExtras]);
+
+  useEffect(() => {
     if (!activeRoomId && rooms.length > 0) {
       onSelectRoom(rooms[0].id);
     }
@@ -1143,7 +1169,7 @@ export default function StudyRoomsPanel({
     }
     void loadRoomData(activeRoomId);
     void loadWorkspaceExtras(activeRoomId);
-  }, [activeRoomId, loadRoomData, loadWorkspaceExtras]);
+  }, [activeRoomId]);
 
   useEffect(() => {
     if (!activeRoomId) {
@@ -1368,6 +1394,8 @@ export default function StudyRoomsPanel({
       return;
     }
 
+    const subscriptionRun = realtimeSubscriptionRunRef.current + 1;
+    realtimeSubscriptionRunRef.current = subscriptionRun;
     let active = true;
     let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
     try {
@@ -1375,13 +1403,15 @@ export default function StudyRoomsPanel({
     } catch (error) {
       console.warn("[study_room_realtime] client_init_failed", {
         room_id: activeRoomId,
-        reason: error instanceof Error ? error.message : String(error),
+        subscription_run: subscriptionRun,
+        ...toRealtimeLogDetails(error),
       });
       return;
     }
 
     console.info("[study_room_realtime] subscription_start", {
       room_id: activeRoomId,
+      subscription_run: subscriptionRun,
       pattern: "friend-chat-style per-table channels",
     });
 
@@ -1398,6 +1428,14 @@ export default function StudyRoomsPanel({
       }) => void;
       onError?: () => void;
     }) => {
+      console.info("[study_room_realtime] channel_subscribe_requested", {
+        room_id: activeRoomId,
+        subscription_run: subscriptionRun,
+        channel: params.channelName,
+        table: params.table,
+        event: params.event,
+        filter: params.filter,
+      });
       const channel = supabaseClient
         .channel(params.channelName)
         .on(
@@ -1419,10 +1457,28 @@ export default function StudyRoomsPanel({
             });
           },
         )
-        .subscribe((status) => {
+        .subscribe((status, error) => {
+          console.info("[study_room_realtime] subscription_status", {
+            room_id: activeRoomId,
+            subscription_run: subscriptionRun,
+            table: params.table,
+            channel: params.channelName,
+            status,
+            ...(error ? toRealtimeLogDetails(error) : {}),
+          });
           if (status === "SUBSCRIBED") {
             console.info("[study_room_realtime] subscription_succeeded", {
               room_id: activeRoomId,
+              subscription_run: subscriptionRun,
+              table: params.table,
+              channel: params.channelName,
+            });
+            return;
+          }
+          if (status === "CLOSED") {
+            console.info("[study_room_realtime] subscription_closed", {
+              room_id: activeRoomId,
+              subscription_run: subscriptionRun,
               table: params.table,
               channel: params.channelName,
             });
@@ -1431,9 +1487,11 @@ export default function StudyRoomsPanel({
           if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
             console.error("[study_room_realtime] subscription_failed", {
               room_id: activeRoomId,
+              subscription_run: subscriptionRun,
               table: params.table,
               channel: params.channelName,
               status,
+              ...(error ? toRealtimeLogDetails(error) : {}),
             });
             params.onError?.();
           }
@@ -1442,7 +1500,7 @@ export default function StudyRoomsPanel({
     };
 
     subscribeTableChannel({
-      channelName: `study-room-messages:${activeRoomId}`,
+      channelName: `study-room-messages-${activeRoomId}`,
       table: "study_room_messages",
       event: "*",
       filter: `room_id=eq.${activeRoomId}`,
@@ -1493,12 +1551,12 @@ export default function StudyRoomsPanel({
         });
       },
       onError: () => {
-        void loadRoomData(activeRoomId);
+        void loadRoomDataRef.current(activeRoomId);
       },
     });
 
     subscribeTableChannel({
-      channelName: `study-room-participants:${activeRoomId}`,
+      channelName: `study-room-participants-${activeRoomId}`,
       table: "study_room_participants",
       event: "*",
       filter: `room_id=eq.${activeRoomId}`,
@@ -1525,7 +1583,8 @@ export default function StudyRoomsPanel({
             });
             return next;
           });
-          void loadRoomData(activeRoomId);
+          void loadRoomDataRef.current(activeRoomId);
+          void loadWorkspaceExtrasRef.current(activeRoomId);
           return;
         }
         if (!newRow) {
@@ -1544,16 +1603,18 @@ export default function StudyRoomsPanel({
           return next;
         });
         if (eventType === "INSERT") {
-          void loadRoomData(activeRoomId);
+          void loadRoomDataRef.current(activeRoomId);
+          void loadWorkspaceExtrasRef.current(activeRoomId);
         }
       },
       onError: () => {
-        void loadRoomData(activeRoomId);
+        void loadRoomDataRef.current(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
     });
 
     subscribeTableChannel({
-      channelName: `study-room-notes:${activeRoomId}`,
+      channelName: `study-room-notes-${activeRoomId}`,
       table: "study_room_note_entries",
       event: "*",
       filter: `room_id=eq.${activeRoomId}`,
@@ -1610,12 +1671,12 @@ export default function StudyRoomsPanel({
         }
       },
       onError: () => {
-        void loadWorkspaceExtras(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
     });
 
     subscribeTableChannel({
-      channelName: `study-room-resources:${activeRoomId}`,
+      channelName: `study-room-resources-${activeRoomId}`,
       table: "study_room_resources",
       event: "*",
       filter: `room_id=eq.${activeRoomId}`,
@@ -1662,12 +1723,12 @@ export default function StudyRoomsPanel({
         });
       },
       onError: () => {
-        void loadWorkspaceExtras(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
     });
 
     subscribeTableChannel({
-      channelName: `study-room-ai:${activeRoomId}`,
+      channelName: `study-room-ai-${activeRoomId}`,
       table: "study_room_ai_messages",
       event: "*",
       filter: `room_id=eq.${activeRoomId}`,
@@ -1714,12 +1775,12 @@ export default function StudyRoomsPanel({
         });
       },
       onError: () => {
-        void loadWorkspaceExtras(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
     });
 
     subscribeTableChannel({
-      channelName: `study-room-state:${activeRoomId}`,
+      channelName: `study-room-state-${activeRoomId}`,
       table: "study_rooms",
       event: "UPDATE",
       filter: `id=eq.${activeRoomId}`,
@@ -1727,11 +1788,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] room_state_changed", {
           room_id: activeRoomId,
         });
-        void loadRoomData(activeRoomId);
-        void loadWorkspaceExtras(activeRoomId);
+        void loadRoomDataRef.current(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
       onError: () => {
-        void loadRoomData(activeRoomId);
+        void loadRoomDataRef.current(activeRoomId);
+        void loadWorkspaceExtrasRef.current(activeRoomId);
       },
     });
 
@@ -1739,13 +1801,15 @@ export default function StudyRoomsPanel({
       active = false;
       console.info("[study_room_realtime] subscription_cleanup", {
         room_id: activeRoomId,
+        subscription_run: subscriptionRun,
+        channel_count: channels.length,
       });
       channels.forEach((channel) => {
         void channel.unsubscribe();
         void supabaseClient.removeChannel(channel);
       });
     };
-  }, [activeRoomId, loadRoomData, loadWorkspaceExtras]);
+  }, [activeRoomId]);
 
   async function handleCreateRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
