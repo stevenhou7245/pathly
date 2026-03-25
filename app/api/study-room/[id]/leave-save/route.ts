@@ -2,16 +2,19 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
 import {
+  listUserNotebooks,
   loadStudyRoomSavableContent,
-  saveStudyRoomContentToNotebook,
+  saveStudyRoomContentToNotebookEntry,
   type StudyRoomSavableContent,
+  type UserNotebookEntryRecord,
   type UserNotebookRecord,
 } from "@/lib/notebook";
 
 export const runtime = "nodejs";
 
 const leaveSavePostSchema = z.object({
-  topic: z.string().trim().min(1, "topic is required").max(200, "topic is too long"),
+  notebook_id: z.string().uuid("notebook_id must be a valid uuid"),
+  entry_topic: z.string().trim().min(1, "entry_topic is required").max(200, "entry_topic is too long"),
   selected_item_ids: z.array(z.string().trim().min(1)).max(500, "Too many selected items"),
 });
 
@@ -19,7 +22,9 @@ type LeaveSaveResponse = {
   success: boolean;
   message?: string;
   content?: StudyRoomSavableContent;
+  notebooks?: UserNotebookRecord[];
   notebook?: UserNotebookRecord;
+  entry?: UserNotebookEntryRecord;
   selected_summary?: {
     notes_count: number;
     resources_count: number;
@@ -48,10 +53,15 @@ export async function GET(
       );
     }
 
-    const loaded = await loadStudyRoomSavableContent({
-      userId: sessionUser.id,
-      roomId: id,
-    });
+    const [loaded, notebooks] = await Promise.all([
+      loadStudyRoomSavableContent({
+        userId: sessionUser.id,
+        roomId: id,
+      }),
+      listUserNotebooks({
+        userId: sessionUser.id,
+      }),
+    ]);
     if (!loaded.ok) {
       if (loaded.code === "NOT_FOUND") {
         return NextResponse.json<LeaveSaveResponse>(
@@ -69,6 +79,7 @@ export async function GET(
       {
         success: true,
         content: loaded.content,
+        notebooks,
       },
       {
         headers: {
@@ -128,10 +139,11 @@ export async function POST(
       );
     }
 
-    const saved = await saveStudyRoomContentToNotebook({
+    const saved = await saveStudyRoomContentToNotebookEntry({
       userId: sessionUser.id,
       roomId: id,
-      topic: parsed.data.topic,
+      notebookId: parsed.data.notebook_id,
+      entryTopic: parsed.data.entry_topic,
       selectedItemIds: parsed.data.selected_item_ids,
     });
     if (!saved.ok) {
@@ -142,8 +154,14 @@ export async function POST(
         );
       }
       return NextResponse.json<LeaveSaveResponse>(
-        { success: false, message: "You are not a participant of this room." },
-        { status: 403 },
+        {
+          success: false,
+          message:
+            saved.code === "NOTEBOOK_NOT_FOUND"
+              ? "Selected notebook not found."
+              : "You are not a participant of this room.",
+        },
+        { status: saved.code === "NOTEBOOK_NOT_FOUND" ? 404 : 403 },
       );
     }
 
@@ -151,6 +169,7 @@ export async function POST(
       {
         success: true,
         notebook: saved.notebook,
+        entry: saved.entry,
         selected_summary: saved.selected_summary,
       },
       { status: 201 },

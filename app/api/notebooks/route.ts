@@ -10,12 +10,7 @@ import {
 export const runtime = "nodejs";
 
 const notebookCreateSchema = z.object({
-  topic: z.string().trim().min(1, "topic is required").max(200, "topic is too long"),
-  content_md: z.string().max(500_000, "content is too large").optional().nullable(),
-  source_type: z
-    .enum(["manual", "study_room_exit_save", "study_room_manual_save"])
-    .optional(),
-  source_room_id: z.string().uuid("source_room_id must be a valid uuid").optional().nullable(),
+  name: z.string().trim().min(1, "name is required").max(200, "name is too long"),
 });
 
 type NotebooksResponse = {
@@ -92,10 +87,7 @@ export async function POST(request: Request) {
 
     const notebook = await createUserNotebook({
       userId: sessionUser.id,
-      topic: parsed.data.topic,
-      contentMd: parsed.data.content_md ?? null,
-      sourceType: parsed.data.source_type ?? "manual",
-      sourceRoomId: parsed.data.source_room_id ?? null,
+      name: parsed.data.name,
     });
 
     return NextResponse.json<NotebooksResponse>(

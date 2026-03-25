@@ -1277,7 +1277,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       return <ProfilePanel folder={activeFolder} />;
     }
     if (activeView === "notes") {
-      return <NotebookPanel folderName={activeFolder.name} />;
+      return <NotebookPanel />;
     }
     if (activeView === "friends") {
       return <FriendsPanel onMessagesUpdated={loadMessagesUnreadCount} />;

@@ -5,6 +5,15 @@ import { useEffect, useMemo, useState } from "react";
 type NotebookRecord = {
   id: string;
   user_id: string;
+  name: string;
+  created_at: string | null;
+  updated_at: string | null;
+  is_deleted: boolean;
+};
+
+type NotebookEntryRecord = {
+  id: string;
+  notebook_id: string;
   topic: string;
   content_md: string | null;
   source_type: "manual" | "study_room_exit_save" | "study_room_manual_save";
@@ -21,8 +30,18 @@ type NotebooksResponse = {
   notebook?: NotebookRecord;
 };
 
-type NotebookPanelProps = {
-  folderName: string;
+type NotebookEntriesResponse = {
+  success: boolean;
+  message?: string;
+  notebook?: NotebookRecord;
+  entries?: NotebookEntryRecord[];
+  entry?: NotebookEntryRecord;
+};
+
+type NotebookEntryUpdateResponse = {
+  success: boolean;
+  message?: string;
+  entry?: NotebookEntryRecord;
 };
 
 function formatTimestamp(value: string | null) {
@@ -42,34 +61,57 @@ function sortNotebooks(items: NotebookRecord[]) {
     if (updatedCompare !== 0) {
       return updatedCompare;
     }
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function sortEntries(items: NotebookEntryRecord[]) {
+  return [...items].sort((a, b) => {
+    const updatedCompare = (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
+    if (updatedCompare !== 0) {
+      return updatedCompare;
+    }
     return a.topic.localeCompare(b.topic);
   });
 }
 
-export default function NotebookPanel({ folderName }: NotebookPanelProps) {
+export default function NotebookPanel() {
   const [notebooks, setNotebooks] = useState<NotebookRecord[]>([]);
   const [selectedNotebookId, setSelectedNotebookId] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
+  const [selectedNotebookNameDraft, setSelectedNotebookNameDraft] = useState("");
+
+  const [entries, setEntries] = useState<NotebookEntryRecord[]>([]);
+  const [selectedEntryId, setSelectedEntryId] = useState("");
+  const [selectedEntryTopicDraft, setSelectedEntryTopicDraft] = useState("");
+  const [selectedEntryContentDraft, setSelectedEntryContentDraft] = useState("");
+
+  const [isLoadingNotebooks, setIsLoadingNotebooks] = useState(true);
+  const [isLoadingEntries, setIsLoadingEntries] = useState(false);
+  const [isCreatingNotebook, setIsCreatingNotebook] = useState(false);
+  const [isSavingNotebookName, setIsSavingNotebookName] = useState(false);
+  const [isCreatingEntry, setIsCreatingEntry] = useState(false);
+  const [isSavingEntry, setIsSavingEntry] = useState(false);
+
+  const [newNotebookName, setNewNotebookName] = useState("");
+  const [newEntryTopic, setNewEntryTopic] = useState("");
+  const [newEntryContent, setNewEntryContent] = useState("");
+
   const [error, setError] = useState("");
-
-  const [isAddTopicOpen, setIsAddTopicOpen] = useState(false);
-  const [newTopic, setNewTopic] = useState("");
-  const [isCreating, setIsCreating] = useState(false);
-
-  const [contentDraft, setContentDraft] = useState("");
-  const [topicDraft, setTopicDraft] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
 
   const sortedNotebooks = useMemo(() => sortNotebooks(notebooks), [notebooks]);
-
+  const sortedEntries = useMemo(() => sortEntries(entries), [entries]);
   const selectedNotebook = useMemo(
     () => sortedNotebooks.find((item) => item.id === selectedNotebookId) ?? null,
     [selectedNotebookId, sortedNotebooks],
   );
+  const selectedEntry = useMemo(
+    () => sortedEntries.find((item) => item.id === selectedEntryId) ?? null,
+    [selectedEntryId, sortedEntries],
+  );
 
   async function loadNotebooks() {
-    setIsLoading(true);
+    setIsLoadingNotebooks(true);
     setError("");
     try {
       const response = await fetch("/api/notebooks", {
@@ -82,26 +124,64 @@ export default function NotebookPanel({ folderName }: NotebookPanelProps) {
       }
       const rows = sortNotebooks(payload.notebooks ?? []);
       setNotebooks(rows);
-      const first = rows[0] ?? null;
-      setSelectedNotebookId(first?.id ?? "");
-      setTopicDraft(first?.topic ?? "");
-      setContentDraft(first?.content_md ?? "");
+
+      const nextNotebook = rows.find((row) => row.id === selectedNotebookId) ?? rows[0] ?? null;
+      setSelectedNotebookId(nextNotebook?.id ?? "");
+      setSelectedNotebookNameDraft(nextNotebook?.name ?? "");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to load notebooks.");
       setNotebooks([]);
       setSelectedNotebookId("");
+      setSelectedNotebookNameDraft("");
     } finally {
-      setIsLoading(false);
+      setIsLoadingNotebooks(false);
+    }
+  }
+
+  async function loadNotebookEntries(notebookId: string) {
+    if (!notebookId) {
+      setEntries([]);
+      setSelectedEntryId("");
+      setSelectedEntryTopicDraft("");
+      setSelectedEntryContentDraft("");
+      return;
+    }
+    setIsLoadingEntries(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/notebooks/${encodeURIComponent(notebookId)}/entries`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as NotebookEntriesResponse;
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message ?? "Unable to load notebook entries.");
+      }
+      const rows = sortEntries(payload.entries ?? []);
+      setEntries(rows);
+
+      const nextEntry = rows.find((row) => row.id === selectedEntryId) ?? rows[0] ?? null;
+      setSelectedEntryId(nextEntry?.id ?? "");
+      setSelectedEntryTopicDraft(nextEntry?.topic ?? "");
+      setSelectedEntryContentDraft(nextEntry?.content_md ?? "");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to load notebook entries.");
+      setEntries([]);
+      setSelectedEntryId("");
+      setSelectedEntryTopicDraft("");
+      setSelectedEntryContentDraft("");
+    } finally {
+      setIsLoadingEntries(false);
     }
   }
 
   async function handleCreateNotebook() {
-    const normalizedTopic = newTopic.trim();
-    if (!normalizedTopic) {
-      setError("Please enter a note topic first.");
+    const normalizedName = newNotebookName.trim();
+    if (!normalizedName) {
+      setError("Please enter a notebook name.");
       return;
     }
-    setIsCreating(true);
+    setIsCreatingNotebook(true);
     setError("");
     setMessage("");
     try {
@@ -111,35 +191,39 @@ export default function NotebookPanel({ folderName }: NotebookPanelProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          topic: normalizedTopic,
-          content_md: "",
-          source_type: "manual",
+          name: normalizedName,
         }),
       });
       const payload = (await response.json()) as NotebooksResponse;
       if (!response.ok || !payload.success || !payload.notebook) {
         throw new Error(payload.message ?? "Unable to create notebook.");
       }
-      const next = sortNotebooks([payload.notebook, ...notebooks]);
-      setNotebooks(next);
+
+      const nextNotebooks = sortNotebooks([payload.notebook, ...notebooks]);
+      setNotebooks(nextNotebooks);
       setSelectedNotebookId(payload.notebook.id);
-      setTopicDraft(payload.notebook.topic);
-      setContentDraft(payload.notebook.content_md ?? "");
-      setNewTopic("");
-      setIsAddTopicOpen(false);
-      setMessage("Notebook created. You can start writing now.");
+      setSelectedNotebookNameDraft(payload.notebook.name);
+      setNewNotebookName("");
+      setMessage("Notebook created.");
+      await loadNotebookEntries(payload.notebook.id);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to create notebook.");
     } finally {
-      setIsCreating(false);
+      setIsCreatingNotebook(false);
     }
   }
 
-  async function handleSaveNotebook() {
+  async function handleSaveNotebookName() {
     if (!selectedNotebook) {
       return;
     }
-    setIsSaving(true);
+    const normalizedName = selectedNotebookNameDraft.trim();
+    if (!normalizedName) {
+      setError("Notebook name cannot be empty.");
+      return;
+    }
+
+    setIsSavingNotebookName(true);
     setError("");
     setMessage("");
     try {
@@ -149,94 +233,142 @@ export default function NotebookPanel({ folderName }: NotebookPanelProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          topic: topicDraft,
-          content_md: contentDraft,
+          name: normalizedName,
         }),
       });
       const payload = (await response.json()) as NotebooksResponse;
       if (!response.ok || !payload.success || !payload.notebook) {
-        throw new Error(payload.message ?? "Unable to save notebook.");
+        throw new Error(payload.message ?? "Unable to update notebook name.");
       }
-      const next = sortNotebooks(
-        notebooks.map((item) => (item.id === payload.notebook?.id ? payload.notebook : item)),
+      setNotebooks((previous) =>
+        sortNotebooks(previous.map((item) => (item.id === payload.notebook?.id ? payload.notebook : item))),
       );
-      setNotebooks(next);
-      setSelectedNotebookId(payload.notebook.id);
-      setTopicDraft(payload.notebook.topic);
-      setContentDraft(payload.notebook.content_md ?? "");
-      setMessage("Notebook saved.");
+      setSelectedNotebookNameDraft(payload.notebook.name);
+      setMessage("Notebook name updated.");
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to save notebook.");
+      setError(requestError instanceof Error ? requestError.message : "Unable to update notebook name.");
     } finally {
-      setIsSaving(false);
+      setIsSavingNotebookName(false);
     }
   }
 
-  const hasNotebooks = sortedNotebooks.length > 0;
+  async function handleCreateEntry() {
+    if (!selectedNotebook) {
+      setError("Choose a notebook first.");
+      return;
+    }
+    const normalizedTopic = newEntryTopic.trim();
+    if (!normalizedTopic) {
+      setError("Please enter an entry topic.");
+      return;
+    }
+    setIsCreatingEntry(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(
+        `/api/notebooks/${encodeURIComponent(selectedNotebook.id)}/entries`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            topic: normalizedTopic,
+            content_md: newEntryContent,
+            source_type: "manual",
+          }),
+        },
+      );
+      const payload = (await response.json()) as NotebookEntriesResponse;
+      if (!response.ok || !payload.success || !payload.entry) {
+        throw new Error(payload.message ?? "Unable to create notebook entry.");
+      }
+      const nextEntries = sortEntries([payload.entry, ...entries]);
+      setEntries(nextEntries);
+      setSelectedEntryId(payload.entry.id);
+      setSelectedEntryTopicDraft(payload.entry.topic);
+      setSelectedEntryContentDraft(payload.entry.content_md ?? "");
+      setNewEntryTopic("");
+      setNewEntryContent("");
+      setMessage("Notebook entry created.");
+      await loadNotebooks();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to create notebook entry.");
+    } finally {
+      setIsCreatingEntry(false);
+    }
+  }
+
+  async function handleSaveEntry() {
+    if (!selectedEntry) {
+      return;
+    }
+    const normalizedTopic = selectedEntryTopicDraft.trim();
+    if (!normalizedTopic) {
+      setError("Entry topic cannot be empty.");
+      return;
+    }
+    setIsSavingEntry(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/notebooks/entries/${encodeURIComponent(selectedEntry.id)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          topic: normalizedTopic,
+          content_md: selectedEntryContentDraft,
+        }),
+      });
+      const payload = (await response.json()) as NotebookEntryUpdateResponse;
+      if (!response.ok || !payload.success || !payload.entry) {
+        throw new Error(payload.message ?? "Unable to save notebook entry.");
+      }
+      setEntries((previous) =>
+        sortEntries(previous.map((entry) => (entry.id === payload.entry?.id ? payload.entry : entry))),
+      );
+      setSelectedEntryTopicDraft(payload.entry.topic);
+      setSelectedEntryContentDraft(payload.entry.content_md ?? "");
+      setMessage("Notebook entry saved.");
+      await loadNotebooks();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to save notebook entry.");
+    } finally {
+      setIsSavingEntry(false);
+    }
+  }
 
   useEffect(() => {
     void loadNotebooks();
   }, []);
+
+  useEffect(() => {
+    if (!selectedNotebookId) {
+      setEntries([]);
+      setSelectedEntryId("");
+      setSelectedEntryTopicDraft("");
+      setSelectedEntryContentDraft("");
+      return;
+    }
+    void loadNotebookEntries(selectedNotebookId);
+  }, [selectedNotebookId]);
 
   return (
     <section className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_8px_0_#1F2937,0_18px_28px_rgba(31,41,55,0.12)] sm:p-7">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="inline-flex rounded-full border-2 border-[#1F2937]/15 bg-[#FFF7CF] px-4 py-1 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/75">
-            Personal Notebook
+            Personal Notes
           </p>
-          <h2 className="mt-3 text-2xl font-extrabold text-[#1F2937]">Notes for {folderName}</h2>
+          <h2 className="mt-3 text-2xl font-extrabold text-[#1F2937]">My Notebooks</h2>
           <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
-            Keep your own notes and saved Study Room content here.
+            Create your own notebooks, then add entries with topic and content.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setIsAddTopicOpen(true);
-            setError("");
-          }}
-          className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm"
-        >
-          Add Note
-        </button>
       </div>
-
-      {isAddTopicOpen ? (
-        <div className="mt-4 rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4">
-          <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-            Note Topic
-          </label>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-            <input
-              value={newTopic}
-              onChange={(event) => setNewTopic(event.target.value)}
-              placeholder="Example: React Room Summary"
-              className="w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                void handleCreateNotebook();
-              }}
-              disabled={isCreating}
-              className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {isCreating ? "Creating..." : "Create"}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setIsAddTopicOpen(false);
-                setNewTopic("");
-              }}
-              className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : null}
 
       {error ? (
         <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
@@ -249,36 +381,46 @@ export default function NotebookPanel({ folderName }: NotebookPanelProps) {
         </p>
       ) : null}
 
-      {isLoading ? (
-        <p className="mt-5 text-sm font-semibold text-[#1F2937]/70">Loading notebooks...</p>
-      ) : null}
-
-      {!isLoading && !hasNotebooks ? (
-        <div className="mt-5 rounded-2xl border-2 border-dashed border-[#1F2937]/15 bg-[#F8FCFF] p-5">
-          <p className="text-base font-extrabold text-[#1F2937]">No notes yet.</p>
-          <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
-            Click Add Note, enter a topic, and start writing your first notebook entry.
+      <div className="mt-5 grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-3">
+          <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+            Notebook List
           </p>
-        </div>
-      ) : null}
 
-      {!isLoading && hasNotebooks ? (
-        <div className="mt-5 grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <div className="max-h-[540px] overflow-y-auto rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-3">
-            <p className="mb-2 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-              Notebook List
-            </p>
-            <ol className="space-y-2">
-              {sortedNotebooks.map((item) => {
-                const isActive = selectedNotebookId === item.id;
+          <div className="mt-2 flex flex-col gap-2">
+            <input
+              value={newNotebookName}
+              onChange={(event) => setNewNotebookName(event.target.value)}
+              placeholder="New notebook name"
+              className="w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                void handleCreateNotebook();
+              }}
+              disabled={isCreatingNotebook}
+              className="btn-3d btn-3d-green inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {isCreatingNotebook ? "Creating..." : "Add Notebook"}
+            </button>
+          </div>
+
+          {isLoadingNotebooks ? (
+            <p className="mt-3 text-sm font-semibold text-[#1F2937]/70">Loading notebooks...</p>
+          ) : sortedNotebooks.length === 0 ? (
+            <p className="mt-3 text-sm font-semibold text-[#1F2937]/70">No notebooks yet.</p>
+          ) : (
+            <ol className="mt-3 max-h-[420px] space-y-2 overflow-y-auto">
+              {sortedNotebooks.map((notebook) => {
+                const isActive = notebook.id === selectedNotebookId;
                 return (
-                  <li key={item.id}>
+                  <li key={notebook.id}>
                     <button
                       type="button"
                       onClick={() => {
-                        setSelectedNotebookId(item.id);
-                        setTopicDraft(item.topic);
-                        setContentDraft(item.content_md ?? "");
+                        setSelectedNotebookId(notebook.id);
+                        setSelectedNotebookNameDraft(notebook.name);
                         setMessage("");
                       }}
                       className={`w-full rounded-xl border-2 px-3 py-2 text-left transition ${
@@ -287,73 +429,163 @@ export default function NotebookPanel({ folderName }: NotebookPanelProps) {
                           : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
                       }`}
                     >
-                      <p className="truncate text-sm font-extrabold text-[#1F2937]">{item.topic}</p>
+                      <p className="truncate text-sm font-extrabold text-[#1F2937]">{notebook.name}</p>
                       <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/62">
-                        Updated: {formatTimestamp(item.updated_at)}
-                      </p>
-                      <p className="text-[11px] font-semibold text-[#1F2937]/52">
-                        Created: {formatTimestamp(item.created_at)}
+                        Updated: {formatTimestamp(notebook.updated_at)}
                       </p>
                     </button>
                   </li>
                 );
               })}
             </ol>
-          </div>
+          )}
+        </div>
 
-          <div className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4">
-            {selectedNotebook ? (
-              <>
-                <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                  Topic
-                </label>
-                <input
-                  value={topicDraft}
-                  onChange={(event) => setTopicDraft(event.target.value)}
-                  className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                />
-
-                <label className="mt-4 block text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                  Content (Markdown)
-                </label>
-                <textarea
-                  value={contentDraft}
-                  onChange={(event) => setContentDraft(event.target.value)}
-                  className="mt-2 min-h-[360px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                />
-
-                <div className="mt-3 flex justify-end">
+        <div className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4">
+          {!selectedNotebook ? (
+            <p className="text-sm font-semibold text-[#1F2937]/70">
+              Select a notebook to manage its entries.
+            </p>
+          ) : (
+            <>
+              <div className="rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
+                <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                  Notebook Name
+                </p>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    value={selectedNotebookNameDraft}
+                    onChange={(event) => setSelectedNotebookNameDraft(event.target.value)}
+                    className="w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                  />
                   <button
                     type="button"
                     onClick={() => {
-                      void handleSaveNotebook();
+                      void handleSaveNotebookName();
                     }}
-                    disabled={isSaving}
-                    className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                    disabled={isSavingNotebookName}
+                    className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                   >
-                    {isSaving ? "Saving..." : "Save Notebook"}
+                    {isSavingNotebookName ? "Saving..." : "Rename"}
                   </button>
                 </div>
-              </>
-            ) : (
-              <p className="text-sm font-semibold text-[#1F2937]/70">
-                Select a note from the list to review and edit.
-              </p>
-            )}
-          </div>
-        </div>
-      ) : null}
+              </div>
 
-      <div className="mt-4">
-        <button
-          type="button"
-          onClick={() => {
-            void loadNotebooks();
-          }}
-          className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-4 !text-xs"
-        >
-          Refresh Notes
-        </button>
+              <div className="mt-4 grid gap-3 lg:grid-cols-[320px_minmax(0,1fr)]">
+                <div className="rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
+                  <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                    Add Entry
+                  </p>
+                  <input
+                    value={newEntryTopic}
+                    onChange={(event) => setNewEntryTopic(event.target.value)}
+                    placeholder="Entry topic"
+                    className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                  />
+                  <textarea
+                    value={newEntryContent}
+                    onChange={(event) => setNewEntryContent(event.target.value)}
+                    placeholder="Entry content"
+                    className="mt-2 min-h-[110px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleCreateEntry();
+                    }}
+                    disabled={isCreatingEntry}
+                    className="btn-3d btn-3d-green mt-2 inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    {isCreatingEntry ? "Creating..." : "Add Entry"}
+                  </button>
+
+                  <p className="mt-4 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                    Entry List
+                  </p>
+                  {isLoadingEntries ? (
+                    <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">Loading entries...</p>
+                  ) : sortedEntries.length === 0 ? (
+                    <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">No entries yet.</p>
+                  ) : (
+                    <ol className="mt-2 max-h-[280px] space-y-2 overflow-y-auto">
+                      {sortedEntries.map((entry) => {
+                        const isActive = entry.id === selectedEntryId;
+                        return (
+                          <li key={entry.id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedEntryId(entry.id);
+                                setSelectedEntryTopicDraft(entry.topic);
+                                setSelectedEntryContentDraft(entry.content_md ?? "");
+                                setMessage("");
+                              }}
+                              className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                                isActive
+                                  ? "border-[#1F2937] bg-[#E9FFD8]"
+                                  : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
+                              }`}
+                            >
+                              <p className="truncate text-sm font-extrabold text-[#1F2937]">{entry.topic}</p>
+                              <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/60">
+                                Updated: {formatTimestamp(entry.updated_at)}
+                              </p>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-[#1F2937]/12 bg-white p-3">
+                  {!selectedEntry ? (
+                    <p className="text-sm font-semibold text-[#1F2937]/70">
+                      Select an entry to view and edit.
+                    </p>
+                  ) : (
+                    <>
+                      <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                        Entry Topic
+                      </label>
+                      <input
+                        value={selectedEntryTopicDraft}
+                        onChange={(event) => setSelectedEntryTopicDraft(event.target.value)}
+                        className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                      />
+
+                      <label className="mt-3 block text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                        Entry Content (Markdown)
+                      </label>
+                      <textarea
+                        value={selectedEntryContentDraft}
+                        onChange={(event) => setSelectedEntryContentDraft(event.target.value)}
+                        className="mt-2 min-h-[330px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                      />
+                      <div className="mt-2 flex items-center justify-between text-xs font-semibold text-[#1F2937]/60">
+                        <p>Source: {selectedEntry.source_type}</p>
+                        <p>Updated: {formatTimestamp(selectedEntry.updated_at)}</p>
+                      </div>
+
+                      <div className="mt-3 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleSaveEntry();
+                          }}
+                          disabled={isSavingEntry}
+                          className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          {isSavingEntry ? "Saving..." : "Save Entry"}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </section>
   );

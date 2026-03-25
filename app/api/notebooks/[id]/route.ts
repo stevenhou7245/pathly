@@ -7,11 +7,7 @@ export const runtime = "nodejs";
 
 const notebookPatchSchema = z
   .object({
-    topic: z.string().trim().min(1, "topic is required").max(200, "topic is too long").optional(),
-    content_md: z.string().max(500_000, "content is too large").optional().nullable(),
-  })
-  .refine((value) => value.topic !== undefined || value.content_md !== undefined, {
-    message: "Provide at least one field to update.",
+    name: z.string().trim().min(1, "name is required").max(200, "name is too long"),
   });
 
 type NotebookPatchResponse = {
@@ -62,8 +58,7 @@ export async function PATCH(
     const notebook = await updateUserNotebook({
       userId: sessionUser.id,
       notebookId: id,
-      topic: parsed.data.topic,
-      contentMd: parsed.data.content_md,
+      name: parsed.data.name,
     });
 
     if (!notebook) {

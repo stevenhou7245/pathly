@@ -4,7 +4,6 @@ import {
   listStudyRoomAiMessages,
   listStudyRoomResources,
   type StudyRoomAiMessage,
-  type StudyRoomNoteEntryRecord,
   type StudyRoomSharedResource,
 } from "@/lib/studyRoomWorkspace";
 
@@ -14,7 +13,8 @@ export type UserNotebookSourceType =
   | "manual"
   | "study_room_exit_save"
   | "study_room_manual_save";
-export type UserNotebookItemSourceKind =
+
+export type UserNotebookEntryItemSourceKind =
   | "study_room_note"
   | "study_room_resource"
   | "study_room_ai_exchange";
@@ -22,6 +22,15 @@ export type UserNotebookItemSourceKind =
 export type UserNotebookRecord = {
   id: string;
   user_id: string;
+  name: string;
+  created_at: string | null;
+  updated_at: string | null;
+  is_deleted: boolean;
+};
+
+export type UserNotebookEntryRecord = {
+  id: string;
+  notebook_id: string;
   topic: string;
   content_md: string | null;
   source_type: UserNotebookSourceType;
@@ -112,6 +121,57 @@ function compareIsoAsc(a: string | null, b: string | null) {
   return (a ?? "").localeCompare(b ?? "");
 }
 
+function mapNotebookRow(row: GenericRecord): UserNotebookRecord {
+  return {
+    id: toStringValue(row.id),
+    user_id: toStringValue(row.user_id),
+    name: toStringValue(row.name),
+    created_at: toNullableString(row.created_at),
+    updated_at: toNullableString(row.updated_at),
+    is_deleted: toBoolean(row.is_deleted),
+  };
+}
+
+function mapEntryRow(row: GenericRecord): UserNotebookEntryRecord {
+  return {
+    id: toStringValue(row.id),
+    notebook_id: toStringValue(row.notebook_id),
+    topic: toStringValue(row.topic),
+    content_md: toNullableString(row.content_md),
+    source_type: normalizeSourceType(row.source_type),
+    source_room_id: toNullableString(row.source_room_id),
+    created_at: toNullableString(row.created_at),
+    updated_at: toNullableString(row.updated_at),
+    is_deleted: toBoolean(row.is_deleted),
+  };
+}
+
+async function requireNotebookOwnership(params: { userId: string; notebookId: string }) {
+  const { data, error } = await supabaseAdmin
+    .from("user_notebooks")
+    .select("id, user_id, name, created_at, updated_at, is_deleted")
+    .eq("id", params.notebookId)
+    .eq("user_id", params.userId)
+    .eq("is_deleted", false)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] ownership_lookup_failed", {
+      table: "user_notebooks",
+      user_id: params.userId,
+      notebook_id: params.notebookId,
+      ...details,
+    });
+    throw new Error(`Failed to verify notebook ownership. table=user_notebooks reason=${details.message}`);
+  }
+  if (!data) {
+    return null;
+  }
+  return mapNotebookRow(data as GenericRecord);
+}
+
 function isQuestionMessage(message: StudyRoomAiMessage) {
   return message.message_kind === "question" || message.sender_type === "user";
 }
@@ -142,6 +202,7 @@ function groupAiMessagesToSavableExchanges(
     if (isQuestionMessage(current)) {
       let pairedAnswer: StudyRoomAiMessage | null = null;
       let pairedIndex = -1;
+
       for (let j = i + 1; j < messages.length; j += 1) {
         if (consumed.has(j)) {
           continue;
@@ -196,27 +257,14 @@ function groupAiMessagesToSavableExchanges(
   return exchanges.sort((a, b) => compareIsoAsc(a.timestamp, b.timestamp));
 }
 
-function mapNotebookRow(row: GenericRecord): UserNotebookRecord {
-  return {
-    id: toStringValue(row.id),
-    user_id: toStringValue(row.user_id),
-    topic: toStringValue(row.topic),
-    content_md: toNullableString(row.content_md),
-    source_type: normalizeSourceType(row.source_type),
-    source_room_id: toNullableString(row.source_room_id),
-    created_at: toNullableString(row.created_at),
-    updated_at: toNullableString(row.updated_at),
-    is_deleted: toBoolean(row.is_deleted),
-  };
-}
-
-function buildNotebookMarkdown(params: {
+function buildNotebookEntryMarkdown(params: {
   topic: string;
   notes: StudyRoomSavableNoteItem[];
   resources: StudyRoomSavableResourceItem[];
   aiExchanges: StudyRoomSavableAiExchangeItem[];
 }) {
   const lines: string[] = [];
+
   lines.push(`# Topic: ${params.topic}`);
   lines.push("");
 
@@ -233,17 +281,14 @@ function buildNotebookMarkdown(params: {
       lines.push("");
     });
   }
-  lines.push("");
 
   lines.push("## Shared Resources");
   if (params.resources.length === 0) {
     lines.push("- (none)");
   } else {
     params.resources.forEach((item) => {
-      const resourceLink = item.url
-        ? `- [${item.title}](${item.url})`
-        : `- ${item.title}`;
-      lines.push(resourceLink);
+      const linkLine = item.url ? `- [${item.title}](${item.url})` : `- ${item.title}`;
+      lines.push(linkLine);
       lines.push(
         `  - Type: ${item.resource_type}, Source: ${item.source_kind_value}, Added by: ${item.added_by_username ?? "Unknown"}`,
       );
@@ -297,11 +342,11 @@ function resolveMembershipFailureCode(params: {
 export async function listUserNotebooks(params: { userId: string }) {
   const { data, error } = await supabaseAdmin
     .from("user_notebooks")
-    .select("id, user_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted")
+    .select("id, user_id, name, created_at, updated_at, is_deleted")
     .eq("user_id", params.userId)
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false })
-    .order("topic", { ascending: true });
+    .order("name", { ascending: true });
 
   if (error) {
     const details = toErrorDetails(error);
@@ -316,29 +361,22 @@ export async function listUserNotebooks(params: { userId: string }) {
   return ((data ?? []) as GenericRecord[]).map((row) => mapNotebookRow(row));
 }
 
-export async function createUserNotebook(params: {
-  userId: string;
-  topic: string;
-  contentMd?: string | null;
-  sourceType?: UserNotebookSourceType;
-  sourceRoomId?: string | null;
-}) {
-  const normalizedTopic = params.topic.trim().slice(0, 200);
-  if (!normalizedTopic) {
-    throw new Error("Notebook topic is required.");
+export async function createUserNotebook(params: { userId: string; name: string }) {
+  const normalizedName = params.name.trim().slice(0, 200);
+  if (!normalizedName) {
+    throw new Error("Notebook name is required.");
   }
+
   const payload = {
     user_id: params.userId,
-    topic: normalizedTopic,
-    content_md: params.contentMd?.trim() ? params.contentMd : null,
-    source_type: params.sourceType ?? "manual",
-    source_room_id: params.sourceRoomId ?? null,
+    name: normalizedName,
+    is_deleted: false,
   };
 
   const { data, error } = await supabaseAdmin
     .from("user_notebooks")
     .insert(payload)
-    .select("id, user_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted")
+    .select("id, user_id, name, created_at, updated_at, is_deleted")
     .limit(1)
     .maybeSingle();
 
@@ -359,31 +397,22 @@ export async function createUserNotebook(params: {
 export async function updateUserNotebook(params: {
   userId: string;
   notebookId: string;
-  topic?: string;
-  contentMd?: string | null;
+  name: string;
 }) {
-  const updates: Record<string, unknown> = {};
-  if (typeof params.topic === "string") {
-    const trimmedTopic = params.topic.trim().slice(0, 200);
-    if (!trimmedTopic) {
-      throw new Error("Notebook topic is required.");
-    }
-    updates.topic = trimmedTopic;
-  }
-  if (params.contentMd !== undefined) {
-    updates.content_md = params.contentMd?.trim() ? params.contentMd : null;
-  }
-  if (Object.keys(updates).length === 0) {
-    throw new Error("No notebook changes provided.");
+  const normalizedName = params.name.trim().slice(0, 200);
+  if (!normalizedName) {
+    throw new Error("Notebook name is required.");
   }
 
   const { data, error } = await supabaseAdmin
     .from("user_notebooks")
-    .update(updates)
+    .update({
+      name: normalizedName,
+    })
     .eq("id", params.notebookId)
     .eq("user_id", params.userId)
     .eq("is_deleted", false)
-    .select("id, user_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted")
+    .select("id, user_id, name, created_at, updated_at, is_deleted")
     .limit(1)
     .maybeSingle();
 
@@ -393,7 +422,6 @@ export async function updateUserNotebook(params: {
       table: "user_notebooks",
       user_id: params.userId,
       notebook_id: params.notebookId,
-      update_keys: Object.keys(updates),
       ...details,
     });
     throw new Error(`Failed to update notebook. table=user_notebooks reason=${details.message}`);
@@ -401,7 +429,184 @@ export async function updateUserNotebook(params: {
   if (!data) {
     return null;
   }
+
   return mapNotebookRow(data as GenericRecord);
+}
+
+export async function listNotebookEntries(params: {
+  userId: string;
+  notebookId: string;
+}) {
+  const owned = await requireNotebookOwnership(params);
+  if (!owned) {
+    return {
+      ok: false as const,
+      code: "NOT_FOUND" as const,
+    };
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("user_notebook_entries")
+    .select(
+      "id, notebook_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted",
+    )
+    .eq("notebook_id", params.notebookId)
+    .eq("is_deleted", false)
+    .order("updated_at", { ascending: false })
+    .order("topic", { ascending: true });
+
+  if (error) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] entries_list_failed", {
+      table: "user_notebook_entries",
+      notebook_id: params.notebookId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(`Failed to load notebook entries. table=user_notebook_entries reason=${details.message}`);
+  }
+
+  return {
+    ok: true as const,
+    notebook: owned,
+    entries: ((data ?? []) as GenericRecord[]).map((row) => mapEntryRow(row)),
+  };
+}
+
+export async function createNotebookEntry(params: {
+  userId: string;
+  notebookId: string;
+  topic: string;
+  contentMd?: string | null;
+  sourceType?: UserNotebookSourceType;
+  sourceRoomId?: string | null;
+}) {
+  const owned = await requireNotebookOwnership({
+    userId: params.userId,
+    notebookId: params.notebookId,
+  });
+  if (!owned) {
+    return {
+      ok: false as const,
+      code: "NOT_FOUND" as const,
+    };
+  }
+
+  const topic = params.topic.trim().slice(0, 200);
+  if (!topic) {
+    throw new Error("Entry topic is required.");
+  }
+
+  const payload = {
+    notebook_id: params.notebookId,
+    topic,
+    content_md: params.contentMd?.trim() ? params.contentMd : null,
+    source_type: params.sourceType ?? "manual",
+    source_room_id: params.sourceRoomId ?? null,
+    is_deleted: false,
+  };
+
+  const { data, error } = await supabaseAdmin
+    .from("user_notebook_entries")
+    .insert(payload)
+    .select(
+      "id, notebook_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted",
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] entry_create_failed", {
+      table: "user_notebook_entries",
+      notebook_id: params.notebookId,
+      user_id: params.userId,
+      payload_keys: Object.keys(payload),
+      ...details,
+    });
+    throw new Error(`Failed to create notebook entry. table=user_notebook_entries reason=${details.message}`);
+  }
+
+  return {
+    ok: true as const,
+    notebook: owned,
+    entry: mapEntryRow(data as GenericRecord),
+  };
+}
+
+export async function updateNotebookEntry(params: {
+  userId: string;
+  entryId: string;
+  topic: string;
+  contentMd?: string | null;
+}) {
+  const topic = params.topic.trim().slice(0, 200);
+  if (!topic) {
+    throw new Error("Entry topic is required.");
+  }
+
+  const entryLookup = await supabaseAdmin
+    .from("user_notebook_entries")
+    .select("id, notebook_id")
+    .eq("id", params.entryId)
+    .eq("is_deleted", false)
+    .limit(1)
+    .maybeSingle();
+
+  if (entryLookup.error) {
+    const details = toErrorDetails(entryLookup.error);
+    console.error("[user_notebook] entry_lookup_failed", {
+      table: "user_notebook_entries",
+      entry_id: params.entryId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(`Failed to load notebook entry. table=user_notebook_entries reason=${details.message}`);
+  }
+  if (!entryLookup.data) {
+    return null;
+  }
+
+  const notebookId = toStringValue((entryLookup.data as GenericRecord).notebook_id);
+  const owned = await requireNotebookOwnership({
+    userId: params.userId,
+    notebookId,
+  });
+  if (!owned) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("user_notebook_entries")
+    .update({
+      topic,
+      content_md: params.contentMd?.trim() ? params.contentMd : null,
+    })
+    .eq("id", params.entryId)
+    .eq("notebook_id", notebookId)
+    .eq("is_deleted", false)
+    .select(
+      "id, notebook_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted",
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] entry_update_failed", {
+      table: "user_notebook_entries",
+      entry_id: params.entryId,
+      notebook_id: notebookId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(`Failed to update notebook entry. table=user_notebook_entries reason=${details.message}`);
+  }
+  if (!data) {
+    return null;
+  }
+
+  return mapEntryRow(data as GenericRecord);
 }
 
 export async function loadStudyRoomSavableContent(params: {
@@ -485,10 +690,11 @@ export async function loadStudyRoomSavableContent(params: {
   };
 }
 
-export async function saveStudyRoomContentToNotebook(params: {
+export async function saveStudyRoomContentToNotebookEntry(params: {
   userId: string;
   roomId: string;
-  topic: string;
+  notebookId: string;
+  entryTopic: string;
   selectedItemIds: string[];
 }) {
   const loaded = await loadStudyRoomSavableContent({
@@ -499,35 +705,67 @@ export async function saveStudyRoomContentToNotebook(params: {
     return loaded;
   }
 
+  const ownedNotebook = await requireNotebookOwnership({
+    userId: params.userId,
+    notebookId: params.notebookId,
+  });
+  if (!ownedNotebook) {
+    return {
+      ok: false as const,
+      code: "NOTEBOOK_NOT_FOUND" as const,
+    };
+  }
+
   const selectedIdSet = new Set(params.selectedItemIds.map((value) => value.trim()).filter(Boolean));
 
   const selectedNotes = loaded.content.shared_notes.filter((item) => selectedIdSet.has(item.item_id));
-  const selectedResources = loaded.content.shared_resources.filter((item) => selectedIdSet.has(item.item_id));
-  const selectedAiExchanges = loaded.content.ai_exchanges.filter((item) => selectedIdSet.has(item.item_id));
+  const selectedResources = loaded.content.shared_resources.filter((item) =>
+    selectedIdSet.has(item.item_id),
+  );
+  const selectedAiExchanges = loaded.content.ai_exchanges.filter((item) =>
+    selectedIdSet.has(item.item_id),
+  );
 
-  const markdownContent = buildNotebookMarkdown({
-    topic: params.topic,
+  if (
+    selectedNotes.length === 0 &&
+    selectedResources.length === 0 &&
+    selectedAiExchanges.length === 0
+  ) {
+    throw new Error("At least one selected item is required.");
+  }
+
+  const markdownContent = buildNotebookEntryMarkdown({
+    topic: params.entryTopic,
     notes: selectedNotes,
     resources: selectedResources,
     aiExchanges: selectedAiExchanges,
   });
 
-  const notebook = await createUserNotebook({
+  const createdEntry = await createNotebookEntry({
     userId: params.userId,
-    topic: params.topic,
+    notebookId: params.notebookId,
+    topic: params.entryTopic,
     contentMd: markdownContent,
     sourceType: "study_room_exit_save",
     sourceRoomId: params.roomId,
   });
 
+  if (!createdEntry.ok) {
+    return {
+      ok: false as const,
+      code: "NOTEBOOK_NOT_FOUND" as const,
+    };
+  }
+
+  const entryId = createdEntry.entry.id;
   const itemRows: Array<Record<string, unknown>> = [];
+
   selectedNotes.forEach((item) => {
     itemRows.push({
-      notebook_id: notebook.id,
-      user_id: params.userId,
-      source_kind: "study_room_note",
+      entry_id: entryId,
+      source_kind: "study_room_note" satisfies UserNotebookEntryItemSourceKind,
       source_id: item.source_id,
-      source_room_id: params.roomId,
+      author_user_id: item.author_user_id,
       title: `Note by ${item.author_username ?? "Unknown"}`,
       content_md: item.content_md,
       metadata: {
@@ -535,16 +773,15 @@ export async function saveStudyRoomContentToNotebook(params: {
         author_username: item.author_username,
         timestamp: item.timestamp,
       },
-      is_deleted: false,
     });
   });
+
   selectedResources.forEach((item) => {
     itemRows.push({
-      notebook_id: notebook.id,
-      user_id: params.userId,
-      source_kind: "study_room_resource",
+      entry_id: entryId,
+      source_kind: "study_room_resource" satisfies UserNotebookEntryItemSourceKind,
       source_id: item.source_id,
-      source_room_id: params.roomId,
+      author_user_id: item.added_by,
       title: item.title,
       content_md: item.url ? `[${item.title}](${item.url})` : item.title,
       metadata: {
@@ -556,16 +793,15 @@ export async function saveStudyRoomContentToNotebook(params: {
         added_by_username: item.added_by_username,
         timestamp: item.timestamp,
       },
-      is_deleted: false,
     });
   });
+
   selectedAiExchanges.forEach((item) => {
     itemRows.push({
-      notebook_id: notebook.id,
-      user_id: params.userId,
-      source_kind: "study_room_ai_exchange",
+      entry_id: entryId,
+      source_kind: "study_room_ai_exchange" satisfies UserNotebookEntryItemSourceKind,
       source_id: item.question_message_id ?? item.answer_message_id,
-      source_room_id: params.roomId,
+      author_user_id: item.question_author_id,
       title: "AI Tutor Exchange",
       content_md: [
         "Question:",
@@ -581,39 +817,37 @@ export async function saveStudyRoomContentToNotebook(params: {
         question_author_username: item.question_author_username,
         timestamp: item.timestamp,
       },
-      is_deleted: false,
     });
   });
 
   if (itemRows.length > 0) {
-    const insertResult = await supabaseAdmin.from("user_notebook_items").insert(itemRows);
+    const insertResult = await supabaseAdmin.from("user_notebook_entry_items").insert(itemRows);
     if (insertResult.error) {
       const details = toErrorDetails(insertResult.error);
-      console.error("[user_notebook] save_selected_items_failed", {
-        table: "user_notebook_items",
-        notebook_id: notebook.id,
+      console.error("[user_notebook] entry_items_create_failed", {
+        table: "user_notebook_entry_items",
+        entry_id: entryId,
         user_id: params.userId,
         selected_items_count: itemRows.length,
         ...details,
       });
 
       await supabaseAdmin
-        .from("user_notebooks")
+        .from("user_notebook_entries")
         .update({
           is_deleted: true,
         })
-        .eq("id", notebook.id)
-        .eq("user_id", params.userId);
+        .eq("id", entryId)
+        .eq("notebook_id", params.notebookId);
 
-      throw new Error(
-        `Failed to save notebook items. table=user_notebook_items reason=${details.message}`,
-      );
+      throw new Error(`Failed to save notebook entry items. table=user_notebook_entry_items reason=${details.message}`);
     }
   }
 
   return {
     ok: true as const,
-    notebook,
+    notebook: createdEntry.notebook,
+    entry: createdEntry.entry,
     selected_summary: {
       notes_count: selectedNotes.length,
       resources_count: selectedResources.length,

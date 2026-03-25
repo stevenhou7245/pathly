@@ -265,7 +265,15 @@ type StudyRoomLeaveSaveResponse = {
   success: boolean;
   message?: string;
   content?: StudyRoomLeaveSavableContent;
+  notebooks?: Array<{
+    id: string;
+    name: string;
+  }>;
   notebook?: {
+    id: string;
+    name: string;
+  };
+  entry?: {
     id: string;
     topic: string;
   };
@@ -855,6 +863,8 @@ export default function StudyRoomsPanel({
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaveSaveContent, setLeaveSaveContent] = useState<StudyRoomLeaveSavableContent | null>(null);
+  const [leaveSaveNotebooks, setLeaveSaveNotebooks] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedLeaveNotebookId, setSelectedLeaveNotebookId] = useState("");
   const [isLoadingLeaveSaveContent, setIsLoadingLeaveSaveContent] = useState(false);
   const [selectedLeaveItemIds, setSelectedLeaveItemIds] = useState<string[]>([]);
   const [leaveNotebookTopic, setLeaveNotebookTopic] = useState("");
@@ -1935,12 +1945,20 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to load room content for save.");
       }
       setLeaveSaveContent(payload.content);
+      const notebooks = (payload.notebooks ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+      }));
+      setLeaveSaveNotebooks(notebooks);
       setSelectedLeaveItemIds([]);
-      const defaultTopic = `${roomDetail?.name ?? "Study Room"} Summary`;
+      setSelectedLeaveNotebookId(notebooks[0]?.id ?? "");
+      const defaultTopic = `${roomDetail?.name ?? "Study Room"} Entry`;
       setLeaveNotebookTopic(defaultTopic);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to load room content for save.";
       setPanelError(message);
+      setLeaveSaveNotebooks([]);
+      setSelectedLeaveNotebookId("");
       setLeaveSaveContent({
         room_id: roomId,
         shared_notes: [],
@@ -1973,6 +1991,10 @@ export default function StudyRoomsPanel({
       setPanelError("Select at least one item to save, or choose Leave Without Saving.");
       return;
     }
+    if (!selectedLeaveNotebookId) {
+      setPanelError("Select a notebook to save into.");
+      return;
+    }
 
     setIsSavingLeaveSelections(true);
     setPanelError("");
@@ -1983,7 +2005,8 @@ export default function StudyRoomsPanel({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          topic: normalizedTopic,
+          notebook_id: selectedLeaveNotebookId,
+          entry_topic: normalizedTopic,
           selected_item_ids: selectedLeaveItemIds,
         }),
       });
@@ -1992,9 +2015,9 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to save selected room content.");
       }
       setPanelMessage(
-        payload.notebook
-          ? `Saved to notebook: ${payload.notebook.topic}.`
-          : "Room content saved to your notebook.",
+        payload.notebook && payload.entry
+          ? `Saved into "${payload.notebook.name}" as entry "${payload.entry.topic}".`
+          : "Room content saved to your notebook entry.",
       );
       await executeLeaveRoom();
     } catch (error) {
@@ -3214,15 +3237,41 @@ export default function StudyRoomsPanel({
             </p>
 
             <div className="mt-3 rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
-              <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                Notebook Topic
-              </label>
-              <input
-                value={leaveNotebookTopic}
-                onChange={(event) => setLeaveNotebookTopic(event.target.value)}
-                placeholder="Example: React Room Summary"
-                className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-              />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                    Choose Notebook
+                  </label>
+                  <select
+                    value={selectedLeaveNotebookId}
+                    onChange={(event) => setSelectedLeaveNotebookId(event.target.value)}
+                    className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                  >
+                    <option value="">Select notebook</option>
+                    {leaveSaveNotebooks.map((notebook) => (
+                      <option key={notebook.id} value={notebook.id}>
+                        {notebook.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                    New Entry Topic
+                  </label>
+                  <input
+                    value={leaveNotebookTopic}
+                    onChange={(event) => setLeaveNotebookTopic(event.target.value)}
+                    placeholder="Example: React Room Summary"
+                    className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                  />
+                </div>
+              </div>
+              {leaveSaveNotebooks.length === 0 && !isLoadingLeaveSaveContent ? (
+                <p className="mt-2 text-xs font-semibold text-[#c62828]">
+                  No notebook found. Create one in Notes page first.
+                </p>
+              ) : null}
               <p className="mt-1 text-xs font-semibold text-[#1F2937]/62">
                 Selected items: {selectedLeaveItemCount}
               </p>
@@ -3395,7 +3444,13 @@ export default function StudyRoomsPanel({
                 onClick={() => {
                   void handleSaveSelectedBeforeLeave();
                 }}
-                disabled={isSavingLeaveSelections || isLeavingRoom || isLoadingLeaveSaveContent}
+                disabled={
+                  isSavingLeaveSelections ||
+                  isLeavingRoom ||
+                  isLoadingLeaveSaveContent ||
+                  !selectedLeaveNotebookId ||
+                  leaveSaveNotebooks.length === 0
+                }
                 className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isSavingLeaveSelections ? "Saving..." : "Save Selected & Leave"}
