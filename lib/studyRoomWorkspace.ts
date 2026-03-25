@@ -829,6 +829,12 @@ export async function saveStudyRoomNotes(params: {
   if (!membership.ok) {
     return membership;
   }
+  if (membership.context.roomStatus === "closed") {
+    return {
+      ok: false as const,
+      code: "ROOM_CLOSED" as const,
+    };
+  }
 
   const nowIso = new Date().toISOString();
   const normalizedContent = params.content.slice(0, 100_000);

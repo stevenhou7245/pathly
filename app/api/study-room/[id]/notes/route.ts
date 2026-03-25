@@ -144,6 +144,12 @@ export async function PUT(
           { status: 404 },
         );
       }
+      if (result.code === "ROOM_CLOSED") {
+        return NextResponse.json<NotesResponse>(
+          { success: false, message: "This study room has been closed." },
+          { status: 400 },
+        );
+      }
       return NextResponse.json<NotesResponse>(
         { success: false, message: "You are not a participant of this room." },
         { status: 403 },

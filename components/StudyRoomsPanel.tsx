@@ -975,6 +975,8 @@ export default function StudyRoomsPanel({
   }, [countdownNowMs, roomDetail]);
 
   const canSendMessages = roomDetail?.status === "active";
+  const canModifyRoomContent = roomDetail?.status === "active";
+  const isRoomClosed = roomDetail?.status === "closed";
   const currentParticipant = useMemo(
     () =>
       roomDetail
@@ -1562,6 +1564,9 @@ export default function StudyRoomsPanel({
       filter: `room_id=eq.${activeRoomId}`,
       onEvent: ({ eventType, new: newRow, old: oldRow }) => {
         const changedParticipantId = toSafeString(newRow?.id ?? oldRow?.id);
+        const existedBefore = changedParticipantId
+          ? participantsRef.current.some((item) => item.id === changedParticipantId)
+          : false;
         console.info("[study_room_realtime] participant_event", {
           room_id: activeRoomId,
           event_type: eventType,
@@ -1590,6 +1595,22 @@ export default function StudyRoomsPanel({
         if (!newRow) {
           return;
         }
+        const leftAt = toSafeNullableString(newRow.left_at);
+        if (leftAt) {
+          setParticipants((previous) => {
+            const next = normalizeParticipantsByJoinedAt(
+              previous.filter((item) => item.id !== changedParticipantId),
+            );
+            console.info("[study_room_realtime] participant_state_updated", {
+              room_id: activeRoomId,
+              event_type: eventType,
+              left_at: leftAt,
+              count: next.length,
+            });
+            return next;
+          });
+          return;
+        }
         setParticipants((previous) => {
           const next = mergeParticipantRealtimeRow({
             previous,
@@ -1602,7 +1623,7 @@ export default function StudyRoomsPanel({
           });
           return next;
         });
-        if (eventType === "INSERT") {
+        if (eventType === "INSERT" || (eventType === "UPDATE" && !existedBefore)) {
           void loadRoomDataRef.current(activeRoomId);
           void loadWorkspaceExtrasRef.current(activeRoomId);
         }
@@ -2241,6 +2262,10 @@ export default function StudyRoomsPanel({
     if (!roomDetail) {
       return;
     }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      return;
+    }
     const nextFocus = !focusModeEnabled;
     setFocusModeEnabled(nextFocus);
     lastInteractionAtRef.current = Date.now();
@@ -2269,6 +2294,10 @@ export default function StudyRoomsPanel({
 
   async function handleSaveGoal() {
     if (!roomDetail) {
+      return;
+    }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
       return;
     }
     setIsSavingGoal(true);
@@ -2300,6 +2329,10 @@ export default function StudyRoomsPanel({
 
   async function handleSaveNotes() {
     if (!roomDetail) {
+      return;
+    }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
       return;
     }
     setIsSavingNotes(true);
@@ -2336,6 +2369,10 @@ export default function StudyRoomsPanel({
     if (!roomDetail) {
       return;
     }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      return;
+    }
     setPanelError("");
     try {
       const response = await fetch(
@@ -2363,6 +2400,10 @@ export default function StudyRoomsPanel({
 
   async function handleAddResource() {
     if (!roomDetail) {
+      return;
+    }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
       return;
     }
     setIsAddingResource(true);
@@ -2400,6 +2441,10 @@ export default function StudyRoomsPanel({
 
   async function handleUploadResourceFile() {
     if (!roomDetail || !newResourceFile) {
+      return;
+    }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
       return;
     }
 
@@ -2443,6 +2488,10 @@ export default function StudyRoomsPanel({
     if (!roomDetail) {
       return;
     }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      return;
+    }
     try {
       const response = await fetch(
         `/api/study-room/${encodeURIComponent(roomDetail.id)}/resources/${encodeURIComponent(resourceId)}`,
@@ -2463,6 +2512,10 @@ export default function StudyRoomsPanel({
 
   async function handleAskAiTutor() {
     if (!roomDetail) {
+      return;
+    }
+    if (roomDetail.status !== "active") {
+      setPanelError("This study room is closed. You can view history but cannot create new content.");
       return;
     }
     const question = aiQuestionDraft.trim();
@@ -2786,6 +2839,12 @@ export default function StudyRoomsPanel({
               </div>
             </div>
 
+            {isRoomClosed ? (
+              <div className="border-b border-[#1F2937]/10 bg-[#FFF4D6] px-4 py-2 text-xs font-extrabold text-[#1F2937]/80">
+                This study room is closed. History is available, but new content is disabled.
+              </div>
+            ) : null}
+
             <div className="grid h-[calc(100%-56px)] gap-0 lg:grid-cols-[1.8fr_1fr]">
               <div className="flex min-h-0 flex-col border-r border-[#1F2937]/10">
                 <div className="flex flex-wrap items-center gap-2 border-b border-[#1F2937]/10 px-4 py-2">
@@ -2808,11 +2867,12 @@ export default function StudyRoomsPanel({
                     onClick={() => {
                       void handleToggleFocusMode();
                     }}
+                    disabled={!canModifyRoomContent}
                     className={`ml-auto rounded-full border px-3 py-1.5 text-xs font-extrabold uppercase tracking-wide ${
                       focusModeEnabled
                         ? "border-[#1F2937] bg-[#58CC02]/20 text-[#1F2937]"
                         : "border-[#1F2937]/15 bg-white text-[#1F2937]"
-                    }`}
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
                   >
                     {focusModeEnabled ? "Focus On" : "Focus Off"}
                   </button>
@@ -2913,6 +2973,7 @@ export default function StudyRoomsPanel({
                           value={notesDraft}
                           onChange={(event) => setNotesDraft(event.target.value)}
                           placeholder="Write your own markdown notes here..."
+                          disabled={!canModifyRoomContent}
                           className="mt-2 min-h-[160px] w-full resize-none rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                         />
                         <div className="mt-2 flex items-center justify-between gap-2 text-xs font-semibold text-[#1F2937]/65">
@@ -2928,7 +2989,7 @@ export default function StudyRoomsPanel({
                             onClick={() => {
                               void handleSaveNotes();
                             }}
-                            disabled={isSavingNotes}
+                            disabled={isSavingNotes || !canModifyRoomContent}
                             className="btn-3d btn-3d-green inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                           >
                             {isSavingNotes ? "Saving..." : "Save My Note"}
@@ -2986,7 +3047,8 @@ export default function StudyRoomsPanel({
                                         onClick={() => {
                                           void handleDeleteNoteEntry(entry.id);
                                         }}
-                                        className="rounded-full border border-[#1F2937]/20 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#1F2937]"
+                                        disabled={!canModifyRoomContent}
+                                        className="rounded-full border border-[#1F2937]/20 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-60"
                                       >
                                         Delete
                                       </button>
@@ -3010,28 +3072,36 @@ export default function StudyRoomsPanel({
                         <button
                           type="button"
                           onClick={() => {
+                            if (!canModifyRoomContent) {
+                              return;
+                            }
                             setResourceComposerMode("url");
                             setNewResourceUrl((previous) => previous ?? "");
                           }}
+                          disabled={!canModifyRoomContent}
                           className={`rounded-full border px-3 py-1 text-xs font-extrabold ${
                             resourceComposerMode === "url"
                               ? "border-[#58CC02] bg-[#E9FFD8] text-[#1F2937]"
                               : "border-[#1F2937]/20 bg-white text-[#1F2937]/70"
-                          }`}
+                          } disabled:cursor-not-allowed disabled:opacity-60`}
                         >
                           Add Link
                         </button>
                         <button
                           type="button"
                           onClick={() => {
+                            if (!canModifyRoomContent) {
+                              return;
+                            }
                             setResourceComposerMode("file");
                             setNewResourceUrl((previous) => previous ?? "");
                           }}
+                          disabled={!canModifyRoomContent}
                           className={`rounded-full border px-3 py-1 text-xs font-extrabold ${
                             resourceComposerMode === "file"
                               ? "border-[#58CC02] bg-[#E9FFD8] text-[#1F2937]"
                               : "border-[#1F2937]/20 bg-white text-[#1F2937]/70"
-                          }`}
+                          } disabled:cursor-not-allowed disabled:opacity-60`}
                         >
                           Upload File
                         </button>
@@ -3050,6 +3120,7 @@ export default function StudyRoomsPanel({
                                 | "other",
                             )
                           }
+                          disabled={!canModifyRoomContent}
                           className="rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                         >
                           <option value="video">Video</option>
@@ -3063,6 +3134,7 @@ export default function StudyRoomsPanel({
                           value={newResourceTitle}
                           onChange={(event) => setNewResourceTitle(event.target.value)}
                           placeholder="Resource title"
+                          disabled={!canModifyRoomContent}
                           className="rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                         />
                         {resourceComposerMode === "url" ? (
@@ -3070,6 +3142,7 @@ export default function StudyRoomsPanel({
                             value={newResourceUrl ?? ""}
                             onChange={(event) => setNewResourceUrl(event.target.value)}
                             placeholder="https://..."
+                            disabled={!canModifyRoomContent}
                             className="rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                           />
                         ) : (
@@ -3089,8 +3162,14 @@ export default function StudyRoomsPanel({
                             />
                             <button
                               type="button"
-                              onClick={() => resourceFileInputRef.current?.click()}
-                              className="rounded-full border border-[#1F2937]/20 bg-[#E9FFD8] px-3 py-1 text-xs font-extrabold text-[#1F2937]"
+                              onClick={() => {
+                                if (!canModifyRoomContent) {
+                                  return;
+                                }
+                                resourceFileInputRef.current?.click();
+                              }}
+                              disabled={!canModifyRoomContent}
+                              className="rounded-full border border-[#1F2937]/20 bg-[#E9FFD8] px-3 py-1 text-xs font-extrabold text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-60"
                             >
                               Choose File
                             </button>
@@ -3106,7 +3185,7 @@ export default function StudyRoomsPanel({
                           onClick={() => {
                             void handleAddResource();
                           }}
-                          disabled={isAddingResource}
+                          disabled={isAddingResource || !canModifyRoomContent}
                           className="btn-3d btn-3d-green inline-flex h-9 w-fit items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           {isAddingResource ? "Adding..." : "Add Link"}
@@ -3117,7 +3196,7 @@ export default function StudyRoomsPanel({
                           onClick={() => {
                             void handleUploadResourceFile();
                           }}
-                          disabled={isUploadingResourceFile || !newResourceFile}
+                          disabled={isUploadingResourceFile || !newResourceFile || !canModifyRoomContent}
                           className="btn-3d btn-3d-green inline-flex h-9 w-fit items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           {isUploadingResourceFile ? "Uploading..." : "Upload File"}
@@ -3151,7 +3230,8 @@ export default function StudyRoomsPanel({
                                       onClick={() => {
                                         void handleRemoveResource(resource.id);
                                       }}
-                                      className="rounded-full border border-[#1F2937]/20 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#1F2937]"
+                                      disabled={!canModifyRoomContent}
+                                      className="rounded-full border border-[#1F2937]/20 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-60"
                                     >
                                       Remove
                                     </button>
@@ -3223,6 +3303,7 @@ export default function StudyRoomsPanel({
                           value={aiQuestionDraft}
                           onChange={(event) => setAiQuestionDraft(event.target.value)}
                           placeholder="Ask AI Tutor..."
+                          disabled={!canModifyRoomContent}
                           className="min-h-[44px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                         />
                         <button
@@ -3230,7 +3311,7 @@ export default function StudyRoomsPanel({
                           onClick={() => {
                             void handleAskAiTutor();
                           }}
-                          disabled={isAskingAiTutor}
+                          disabled={isAskingAiTutor || !canModifyRoomContent}
                           className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           {isAskingAiTutor ? "Asking..." : "Ask"}
@@ -3250,6 +3331,7 @@ export default function StudyRoomsPanel({
                     value={goalDraft}
                     onChange={(event) => setGoalDraft(event.target.value)}
                     placeholder="Set your goal..."
+                    disabled={!canModifyRoomContent}
                     className="mt-2 min-h-[72px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                   />
                   <div className="mt-2 flex items-center gap-2">
@@ -3260,6 +3342,7 @@ export default function StudyRoomsPanel({
                           event.target.value as "not_started" | "in_progress" | "completed",
                         )
                       }
+                      disabled={!canModifyRoomContent}
                       className="rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-xs font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
                     >
                       <option value="not_started">not_started</option>
@@ -3271,7 +3354,7 @@ export default function StudyRoomsPanel({
                       onClick={() => {
                         void handleSaveGoal();
                       }}
-                      disabled={isSavingGoal}
+                      disabled={isSavingGoal || !canModifyRoomContent}
                       className="btn-3d btn-3d-green inline-flex h-9 items-center justify-center px-3 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       {isSavingGoal ? "Saving..." : "Save Goal"}
