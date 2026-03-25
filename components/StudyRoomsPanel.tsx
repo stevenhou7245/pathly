@@ -218,6 +218,64 @@ type StudyRoomAiTutorResponse = {
   assistant_message?: StudyRoomAiTutorMessage;
 };
 
+type StudyRoomSavableNoteItem = {
+  item_id: string;
+  source_kind: "study_room_note";
+  source_id: string;
+  author_user_id: string;
+  author_username: string | null;
+  content_md: string;
+  timestamp: string | null;
+};
+
+type StudyRoomSavableResourceItem = {
+  item_id: string;
+  source_kind: "study_room_resource";
+  source_id: string;
+  title: string;
+  resource_type: "video" | "article" | "website" | "document" | "notes" | "other";
+  source_kind_value: "url" | "file";
+  url: string | null;
+  file_name: string | null;
+  added_by: string;
+  added_by_username: string | null;
+  timestamp: string | null;
+};
+
+type StudyRoomSavableAiExchangeItem = {
+  item_id: string;
+  source_kind: "study_room_ai_exchange";
+  question_message_id: string | null;
+  answer_message_id: string | null;
+  question_author_id: string | null;
+  question_author_username: string | null;
+  question_text: string | null;
+  answer_text: string | null;
+  timestamp: string | null;
+};
+
+type StudyRoomLeaveSavableContent = {
+  room_id: string;
+  shared_notes: StudyRoomSavableNoteItem[];
+  shared_resources: StudyRoomSavableResourceItem[];
+  ai_exchanges: StudyRoomSavableAiExchangeItem[];
+};
+
+type StudyRoomLeaveSaveResponse = {
+  success: boolean;
+  message?: string;
+  content?: StudyRoomLeaveSavableContent;
+  notebook?: {
+    id: string;
+    topic: string;
+  };
+  selected_summary?: {
+    notes_count: number;
+    resources_count: number;
+    ai_exchanges_count: number;
+  };
+};
+
 type FriendsApiResponse = {
   success: boolean;
   message?: string;
@@ -248,6 +306,17 @@ function formatTimestamp(value: string | null) {
   return timestamp.toLocaleString();
 }
 
+function truncateText(value: string | null | undefined, maxLength = 180) {
+  const text = (value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}...`;
+}
+
 function formatShortDurationFromSeconds(totalSeconds: number) {
   const safe = Math.max(0, Math.floor(totalSeconds));
   const hours = Math.floor(safe / 3600);
@@ -257,6 +326,405 @@ function formatShortDurationFromSeconds(totalSeconds: number) {
     return `${hours}h ${minutes}m ${seconds}s`;
   }
   return `${minutes}m ${seconds}s`;
+}
+
+function toSafeString(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function toSafeNullableString(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
+function toSafeBoolean(value: unknown) {
+  return value === true;
+}
+
+function toSafeNonNegativeInt(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value));
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.floor(parsed));
+    }
+  }
+  return 0;
+}
+
+function toSafeNullableNonNegativeInt(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value));
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.floor(parsed));
+    }
+  }
+  return null;
+}
+
+function normalizePresenceState(value: unknown): StudyRoomParticipant["presence_state"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (normalized === "idle" || normalized === "focus" || normalized === "offline") {
+    return normalized;
+  }
+  return "online";
+}
+
+function normalizeGoalStatus(value: unknown): StudyRoomParticipant["goal_status"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (normalized === "in_progress" || normalized === "completed") {
+    return normalized;
+  }
+  return "not_started";
+}
+
+function compareParticipantsByJoinedAt(a: StudyRoomParticipant, b: StudyRoomParticipant) {
+  const joinedA = a.joined_at ?? "";
+  const joinedB = b.joined_at ?? "";
+  if (joinedA !== joinedB) {
+    return joinedA.localeCompare(joinedB);
+  }
+  if (a.user_id !== b.user_id) {
+    return a.user_id.localeCompare(b.user_id);
+  }
+  return a.id.localeCompare(b.id);
+}
+
+function normalizeParticipantsByJoinedAt(rows: StudyRoomParticipant[]) {
+  const map = new Map<string, StudyRoomParticipant>();
+  rows.forEach((row) => {
+    if (!row.id) {
+      return;
+    }
+    map.set(row.id, row);
+  });
+  return Array.from(map.values()).sort(compareParticipantsByJoinedAt);
+}
+
+function mergeParticipantRealtimeRow(params: {
+  previous: StudyRoomParticipant[];
+  row: Record<string, unknown>;
+}) {
+  const nextRowId = toSafeString(params.row.id);
+  if (!nextRowId) {
+    return params.previous;
+  }
+  const existingById = params.previous.find((item) => item.id === nextRowId) ?? null;
+  const existingByUserId =
+    !existingById && toSafeString(params.row.user_id)
+      ? params.previous.find((item) => item.user_id === toSafeString(params.row.user_id)) ?? null
+      : null;
+  const existing = existingById ?? existingByUserId;
+
+  const merged: StudyRoomParticipant = {
+    id: nextRowId,
+    room_id: toSafeString(params.row.room_id) || existing?.room_id || "",
+    user_id: toSafeString(params.row.user_id) || existing?.user_id || "",
+    joined_at: toSafeNullableString(params.row.joined_at) ?? existing?.joined_at ?? null,
+    left_at: toSafeNullableString(params.row.left_at) ?? existing?.left_at ?? null,
+    role: toSafeString(params.row.role) || existing?.role || "participant",
+    username: toSafeString(params.row.username) || existing?.username || "Unknown",
+    presence_state:
+      params.row.presence_state !== undefined
+        ? normalizePresenceState(params.row.presence_state)
+        : existing?.presence_state ?? "online",
+    focus_mode:
+      params.row.focus_mode !== undefined
+        ? toSafeBoolean(params.row.focus_mode)
+        : existing?.focus_mode ?? false,
+    focus_started_at:
+      toSafeNullableString(params.row.focus_started_at) ?? existing?.focus_started_at ?? null,
+    last_active_at:
+      toSafeNullableString(params.row.last_active_at) ?? existing?.last_active_at ?? null,
+    current_streak_seconds:
+      params.row.current_streak_seconds !== undefined
+        ? toSafeNonNegativeInt(params.row.current_streak_seconds)
+        : existing?.current_streak_seconds ?? 0,
+    total_focus_seconds:
+      params.row.total_focus_seconds !== undefined
+        ? toSafeNonNegativeInt(params.row.total_focus_seconds)
+        : existing?.total_focus_seconds ?? 0,
+    session_seconds:
+      params.row.session_seconds !== undefined
+        ? toSafeNonNegativeInt(params.row.session_seconds)
+        : existing?.session_seconds ?? 0,
+    goal_text: toSafeNullableString(params.row.goal_text) ?? existing?.goal_text ?? null,
+    goal_status:
+      params.row.goal_status !== undefined
+        ? normalizeGoalStatus(params.row.goal_status)
+        : existing?.goal_status ?? "not_started",
+  };
+
+  const withoutSameId = params.previous.filter((item) => item.id !== nextRowId);
+  return normalizeParticipantsByJoinedAt([...withoutSameId, merged]);
+}
+
+function compareByCreatedAtAsc<T extends { created_at: string | null; id: string }>(a: T, b: T) {
+  const createdA = a.created_at ?? "";
+  const createdB = b.created_at ?? "";
+  if (createdA !== createdB) {
+    return createdA.localeCompare(createdB);
+  }
+  return a.id.localeCompare(b.id);
+}
+
+function normalizeNoteEntriesByCreatedAt(rows: StudyRoomNoteEntry[]) {
+  const map = new Map<string, StudyRoomNoteEntry>();
+  rows.forEach((row) => {
+    if (!row.id) {
+      return;
+    }
+    map.set(row.id, row);
+  });
+  return Array.from(map.values()).sort(compareByCreatedAtAsc);
+}
+
+function normalizeResourcesByCreatedAt(rows: StudyRoomSharedResource[]) {
+  const map = new Map<string, StudyRoomSharedResource>();
+  rows.forEach((row) => {
+    if (!row.id) {
+      return;
+    }
+    map.set(row.id, row);
+  });
+  return Array.from(map.values()).sort(compareByCreatedAtAsc);
+}
+
+function normalizeAiMessagesByCreatedAt(rows: StudyRoomAiTutorMessage[]) {
+  const map = new Map<string, StudyRoomAiTutorMessage>();
+  rows.forEach((row) => {
+    if (!row.id) {
+      return;
+    }
+    map.set(row.id, row);
+  });
+  return Array.from(map.values()).sort(compareByCreatedAtAsc);
+}
+
+function normalizeAiMessageSenderType(
+  value: unknown,
+): StudyRoomAiTutorMessage["sender_type"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (normalized === "ai") {
+    return "ai";
+  }
+  if (normalized === "assistant") {
+    return "assistant";
+  }
+  if (normalized === "system") {
+    return "system";
+  }
+  return "user";
+}
+
+function normalizeAiMessageRole(value: unknown): StudyRoomAiTutorMessage["role"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (normalized === "assistant" || normalized === "ai") {
+    return "assistant";
+  }
+  if (normalized === "system") {
+    return "system";
+  }
+  return "user";
+}
+
+function normalizeAiMessageKind(value: unknown): StudyRoomAiTutorMessage["message_kind"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (normalized === "question" || normalized === "answer" || normalized === "summary") {
+    return normalized;
+  }
+  return "chat";
+}
+
+function normalizeMetadata(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function normalizeStudyRoomSourceKind(value: unknown): StudyRoomSharedResource["source_kind"] {
+  return toSafeString(value).trim().toLowerCase() === "file" ? "file" : "url";
+}
+
+function normalizeStudyRoomResourceType(value: unknown): StudyRoomSharedResource["resource_type"] {
+  const normalized = toSafeString(value).trim().toLowerCase();
+  if (
+    normalized === "video" ||
+    normalized === "article" ||
+    normalized === "website" ||
+    normalized === "document" ||
+    normalized === "notes"
+  ) {
+    return normalized;
+  }
+  return "other";
+}
+
+function mergeNoteEntryRealtimeRow(params: {
+  previous: StudyRoomNoteEntry[];
+  row: Record<string, unknown>;
+  roomId: string;
+  participants: StudyRoomParticipant[];
+}) {
+  const rowId = toSafeString(params.row.id);
+  if (!rowId) {
+    return params.previous;
+  }
+  const existing = params.previous.find((entry) => entry.id === rowId) ?? null;
+  const authorUserId = toSafeString(params.row.author_user_id) || existing?.author_user_id || "";
+  const authorUsernameFromParticipant =
+    params.participants.find((participant) => participant.user_id === authorUserId)?.username ?? null;
+  const merged: StudyRoomNoteEntry = {
+    id: rowId,
+    room_id: toSafeString(params.row.room_id) || existing?.room_id || params.roomId,
+    author_user_id: authorUserId,
+    author_username:
+      toSafeNullableString(params.row.author_username) ??
+      existing?.author_username ??
+      authorUsernameFromParticipant,
+    content_md:
+      params.row.content_md !== undefined
+        ? toSafeNullableString(params.row.content_md)
+        : existing?.content_md ?? null,
+    created_at: toSafeNullableString(params.row.created_at) ?? existing?.created_at ?? null,
+    updated_at: toSafeNullableString(params.row.updated_at) ?? existing?.updated_at ?? null,
+    is_deleted:
+      params.row.is_deleted !== undefined
+        ? toSafeBoolean(params.row.is_deleted)
+        : existing?.is_deleted ?? false,
+  };
+  if (merged.is_deleted) {
+    return normalizeNoteEntriesByCreatedAt(params.previous.filter((entry) => entry.id !== rowId));
+  }
+  const withoutSameId = params.previous.filter((entry) => entry.id !== rowId);
+  return normalizeNoteEntriesByCreatedAt([...withoutSameId, merged]);
+}
+
+function mergeResourceRealtimeRow(params: {
+  previous: StudyRoomSharedResource[];
+  row: Record<string, unknown>;
+  roomId: string;
+  participants: StudyRoomParticipant[];
+}) {
+  const rowId = toSafeString(params.row.id);
+  if (!rowId) {
+    return params.previous;
+  }
+  const existing = params.previous.find((resource) => resource.id === rowId) ?? null;
+  const addedBy = toSafeString(params.row.added_by) || existing?.added_by || "";
+  const addedByUsernameFromParticipant =
+    params.participants.find((participant) => participant.user_id === addedBy)?.username ?? null;
+  const merged: StudyRoomSharedResource = {
+    id: rowId,
+    room_id: toSafeString(params.row.room_id) || existing?.room_id || params.roomId,
+    source_kind:
+      params.row.source_kind !== undefined
+        ? normalizeStudyRoomSourceKind(params.row.source_kind)
+        : existing?.source_kind ?? "url",
+    resource_type:
+      params.row.resource_type !== undefined
+        ? normalizeStudyRoomResourceType(params.row.resource_type)
+        : existing?.resource_type ?? "other",
+    title: toSafeString(params.row.title) || existing?.title || "Shared resource",
+    url:
+      params.row.url !== undefined
+        ? toSafeNullableString(params.row.url)
+        : existing?.url ?? null,
+    file_name:
+      params.row.file_name !== undefined
+        ? toSafeNullableString(params.row.file_name)
+        : existing?.file_name ?? null,
+    file_path:
+      params.row.file_path !== undefined
+        ? toSafeNullableString(params.row.file_path)
+        : existing?.file_path ?? null,
+    file_size_bytes:
+      params.row.file_size_bytes !== undefined
+        ? toSafeNullableNonNegativeInt(params.row.file_size_bytes)
+        : existing?.file_size_bytes ?? null,
+    mime_type:
+      params.row.mime_type !== undefined
+        ? toSafeNullableString(params.row.mime_type)
+        : existing?.mime_type ?? null,
+    added_by: addedBy,
+    added_by_username:
+      toSafeNullableString(params.row.added_by_username) ??
+      existing?.added_by_username ??
+      addedByUsernameFromParticipant,
+    created_at: toSafeNullableString(params.row.created_at) ?? existing?.created_at ?? null,
+  };
+  const withoutSameId = params.previous.filter((resource) => resource.id !== rowId);
+  return normalizeResourcesByCreatedAt([...withoutSameId, merged]);
+}
+
+function mergeAiMessageRealtimeRow(params: {
+  previous: StudyRoomAiTutorMessage[];
+  row: Record<string, unknown>;
+  roomId: string;
+  participants: StudyRoomParticipant[];
+}) {
+  const rowId = toSafeString(params.row.id);
+  if (!rowId) {
+    return params.previous;
+  }
+  const existing = params.previous.find((message) => message.id === rowId) ?? null;
+  const senderType =
+    params.row.sender_type !== undefined
+      ? normalizeAiMessageSenderType(params.row.sender_type)
+      : existing?.sender_type ?? "user";
+  const senderId =
+    params.row.sender_id !== undefined
+      ? toSafeNullableString(params.row.sender_id)
+      : existing?.sender_id ?? null;
+  const senderNameFromParticipant = senderId
+    ? params.participants.find((participant) => participant.user_id === senderId)?.username ?? null
+    : null;
+  const merged: StudyRoomAiTutorMessage = {
+    id: rowId,
+    room_id: toSafeString(params.row.room_id) || existing?.room_id || params.roomId,
+    sender_id: senderId,
+    sender_username:
+      toSafeNullableString(params.row.sender_username) ??
+      existing?.sender_username ??
+      (senderType === "user" ? senderNameFromParticipant : "AI Tutor"),
+    sender_type: senderType,
+    role:
+      params.row.sender_type !== undefined
+        ? normalizeAiMessageRole(params.row.sender_type)
+        : existing?.role ?? normalizeAiMessageRole(senderType),
+    message_kind:
+      params.row.message_kind !== undefined
+        ? normalizeAiMessageKind(params.row.message_kind)
+        : existing?.message_kind ?? "chat",
+    provider:
+      params.row.provider !== undefined
+        ? toSafeNullableString(params.row.provider)
+        : existing?.provider ?? null,
+    model:
+      params.row.model !== undefined
+        ? toSafeNullableString(params.row.model)
+        : existing?.model ?? null,
+    context_summary:
+      params.row.context_summary !== undefined
+        ? toSafeNullableString(params.row.context_summary)
+        : existing?.context_summary ?? null,
+    body: toSafeString(params.row.body) || existing?.body || "",
+    metadata:
+      params.row.metadata !== undefined
+        ? normalizeMetadata(params.row.metadata)
+        : existing?.metadata ?? {},
+    created_at: toSafeNullableString(params.row.created_at) ?? existing?.created_at ?? null,
+  };
+  const withoutSameId = params.previous.filter((message) => message.id !== rowId);
+  return normalizeAiMessagesByCreatedAt([...withoutSameId, merged]);
 }
 
 function formatBytes(value: number | null) {
@@ -386,6 +854,11 @@ export default function StudyRoomsPanel({
   >("");
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [leaveSaveContent, setLeaveSaveContent] = useState<StudyRoomLeaveSavableContent | null>(null);
+  const [isLoadingLeaveSaveContent, setIsLoadingLeaveSaveContent] = useState(false);
+  const [selectedLeaveItemIds, setSelectedLeaveItemIds] = useState<string[]>([]);
+  const [leaveNotebookTopic, setLeaveNotebookTopic] = useState("");
+  const [isSavingLeaveSelections, setIsSavingLeaveSelections] = useState(false);
   const [showExpireModal, setShowExpireModal] = useState(false);
   const [showExtendInput, setShowExtendInput] = useState(false);
   const [extendDurationInput, setExtendDurationInput] = useState("60");
@@ -395,6 +868,8 @@ export default function StudyRoomsPanel({
   const previousMessageCountRef = useRef(0);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMessagesCount, setNewMessagesCount] = useState(0);
+  const participantsRef = useRef<StudyRoomParticipant[]>([]);
+  const viewerUserIdRef = useRef("");
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) ?? null,
@@ -469,10 +944,7 @@ export default function StudyRoomsPanel({
     [participants, roomDetail],
   );
   const sortedNoteEntries = useMemo(
-    () =>
-      [...noteEntries].sort((a, b) =>
-        (b.updated_at ?? b.created_at ?? "").localeCompare(a.updated_at ?? a.created_at ?? ""),
-      ),
+    () => normalizeNoteEntriesByCreatedAt(noteEntries),
     [noteEntries],
   );
   const myLatestNoteEntry = useMemo(() => {
@@ -489,6 +961,15 @@ export default function StudyRoomsPanel({
       noteEntries.find((entry) => entry.author_user_id === roomDetail.viewer_user_id && !entry.is_deleted) ?? null
     );
   }, [myNoteEntryId, noteEntries, roomDetail]);
+  const selectedLeaveItemCount = selectedLeaveItemIds.length;
+
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
+
+  useEffect(() => {
+    viewerUserIdRef.current = roomDetail?.viewer_user_id ?? "";
+  }, [roomDetail?.viewer_user_id]);
 
   function scrollMessagesToBottom() {
     const container = messagesContainerRef.current;
@@ -540,7 +1021,7 @@ export default function StudyRoomsPanel({
         }
 
         setRoomDetail(detailPayload.room);
-        setParticipants(detailPayload.participants ?? []);
+        setParticipants(normalizeParticipantsByJoinedAt(detailPayload.participants ?? []));
         setMessages((messagesPayload.messages ?? []).sort((a, b) =>
           (a.created_at ?? "").localeCompare(b.created_at ?? ""),
         ));
@@ -596,7 +1077,7 @@ export default function StudyRoomsPanel({
 
         if (notesResponse.ok && notesPayload.success) {
           setNotesRecord(notesPayload.note ?? null);
-          const entries = notesPayload.entries ?? [];
+          const entries = normalizeNoteEntriesByCreatedAt(notesPayload.entries ?? []);
           setNoteEntries(entries);
           const myEntry = notesPayload.my_entry ?? null;
           setMyNoteEntryId(myEntry?.id ?? null);
@@ -608,13 +1089,13 @@ export default function StudyRoomsPanel({
           setNotesDraft("");
         }
         if (resourcesResponse.ok && resourcesPayload.success) {
-          setResources(resourcesPayload.resources ?? []);
+          setResources(normalizeResourcesByCreatedAt(resourcesPayload.resources ?? []));
         }
         if (aiResponse.ok && aiPayload.success) {
-          setAiMessages(aiPayload.messages ?? []);
+          setAiMessages(normalizeAiMessagesByCreatedAt(aiPayload.messages ?? []));
         }
         if (goalsResponse.ok && goalsPayload.success && goalsPayload.participants) {
-          setParticipants(goalsPayload.participants);
+          setParticipants(normalizeParticipantsByJoinedAt(goalsPayload.participants));
         }
       } catch (error) {
         console.warn("[study_room_workspace] extras_load_failed", {
@@ -898,7 +1379,8 @@ export default function StudyRoomsPanel({
           }
 
           const senderIsParticipant =
-            participants.length === 0 || participants.some((row) => row.user_id === mapped.sender_id);
+            participantsRef.current.length === 0 ||
+            participantsRef.current.some((row) => row.user_id === mapped.sender_id);
           if (!senderIsParticipant) {
             console.warn("[study_room_realtime] unauthorized_sender_ignored", {
               room_id: activeRoomId,
@@ -934,10 +1416,42 @@ export default function StudyRoomsPanel({
           table: "study_room_participants",
           filter: `room_id=eq.${activeRoomId}`,
         },
-        () => {
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const eventType = payload.eventType;
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+          const changedParticipantId = toSafeString(newRow?.id ?? oldRow?.id);
+
           console.info("[study_room_realtime] participants_changed", {
             room_id: activeRoomId,
+            event_type: eventType,
+            participant_id: changedParticipantId || null,
           });
+
+          if (eventType === "DELETE") {
+            setParticipants((previous) =>
+              normalizeParticipantsByJoinedAt(
+                previous.filter((item) => item.id !== changedParticipantId),
+              ),
+            );
+            void loadRoomData(activeRoomId);
+            return;
+          }
+
+          if ((eventType === "INSERT" || eventType === "UPDATE") && newRow) {
+            setParticipants((previous) => mergeParticipantRealtimeRow({
+              previous,
+              row: newRow,
+            }));
+            if (eventType === "INSERT") {
+              void loadRoomData(activeRoomId);
+            }
+            return;
+          }
+
           void loadRoomData(activeRoomId);
         },
       )
@@ -949,8 +1463,44 @@ export default function StudyRoomsPanel({
           table: "study_room_note_entries",
           filter: `room_id=eq.${activeRoomId}`,
         },
-        () => {
-          void loadWorkspaceExtras(activeRoomId);
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const eventType = payload.eventType;
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+          if (!changedId) {
+            return;
+          }
+          if (eventType === "DELETE") {
+            setNoteEntries((previous) =>
+              normalizeNoteEntriesByCreatedAt(previous.filter((entry) => entry.id !== changedId)),
+            );
+            setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
+            return;
+          }
+          if (!newRow) {
+            return;
+          }
+          const isDeleted = toSafeBoolean(newRow.is_deleted);
+          setNoteEntries((previous) =>
+            mergeNoteEntryRealtimeRow({
+              previous,
+              row: newRow,
+              roomId: activeRoomId,
+              participants: participantsRef.current,
+            }),
+          );
+          if (isDeleted) {
+            setMyNoteEntryId((previous) => (previous === changedId ? null : previous));
+            return;
+          }
+          const authorUserId = toSafeString(newRow.author_user_id);
+          if (authorUserId && authorUserId === viewerUserIdRef.current) {
+            setMyNoteEntryId(changedId);
+          }
         },
       )
       .on(
@@ -961,8 +1511,34 @@ export default function StudyRoomsPanel({
           table: "study_room_resources",
           filter: `room_id=eq.${activeRoomId}`,
         },
-        () => {
-          void loadWorkspaceExtras(activeRoomId);
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const eventType = payload.eventType;
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+          if (!changedId) {
+            return;
+          }
+          if (eventType === "DELETE") {
+            setResources((previous) =>
+              normalizeResourcesByCreatedAt(previous.filter((resource) => resource.id !== changedId)),
+            );
+            return;
+          }
+          if (!newRow) {
+            return;
+          }
+          setResources((previous) =>
+            mergeResourceRealtimeRow({
+              previous,
+              row: newRow,
+              roomId: activeRoomId,
+              participants: participantsRef.current,
+            }),
+          );
         },
       )
       .on(
@@ -973,8 +1549,34 @@ export default function StudyRoomsPanel({
           table: "study_room_ai_messages",
           filter: `room_id=eq.${activeRoomId}`,
         },
-        () => {
-          void loadWorkspaceExtras(activeRoomId);
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const eventType = payload.eventType;
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+          const changedId = toSafeString(newRow?.id ?? oldRow?.id);
+          if (!changedId) {
+            return;
+          }
+          if (eventType === "DELETE") {
+            setAiMessages((previous) =>
+              normalizeAiMessagesByCreatedAt(previous.filter((message) => message.id !== changedId)),
+            );
+            return;
+          }
+          if (!newRow) {
+            return;
+          }
+          setAiMessages((previous) =>
+            mergeAiMessageRealtimeRow({
+              previous,
+              row: newRow,
+              roomId: activeRoomId,
+              participants: participantsRef.current,
+            }),
+          );
         },
       )
       .on(
@@ -1017,7 +1619,7 @@ export default function StudyRoomsPanel({
         void supabaseClient.removeChannel(channel);
       }
     };
-  }, [activeRoomId, loadRoomData, loadWorkspaceExtras, participants]);
+  }, [activeRoomId, loadRoomData]);
 
   async function handleCreateRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1283,7 +1885,7 @@ export default function StudyRoomsPanel({
     }
   }
 
-  async function handleLeaveRoom() {
+  async function executeLeaveRoom() {
     if (!activeRoomId) {
       return;
     }
@@ -1316,6 +1918,89 @@ export default function StudyRoomsPanel({
     } finally {
       setIsLeavingRoom(false);
       setShowLeaveConfirm(false);
+      setIsSavingLeaveSelections(false);
+    }
+  }
+
+  async function loadLeaveSaveContent(roomId: string) {
+    setIsLoadingLeaveSaveContent(true);
+    setPanelError("");
+    try {
+      const response = await fetch(`/api/study-room/${encodeURIComponent(roomId)}/leave-save`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as StudyRoomLeaveSaveResponse;
+      if (!response.ok || !payload.success || !payload.content) {
+        throw new Error(payload.message ?? "Unable to load room content for save.");
+      }
+      setLeaveSaveContent(payload.content);
+      setSelectedLeaveItemIds([]);
+      const defaultTopic = `${roomDetail?.name ?? "Study Room"} Summary`;
+      setLeaveNotebookTopic(defaultTopic);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load room content for save.";
+      setPanelError(message);
+      setLeaveSaveContent({
+        room_id: roomId,
+        shared_notes: [],
+        shared_resources: [],
+        ai_exchanges: [],
+      });
+    } finally {
+      setIsLoadingLeaveSaveContent(false);
+    }
+  }
+
+  async function handleOpenLeaveModal() {
+    if (!activeRoomId) {
+      return;
+    }
+    setShowLeaveConfirm(true);
+    await loadLeaveSaveContent(activeRoomId);
+  }
+
+  async function handleSaveSelectedBeforeLeave() {
+    if (!activeRoomId) {
+      return;
+    }
+    const normalizedTopic = leaveNotebookTopic.trim();
+    if (!normalizedTopic) {
+      setPanelError("Please enter a notebook topic before saving.");
+      return;
+    }
+    if (selectedLeaveItemIds.length === 0) {
+      setPanelError("Select at least one item to save, or choose Leave Without Saving.");
+      return;
+    }
+
+    setIsSavingLeaveSelections(true);
+    setPanelError("");
+    try {
+      const response = await fetch(`/api/study-room/${encodeURIComponent(activeRoomId)}/leave-save`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          topic: normalizedTopic,
+          selected_item_ids: selectedLeaveItemIds,
+        }),
+      });
+      const payload = (await response.json()) as StudyRoomLeaveSaveResponse;
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message ?? "Unable to save selected room content.");
+      }
+      setPanelMessage(
+        payload.notebook
+          ? `Saved to notebook: ${payload.notebook.topic}.`
+          : "Room content saved to your notebook.",
+      );
+      await executeLeaveRoom();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save selected room content.";
+      setPanelError(message);
+      setIsSavingLeaveSelections(false);
     }
   }
 
@@ -1432,7 +2117,7 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to save notes.");
       }
       setNotesRecord(payload.note ?? null);
-      setNoteEntries(payload.entries ?? []);
+      setNoteEntries(normalizeNoteEntriesByCreatedAt(payload.entries ?? []));
       setMyNoteEntryId(payload.my_entry?.id ?? payload.saved_entry?.id ?? null);
       setNotesDraft((payload.my_entry?.content_md ?? payload.saved_entry?.content_md ?? notesDraft) ?? "");
       setPanelMessage("Your notes were saved.");
@@ -1461,7 +2146,7 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to delete note.");
       }
       setNotesRecord(payload.note ?? null);
-      setNoteEntries(payload.entries ?? []);
+      setNoteEntries(normalizeNoteEntriesByCreatedAt(payload.entries ?? []));
       setMyNoteEntryId(payload.my_entry?.id ?? null);
       if (!payload.my_entry || payload.my_entry.id === entryId) {
         setNotesDraft(payload.my_entry?.content_md ?? "");
@@ -1496,7 +2181,9 @@ export default function StudyRoomsPanel({
       if (!response.ok || !payload.success || !payload.resource) {
         throw new Error(payload.message ?? "Unable to add resource.");
       }
-      setResources((previous) => [payload.resource as StudyRoomSharedResource, ...previous]);
+      setResources((previous) =>
+        normalizeResourcesByCreatedAt([...previous, payload.resource as StudyRoomSharedResource]),
+      );
       setNewResourceTitle("");
       setNewResourceUrl("");
       setPanelMessage("Link resource added.");
@@ -1532,7 +2219,9 @@ export default function StudyRoomsPanel({
       if (!response.ok || !payload.success || !payload.resource) {
         throw new Error(payload.message ?? "Unable to upload file resource.");
       }
-      setResources((previous) => [payload.resource as StudyRoomSharedResource, ...previous]);
+      setResources((previous) =>
+        normalizeResourcesByCreatedAt([...previous, payload.resource as StudyRoomSharedResource]),
+      );
       setNewResourceTitle("");
       setNewResourceFile(null);
       if (resourceFileInputRef.current) {
@@ -1599,13 +2288,14 @@ export default function StudyRoomsPanel({
       ) {
         throw new Error(payload.message ?? "Unable to ask AI tutor.");
       }
-      setAiMessages((previous) => [
-        ...previous,
-        payload.user_message as StudyRoomAiTutorMessage,
-        payload.assistant_message as StudyRoomAiTutorMessage,
-      ]);
+      setAiMessages((previous) =>
+        normalizeAiMessagesByCreatedAt([
+          ...previous,
+          payload.user_message as StudyRoomAiTutorMessage,
+          payload.assistant_message as StudyRoomAiTutorMessage,
+        ]),
+      );
       setAiQuestionDraft("");
-      void loadWorkspaceExtras(roomDetail.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to ask AI tutor.";
       setPanelError(message);
@@ -2450,7 +3140,9 @@ export default function StudyRoomsPanel({
                     ) : roomDetail.can_leave ? (
                       <button
                         type="button"
-                        onClick={() => setShowLeaveConfirm(true)}
+                        onClick={() => {
+                          void handleOpenLeaveModal();
+                        }}
                         disabled={isLeavingRoom}
                         className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-3 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                       >
@@ -2515,12 +3207,172 @@ export default function StudyRoomsPanel({
 
       {showLeaveConfirm && roomDetail ? (
         <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/35 px-4">
-          <div className="w-full max-w-md rounded-[1.5rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_8px_0_#1F2937,0_18px_26px_rgba(31,41,55,0.16)]">
-            <p className="text-xl font-extrabold text-[#1F2937]">Leave room?</p>
+          <div className="w-full max-w-3xl rounded-[1.5rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_8px_0_#1F2937,0_18px_26px_rgba(31,41,55,0.16)]">
+            <p className="text-xl font-extrabold text-[#1F2937]">Save room content before leaving?</p>
             <p className="mt-2 text-sm font-semibold text-[#1F2937]/72">
-              Are you sure you want to leave this study room?
+              Select shared notes, resources, and AI Tutor exchanges you want to save into your personal notebook.
             </p>
-            <div className="mt-4 flex justify-end gap-2">
+
+            <div className="mt-3 rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
+              <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                Notebook Topic
+              </label>
+              <input
+                value={leaveNotebookTopic}
+                onChange={(event) => setLeaveNotebookTopic(event.target.value)}
+                placeholder="Example: React Room Summary"
+                className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+              />
+              <p className="mt-1 text-xs font-semibold text-[#1F2937]/62">
+                Selected items: {selectedLeaveItemCount}
+              </p>
+            </div>
+
+            <div className="mt-3 max-h-[52vh] overflow-y-auto space-y-3">
+              {isLoadingLeaveSaveContent ? (
+                <p className="text-sm font-semibold text-[#1F2937]/70">Loading room content...</p>
+              ) : (
+                <>
+                  <div className="rounded-xl border border-[#1F2937]/12 bg-[#F9FCFF] p-3">
+                    <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                      Shared Notes
+                    </p>
+                    {leaveSaveContent?.shared_notes.length ? (
+                      <div className="mt-2 space-y-2">
+                        {leaveSaveContent.shared_notes.map((item) => {
+                          const checked = selectedLeaveItemIds.includes(item.item_id);
+                          return (
+                            <label
+                              key={item.item_id}
+                              className="flex items-start justify-between gap-3 rounded-lg border border-[#1F2937]/12 bg-white p-3"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-xs font-extrabold text-[#1F2937]/70">
+                                  {item.author_username ?? "Unknown"} · {formatTimestamp(item.timestamp)}
+                                </p>
+                                <p className="mt-1 whitespace-pre-wrap text-sm font-semibold text-[#1F2937]">
+                                  {truncateText(item.content_md, 220)}
+                                </p>
+                              </div>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(event) => {
+                                  setSelectedLeaveItemIds((previous) => {
+                                    if (event.target.checked) {
+                                      return Array.from(new Set([...previous, item.item_id]));
+                                    }
+                                    return previous.filter((id) => id !== item.item_id);
+                                  });
+                                }}
+                                className="mt-1 h-4 w-4 shrink-0 accent-[#58CC02]"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm font-semibold text-[#1F2937]/65">No shared notes to save.</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-[#1F2937]/12 bg-[#F9FCFF] p-3">
+                    <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                      Shared Resources
+                    </p>
+                    {leaveSaveContent?.shared_resources.length ? (
+                      <div className="mt-2 space-y-2">
+                        {leaveSaveContent.shared_resources.map((item) => {
+                          const checked = selectedLeaveItemIds.includes(item.item_id);
+                          return (
+                            <label
+                              key={item.item_id}
+                              className="flex items-start justify-between gap-3 rounded-lg border border-[#1F2937]/12 bg-white p-3"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-sm font-extrabold text-[#1F2937]">{item.title}</p>
+                                <p className="text-xs font-semibold text-[#1F2937]/65">
+                                  {item.resource_type} · {item.source_kind_value} · by{" "}
+                                  {item.added_by_username ?? "Unknown"} · {formatTimestamp(item.timestamp)}
+                                </p>
+                                {item.url ? (
+                                  <p className="mt-1 truncate text-xs font-semibold text-[#0B66C3]">{item.url}</p>
+                                ) : null}
+                              </div>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(event) => {
+                                  setSelectedLeaveItemIds((previous) => {
+                                    if (event.target.checked) {
+                                      return Array.from(new Set([...previous, item.item_id]));
+                                    }
+                                    return previous.filter((id) => id !== item.item_id);
+                                  });
+                                }}
+                                className="mt-1 h-4 w-4 shrink-0 accent-[#58CC02]"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm font-semibold text-[#1F2937]/65">No shared resources to save.</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-[#1F2937]/12 bg-[#F9FCFF] p-3">
+                    <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                      AI Tutor Content
+                    </p>
+                    {leaveSaveContent?.ai_exchanges.length ? (
+                      <div className="mt-2 space-y-2">
+                        {leaveSaveContent.ai_exchanges.map((item) => {
+                          const checked = selectedLeaveItemIds.includes(item.item_id);
+                          return (
+                            <label
+                              key={item.item_id}
+                              className="flex items-start justify-between gap-3 rounded-lg border border-[#1F2937]/12 bg-white p-3"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-xs font-extrabold text-[#1F2937]/70">
+                                  Exchange · {formatTimestamp(item.timestamp)}
+                                </p>
+                                <p className="mt-1 text-xs font-semibold text-[#1F2937]/70">Question</p>
+                                <p className="text-sm font-semibold text-[#1F2937]">
+                                  {truncateText(item.question_text, 180) || "(missing question)"}
+                                </p>
+                                <p className="mt-1 text-xs font-semibold text-[#1F2937]/70">Answer</p>
+                                <p className="text-sm font-semibold text-[#1F2937]">
+                                  {truncateText(item.answer_text, 220) || "(missing answer)"}
+                                </p>
+                              </div>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(event) => {
+                                  setSelectedLeaveItemIds((previous) => {
+                                    if (event.target.checked) {
+                                      return Array.from(new Set([...previous, item.item_id]));
+                                    }
+                                    return previous.filter((id) => id !== item.item_id);
+                                  });
+                                }}
+                                className="mt-1 h-4 w-4 shrink-0 accent-[#58CC02]"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm font-semibold text-[#1F2937]/65">No AI tutor exchanges to save.</p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowLeaveConfirm(false)}
@@ -2531,12 +3383,22 @@ export default function StudyRoomsPanel({
               <button
                 type="button"
                 onClick={() => {
-                  void handleLeaveRoom();
+                  void executeLeaveRoom();
                 }}
-                disabled={isLeavingRoom}
+                disabled={isLeavingRoom || isSavingLeaveSelections}
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isLeavingRoom ? "Leaving..." : "Leave Without Saving"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleSaveSelectedBeforeLeave();
+                }}
+                disabled={isSavingLeaveSelections || isLeavingRoom || isLoadingLeaveSaveContent}
                 className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {isLeavingRoom ? "Leaving..." : "Confirm Leave"}
+                {isSavingLeaveSelections ? "Saving..." : "Save Selected & Leave"}
               </button>
             </div>
           </div>

@@ -19,6 +19,8 @@ type FriendsListResponse = {
     user_id: string;
     username: string;
     avatar_url: string | null;
+    avatar_path: string | null;
+    avatar_updated_at: string | null;
     current_learning_field_title: string | null;
     is_online: boolean;
     last_seen_at: string | null;
@@ -30,6 +32,8 @@ type FriendsEnrichedUser = {
   id: string;
   username: string;
   avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   bio: string | null;
   age: number | null;
   motto: string | null;
@@ -56,7 +60,7 @@ async function loadUsersBasicFallback(userIds: string[]) {
 
   const { data, error } = await supabaseAdmin
     .from("users")
-    .select("id, username")
+    .select("id, username, avatar_url, avatar_path, avatar_updated_at")
     .in("id", userIds);
 
   if (error) {
@@ -64,7 +68,13 @@ async function loadUsersBasicFallback(userIds: string[]) {
   }
 
   (data ?? []).forEach((row) => {
-    const typedRow = row as { id?: unknown; username?: unknown };
+    const typedRow = row as {
+      id?: unknown;
+      username?: unknown;
+      avatar_url?: unknown;
+      avatar_path?: unknown;
+      avatar_updated_at?: unknown;
+    };
     const id = typeof typedRow.id === "string" ? typedRow.id : "";
     const username = typeof typedRow.username === "string" ? typedRow.username : "";
     if (!id || !username) {
@@ -73,7 +83,10 @@ async function loadUsersBasicFallback(userIds: string[]) {
     map.set(id, {
       id,
       username,
-      avatar_url: null,
+      avatar_url: typeof typedRow.avatar_url === "string" ? typedRow.avatar_url : null,
+      avatar_path: typeof typedRow.avatar_path === "string" ? typedRow.avatar_path : null,
+      avatar_updated_at:
+        typeof typedRow.avatar_updated_at === "string" ? typedRow.avatar_updated_at : null,
       bio: null,
       age: null,
       motto: null,
@@ -221,6 +234,8 @@ export async function GET() {
           user_id: user.id,
           username: user.username,
           avatar_url: user.avatar_url,
+          avatar_path: user.avatar_path,
+          avatar_updated_at: user.avatar_updated_at,
           current_learning_field_title: learningFieldTitleMap.get(user.id) ?? null,
           is_online: user.is_online,
           last_seen_at: user.last_seen_at,
@@ -239,6 +254,7 @@ export async function GET() {
       user_id: sessionUser.id,
       friend_user_ids: friendUserIds.length,
       response_friends: friends.length,
+      avatar_url_count: friends.filter((friend) => Boolean(friend.avatar_url)).length,
       duration_ms: Date.now() - startedAt,
     });
     return NextResponse.json(payload, {

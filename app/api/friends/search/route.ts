@@ -17,6 +17,8 @@ type FriendSearchResponse = {
     id: string;
     username: string;
     avatar_url: string | null;
+    avatar_path: string | null;
+    avatar_updated_at: string | null;
     age: number | null;
     motto: string | null;
     bio: string | null;
@@ -123,6 +125,8 @@ export async function GET(request: Request) {
         id: basicUser.id,
         username: basicUser.username,
         avatar_url: basicUser.avatar_url,
+        avatar_path: basicUser.avatar_path,
+        avatar_updated_at: basicUser.avatar_updated_at,
         age: profileResult.data?.age ?? null,
         motto: profileResult.data?.motto ?? null,
         bio: profileResult.data?.bio ?? null,
@@ -131,12 +135,25 @@ export async function GET(request: Request) {
       },
     };
 
+    const userPayload = payload.user;
+    if (process.env.NODE_ENV !== "production" && userPayload) {
+      console.info("[api/friends/search] avatar_payload_included", {
+        target_user_id: userPayload.id,
+        has_avatar_url: Boolean(userPayload.avatar_url),
+        has_avatar_path: Boolean(userPayload.avatar_path),
+        avatar_updated_at: userPayload.avatar_updated_at,
+      });
+    }
+
     return NextResponse.json(payload, {
       headers: {
         "Cache-Control": "no-store",
       },
     });
-  } catch {
+  } catch (error) {
+    console.error("[api/friends/search] failed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
     const payload: FriendSearchResponse = {
       success: false,
       message: "Unable to search users right now.",

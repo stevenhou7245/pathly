@@ -13,6 +13,7 @@ type DashboardSidebarProps = {
   onSelectStudyRoom: (roomId: string) => void;
   onOpenAddFieldModal: () => void;
   messagesUnreadCount?: number;
+  friendsUnreadCount?: number;
   loadingFolderId?: string | null;
   deletingFolderId?: string | null;
   studyRooms?: Array<{
@@ -32,6 +33,7 @@ type UtilityItem = {
 
 const UTILITY_ITEMS: UtilityItem[] = [
   { id: "profile", label: "Profile" },
+  { id: "notes", label: "Notes" },
   { id: "friends", label: "Friends" },
   { id: "messages", label: "Messages" },
   { id: "study_rooms", label: "Study Rooms" },
@@ -68,6 +70,17 @@ function UtilityIcon({ item }: { item: UtilityItem["id"] }) {
     );
   }
 
+  if (item === "notes") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M6 4.5h12a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V6A1.5 1.5 0 0 1 6 4.5z" />
+        <path d="M8 9h8" />
+        <path d="M8 12h8" />
+        <path d="M8 15h5" />
+      </svg>
+    );
+  }
+
   if (item === "study_rooms") {
     return (
       <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
@@ -97,6 +110,7 @@ export default function DashboardSidebar({
   onSelectStudyRoom,
   onOpenAddFieldModal,
   messagesUnreadCount = 0,
+  friendsUnreadCount = 0,
   loadingFolderId = null,
   deletingFolderId = null,
   studyRooms = [],
@@ -158,7 +172,13 @@ export default function DashboardSidebar({
           </button>
           {UTILITY_ITEMS.map((item) => {
             const isActive = activeView === item.id;
-            const shouldShowBadge = item.id === "messages" && messagesUnreadCount > 0;
+            const badgeCount =
+              item.id === "messages"
+                ? messagesUnreadCount
+                : item.id === "friends"
+                ? friendsUnreadCount
+                : 0;
+            const shouldShowBadge = badgeCount > 0;
             return (
               <button
                 key={item.id}
@@ -172,7 +192,7 @@ export default function DashboardSidebar({
               >
                 <span className="relative inline-flex">
                   <UtilityIcon item={item.id} />
-                  {shouldShowBadge ? <UnreadBadge count={messagesUnreadCount} /> : null}
+                  {shouldShowBadge ? <UnreadBadge count={badgeCount} /> : null}
                 </span>
                 {item.label}
               </button>
@@ -287,7 +307,13 @@ export default function DashboardSidebar({
             <div className="mt-4 space-y-2.5">
               {UTILITY_ITEMS.map((item) => {
                 const isActive = activeView === item.id;
-                const shouldShowBadge = item.id === "messages" && messagesUnreadCount > 0;
+                const badgeCount =
+                  item.id === "messages"
+                    ? messagesUnreadCount
+                    : item.id === "friends"
+                    ? friendsUnreadCount
+                    : 0;
+                const shouldShowBadge = badgeCount > 0;
                 return (
                   <button
                     key={item.id}
@@ -301,7 +327,7 @@ export default function DashboardSidebar({
                   >
                     <span className="relative inline-flex h-8 w-8 items-center justify-center rounded-xl bg-[#58CC02]/15 text-[#1F2937]">
                       <UtilityIcon item={item.id} />
-                      {shouldShowBadge ? <UnreadBadge count={messagesUnreadCount} /> : null}
+                      {shouldShowBadge ? <UnreadBadge count={badgeCount} /> : null}
                     </span>
                     <span className="text-sm font-extrabold text-[#1F2937]">{item.label}</span>
                   </button>

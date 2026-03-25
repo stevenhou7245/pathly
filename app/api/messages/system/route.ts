@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSystemMessagesForUser } from "@/lib/inbox";
+import { getUserRoleContextForOfficialMessages } from "@/lib/officialMessages";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
 
 export const runtime = "nodejs";
@@ -8,6 +9,7 @@ type SystemMessagesResponse = {
   success: boolean;
   message?: string;
   current_user_id?: string;
+  current_user_role?: string | null;
   system_messages?: Array<{
     user_message_id: string;
     system_message_id: string;
@@ -29,10 +31,14 @@ export async function GET() {
       return NextResponse.json(payload, { status: 401 });
     }
 
-    const systemMessages = await getSystemMessagesForUser(sessionUser.id);
+    const [systemMessages, roleContext] = await Promise.all([
+      getSystemMessagesForUser(sessionUser.id),
+      getUserRoleContextForOfficialMessages(sessionUser.id),
+    ]);
     const payload: SystemMessagesResponse = {
       success: true,
       current_user_id: sessionUser.id,
+      current_user_role: roleContext.role,
       system_messages: systemMessages,
     };
     return NextResponse.json(payload, {

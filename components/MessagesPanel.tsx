@@ -1,8 +1,10 @@
 "use client";
 
 import AvatarPreviewModal from "@/components/AvatarPreviewModal";
+import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
+import { playSound } from "@/lib/sound";
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type MessagesPanelProps = {
   onInboxUpdated?: () => void;
@@ -41,6 +43,7 @@ type SystemMessagesApiResponse = {
   success: boolean;
   message?: string;
   current_user_id?: string;
+  current_user_role?: string | null;
   system_messages?: SystemMessageItem[];
 };
 
@@ -101,12 +104,45 @@ function toInitial(username: string) {
   return username.trim().charAt(0).toUpperCase() || "M";
 }
 
+function toStringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function toNullableString(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
+function parseReadBy(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+  return Array.from(
+    new Set(
+      value
+        .map((item) => toStringValue(item).trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function sortByCreatedAtDesc<T extends { created_at: string | null }>(items: T[]) {
+  return [...items].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T) {
+  const next = items.filter((existing) => existing.id !== item.id);
+  next.push(item);
+  return next;
+}
+
 export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: MessagesPanelProps) {
   const [activeTab, setActiveTab] = useState<MessagesTab>("friend_requests");
   const [friendRequests, setFriendRequests] = useState<FriendRequestItem[]>([]);
   const [friendRequestsLoaded, setFriendRequestsLoaded] = useState(false);
   const [systemMessages, setSystemMessages] = useState<SystemMessageItem[]>([]);
   const [studyInvitations, setStudyInvitations] = useState<StudyInvitationItem[]>([]);
+  const [currentUserId, setCurrentUserId] = useState("");
+  const [currentUserRole, setCurrentUserRole] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [panelError, setPanelError] = useState("");
   const [respondingRequestId, setRespondingRequestId] = useState("");
@@ -117,6 +153,12 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
     fallbackInitial: string;
     displayName: string;
   } | null>(null);
+  const didHydrateRealtimeRef = useRef(false);
+  const knownOfficialMessageIdsRef = useRef<Set<string>>(new Set());
+  const knownStudyInvitationIdsRef = useRef<Set<string>>(new Set());
+  const knownIncomingFriendshipIdsRef = useRef<Set<string>>(new Set());
+  const currentUserIdRef = useRef("");
+  const currentUserRoleRef = useRef<string | null>(null);
 
   const loadInboxData = useCallback(async () => {
     setIsLoading(true);
@@ -141,12 +183,18 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
 
       const sectionErrors: string[] = [];
 
+      let resolvedCurrentUserId = "";
+      let resolvedCurrentUserRole: string | null = null;
+      let nextFriendRequests: FriendRequestItem[] = [];
+      let nextSystemMessages: SystemMessageItem[] = [];
+      let nextStudyInvitations: StudyInvitationItem[] = [];
+
       if (friendResult.status === "fulfilled") {
         const friendResponse = friendResult.value;
         const friendPayload = (await friendResponse.json()) as FriendRequestsApiResponse;
         if (friendResponse.ok && friendPayload.success && Array.isArray(friendPayload.friend_requests)) {
-          setFriendRequests(friendPayload.friend_requests);
-          setFriendRequestsLoaded(true);
+          resolvedCurrentUserId = friendPayload.current_user_id?.trim() ?? resolvedCurrentUserId;
+          nextFriendRequests = sortByCreatedAtDesc(friendPayload.friend_requests);
         } else {
           sectionErrors.push(friendPayload.message ?? "Unable to load friend requests.");
         }
@@ -158,7 +206,9 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
         const systemResponse = systemResult.value;
         const systemPayload = (await systemResponse.json()) as SystemMessagesApiResponse;
         if (systemResponse.ok && systemPayload.success) {
-          setSystemMessages(systemPayload.system_messages ?? []);
+          resolvedCurrentUserId = systemPayload.current_user_id?.trim() ?? resolvedCurrentUserId;
+          resolvedCurrentUserRole = systemPayload.current_user_role?.trim() || null;
+          nextSystemMessages = sortByCreatedAtDesc(systemPayload.system_messages ?? []);
         } else {
           sectionErrors.push(systemPayload.message ?? "Unable to load official messages.");
         }
@@ -170,7 +220,8 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
         const invitationsResponse = studyInvitationsResult.value;
         const invitationsPayload = (await invitationsResponse.json()) as StudyInvitationsApiResponse;
         if (invitationsResponse.ok && invitationsPayload.success) {
-          setStudyInvitations(invitationsPayload.study_invitations ?? []);
+          resolvedCurrentUserId = invitationsPayload.current_user_id?.trim() ?? resolvedCurrentUserId;
+          nextStudyInvitations = sortByCreatedAtDesc(invitationsPayload.study_invitations ?? []);
         } else {
           sectionErrors.push(
             invitationsPayload.message ?? "Unable to load study room invitations.",
@@ -179,6 +230,24 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       } else {
         sectionErrors.push("Unable to load study room invitations.");
       }
+
+      setCurrentUserId(resolvedCurrentUserId);
+      setCurrentUserRole(resolvedCurrentUserRole);
+      setFriendRequests(nextFriendRequests);
+      setFriendRequestsLoaded(true);
+      setSystemMessages(nextSystemMessages);
+      setStudyInvitations(nextStudyInvitations);
+
+      knownIncomingFriendshipIdsRef.current = new Set(
+        nextFriendRequests.map((item) => item.friendship_id).filter(Boolean),
+      );
+      knownOfficialMessageIdsRef.current = new Set(
+        nextSystemMessages.map((item) => item.system_message_id).filter(Boolean),
+      );
+      knownStudyInvitationIdsRef.current = new Set(
+        nextStudyInvitations.map((item) => item.id).filter(Boolean),
+      );
+      didHydrateRealtimeRef.current = true;
 
       if (sectionErrors.length > 0) {
         setPanelError(sectionErrors.join(" "));
@@ -196,6 +265,322 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
   useEffect(() => {
     void loadInboxData();
   }, [loadInboxData]);
+
+  useEffect(() => {
+    currentUserIdRef.current = currentUserId;
+  }, [currentUserId]);
+
+  useEffect(() => {
+    currentUserRoleRef.current = currentUserRole;
+  }, [currentUserRole]);
+
+  useEffect(() => {
+    if (!currentUserId) {
+      return;
+    }
+    let active = true;
+    let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
+    try {
+      supabaseClient = getSupabaseBrowserClient();
+    } catch (error) {
+      console.warn("[messages_realtime] client_init_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const shouldNotify = () => didHydrateRealtimeRef.current;
+    const normalizedCurrentRole = (currentUserRole ?? "").trim().toLowerCase();
+    const officialRoleFilterValue = normalizedCurrentRole || "__pathly_none_role__";
+
+    const handleOfficialMessageChange = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | null;
+      old: Record<string, unknown> | null;
+    }) => {
+      if (!active) {
+        return;
+      }
+      const eventType = payload.eventType;
+      const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+      const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+      const rowId = toStringValue(newRow?.id ?? oldRow?.id);
+      if (!rowId) {
+        return;
+      }
+
+      if (eventType === "DELETE") {
+        setSystemMessages((previous) =>
+          sortByCreatedAtDesc(previous.filter((item) => item.system_message_id !== rowId)),
+        );
+        knownOfficialMessageIdsRef.current.delete(rowId);
+        return;
+      }
+
+      if (!newRow) {
+        return;
+      }
+
+      const isActiveMessage =
+        typeof newRow.is_active === "boolean" ? newRow.is_active : true;
+      const targetUserId = toStringValue(newRow.target_user_id);
+      const roleTarget = toStringValue(newRow.role_target).trim().toLowerCase();
+      const viewerId = currentUserIdRef.current;
+      const viewerRole = (currentUserRoleRef.current ?? "").trim().toLowerCase();
+      const appliesToUser =
+        (targetUserId && targetUserId === viewerId) ||
+        (!targetUserId && roleTarget && viewerRole && roleTarget === viewerRole) ||
+        (!targetUserId && !roleTarget);
+
+      if (!isActiveMessage || !appliesToUser) {
+        setSystemMessages((previous) =>
+          previous.filter((item) => item.system_message_id !== rowId),
+        );
+        knownOfficialMessageIdsRef.current.delete(rowId);
+        return;
+      }
+
+      const readBy = parseReadBy(newRow.read_by);
+      const officialMessage: SystemMessageItem = {
+        user_message_id: rowId,
+        system_message_id: rowId,
+        title: toStringValue(newRow.title) || "Update from Pathly",
+        body: toStringValue(newRow.body),
+        created_at: toNullableString(newRow.created_at),
+        is_read: readBy.includes(viewerId) || newRow.is_read === true,
+      };
+
+      const wasKnown = knownOfficialMessageIdsRef.current.has(rowId);
+      setSystemMessages((previous) =>
+        sortByCreatedAtDesc(
+          upsertById(
+            previous.map((item) => ({ ...item, id: item.system_message_id })),
+            { ...officialMessage, id: officialMessage.system_message_id },
+          ).map(({ id, ...rest }) => rest),
+        ),
+      );
+      knownOfficialMessageIdsRef.current.add(rowId);
+
+      if (eventType === "INSERT" && !wasKnown && shouldNotify()) {
+        playSound("notification");
+      }
+      onInboxUpdated?.();
+    };
+
+    const handleStudyInvitationChange = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | null;
+      old: Record<string, unknown> | null;
+    }) => {
+      if (!active) {
+        return;
+      }
+      const eventType = payload.eventType;
+      const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+      const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+      const rowId = toStringValue(newRow?.id ?? oldRow?.id);
+      if (!rowId) {
+        return;
+      }
+
+      if (eventType === "DELETE") {
+        setStudyInvitations((previous) =>
+          sortByCreatedAtDesc(previous.filter((item) => item.id !== rowId)),
+        );
+        knownStudyInvitationIdsRef.current.delete(rowId);
+        onInboxUpdated?.();
+        return;
+      }
+
+      if (!newRow) {
+        return;
+      }
+
+      setStudyInvitations((previous) => {
+        const existing = previous.find((item) => item.id === rowId) ?? null;
+        const mapped: StudyInvitationItem = {
+          id: rowId,
+          room_id: toStringValue(newRow.room_id),
+          sender_id: toStringValue(newRow.sender_id),
+          receiver_id: toStringValue(newRow.receiver_id),
+          status: toStringValue(newRow.status) || existing?.status || "pending",
+          created_at: toNullableString(newRow.created_at) ?? existing?.created_at ?? null,
+          responded_at: toNullableString(newRow.responded_at) ?? existing?.responded_at ?? null,
+          sender_username: toStringValue(newRow.sender_username) || existing?.sender_username || "Friend",
+          room_name: toStringValue(newRow.room_name) || existing?.room_name || "Study Room Invitation",
+          room_password: toStringValue(newRow.room_password) || existing?.room_password || "",
+          room_style: toStringValue(newRow.room_style) || existing?.room_style || "focus",
+          room_duration_minutes:
+            typeof newRow.room_duration_minutes === "number"
+              ? newRow.room_duration_minutes
+              : existing?.room_duration_minutes ?? 60,
+          room_status: toStringValue(newRow.room_status) || existing?.room_status || "active",
+          room_expires_at: toNullableString(newRow.room_expires_at) ?? existing?.room_expires_at ?? null,
+        };
+        return sortByCreatedAtDesc(upsertById(previous, mapped));
+      });
+
+      const wasKnown = knownStudyInvitationIdsRef.current.has(rowId);
+      knownStudyInvitationIdsRef.current.add(rowId);
+      if (eventType === "INSERT" && !wasKnown && shouldNotify()) {
+        playSound("notification");
+      }
+      onInboxUpdated?.();
+    };
+
+    const handleFriendshipChange = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | null;
+      old: Record<string, unknown> | null;
+    }) => {
+      if (!active) {
+        return;
+      }
+      const eventType = payload.eventType;
+      const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+      const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+      const row = newRow ?? oldRow;
+      if (!row) {
+        return;
+      }
+      const friendshipId = toStringValue(row.id);
+      if (!friendshipId) {
+        return;
+      }
+      const requesterId = toStringValue(row.requester_id);
+      const addresseeId = toStringValue(row.addressee_id);
+      const status = toStringValue((newRow ?? row).status).toLowerCase();
+      const viewerId = currentUserIdRef.current;
+      const isIncoming = addresseeId === viewerId;
+      const isOutgoing = requesterId === viewerId;
+      if (!isIncoming && !isOutgoing) {
+        return;
+      }
+      if (!isIncoming) {
+        onInboxUpdated?.();
+        return;
+      }
+
+      if (eventType === "DELETE" || status !== "pending") {
+        setFriendRequests((previous) =>
+          sortByCreatedAtDesc(previous.filter((item) => item.friendship_id !== friendshipId)),
+        );
+        knownIncomingFriendshipIdsRef.current.delete(friendshipId);
+        onInboxUpdated?.();
+        return;
+      }
+
+      setFriendRequests((previous) => {
+        const existing = previous.find((item) => item.friendship_id === friendshipId) ?? null;
+        const mapped: FriendRequestItem = {
+          friendship_id: friendshipId,
+          sender: {
+            id: requesterId,
+            username: toStringValue(newRow?.requester_username) || existing?.sender.username || "New requester",
+            avatar_url: toNullableString(newRow?.requester_avatar_url) ?? existing?.sender.avatar_url ?? null,
+            current_learning_field_title:
+              toNullableString(newRow?.requester_current_learning_field_title) ??
+              existing?.sender.current_learning_field_title ??
+              null,
+          },
+          status: "pending",
+          created_at: toNullableString(newRow?.created_at) ?? existing?.created_at ?? null,
+        };
+        return sortByCreatedAtDesc(
+          upsertById(
+            previous.map((item) => ({ ...item, id: item.friendship_id })),
+            { ...mapped, id: mapped.friendship_id },
+          ).map(({ id, ...rest }) => rest),
+        );
+      });
+
+      const wasKnown = knownIncomingFriendshipIdsRef.current.has(friendshipId);
+      knownIncomingFriendshipIdsRef.current.add(friendshipId);
+      if (!wasKnown && shouldNotify()) {
+        playSound("notification");
+      }
+      onInboxUpdated?.();
+    };
+
+    const channel = supabaseClient
+      .channel(`messages-panel:${currentUserId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: `target_user_id=eq.${currentUserId}`,
+        },
+        handleOfficialMessageChange,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: "target_user_id=is.null",
+        },
+        handleOfficialMessageChange,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: `role_target=eq.${officialRoleFilterValue}`,
+        },
+        handleOfficialMessageChange,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "study_room_invitations",
+          filter: `receiver_id=eq.${currentUserId}`,
+        },
+        handleStudyInvitationChange,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "friendships",
+          filter: `addressee_id=eq.${currentUserId}`,
+        },
+        handleFriendshipChange,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "friendships",
+          filter: `requester_id=eq.${currentUserId}`,
+        },
+        handleFriendshipChange,
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("[messages_realtime] subscription_failed", {
+            current_user_id: currentUserId,
+            status,
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      void channel.unsubscribe();
+      if (supabaseClient) {
+        void supabaseClient.removeChannel(channel);
+      }
+    };
+  }, [currentUserId, currentUserRole, onInboxUpdated]);
 
   const unreadSystemMessagesCount = useMemo(
     () => systemMessages.filter((message) => !message.is_read).length,

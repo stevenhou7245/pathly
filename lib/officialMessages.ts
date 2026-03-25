@@ -170,7 +170,7 @@ export async function getOfficialMessagesForUser(userId: string): Promise<Offici
 
   const { data, error } = await supabaseAdmin
     .from("official_messages")
-    .select("id, title, body, sender_id, role_target, created_at, read_by")
+    .select("id, title, body, sender_id, target_user_id, role_target, is_active, created_at, read_by")
     .order("created_at", { ascending: false })
     .limit(500);
 
@@ -191,6 +191,14 @@ export async function getOfficialMessagesForUser(userId: string): Promise<Offici
   const rows = (data ?? []) as GenericRecord[];
   return rows
     .filter((row) => {
+      const isActive = typeof row.is_active === "boolean" ? row.is_active : true;
+      if (!isActive) {
+        return false;
+      }
+      const targetUserId = toStringValue(row.target_user_id).trim();
+      if (targetUserId) {
+        return targetUserId === userId;
+      }
       const targetRole = normalizeRoleToken(row.role_target);
       if (!targetRole) {
         return true;
@@ -247,7 +255,9 @@ export async function sendOfficialMessage(params: {
     title: params.title,
     body: params.body,
     sender_id: params.senderId,
+    target_user_id: null,
     role_target: normalizedRoleTarget,
+    is_active: true,
     read_by: [],
   };
 
@@ -295,7 +305,7 @@ export async function markOfficialMessageRead(params: {
 
   const { data: messageRow, error: messageLookupError } = await supabaseAdmin
     .from("official_messages")
-    .select("id, role_target, read_by")
+    .select("id, target_user_id, role_target, is_active, read_by")
     .eq("id", params.messageId)
     .limit(1)
     .maybeSingle();
@@ -315,6 +325,28 @@ export async function markOfficialMessageRead(params: {
   }
 
   if (!messageRow) {
+    return {
+      ok: false as const,
+      code: "NOT_FOUND" as const,
+    };
+  }
+
+  const targetUserId = toStringValue((messageRow as GenericRecord).target_user_id).trim();
+  if (targetUserId && targetUserId !== params.userId) {
+    console.warn("[official_messages] mark_read_forbidden", {
+      message_id: params.messageId,
+      user_id: params.userId,
+      user_role: normalizedUserRole,
+      target_user_id: targetUserId,
+    });
+    return {
+      ok: false as const,
+      code: "FORBIDDEN" as const,
+    };
+  }
+
+  const isActive = (messageRow as GenericRecord).is_active;
+  if (typeof isActive === "boolean" && !isActive) {
     return {
       ok: false as const,
       code: "NOT_FOUND" as const,
@@ -376,4 +408,3 @@ export async function markOfficialMessageRead(params: {
     message_id: toStringValue((updatedRow as GenericRecord).id),
   };
 }
-

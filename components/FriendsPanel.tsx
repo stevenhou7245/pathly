@@ -3,14 +3,17 @@
 import AvatarPreviewModal from "@/components/AvatarPreviewModal";
 import FriendChatPanel from "@/components/FriendChatPanel";
 import { mapDirectRealtimeMessage } from "@/lib/chatRealtime";
+import { playSound } from "@/lib/sound";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type FriendListItem = {
   friendship_id: string;
   user_id: string;
   username: string;
   avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   current_learning_field_title: string | null;
   is_online: boolean;
   last_seen_at: string | null;
@@ -49,6 +52,8 @@ type SearchUser = {
   id: string;
   username: string;
   avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   age: number | null;
   motto: string | null;
   bio: string | null;
@@ -71,6 +76,8 @@ type FriendProfile = {
   user_id: string;
   username: string;
   avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   bio: string | null;
   age: number | null;
   motto: string | null;
@@ -152,6 +159,14 @@ function toInitial(value: string) {
   return value.trim().charAt(0).toUpperCase() || "M";
 }
 
+function toNullableString(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function getRelationshipLabel(status: string | null) {
   if (status === "pending") {
     return "Request pending";
@@ -182,7 +197,40 @@ function appendMessageUnique(
   };
 }
 
-export default function FriendsPanel() {
+function applyAvatarPatch<
+  T extends {
+    avatar_url: string | null;
+    avatar_path: string | null;
+    avatar_updated_at: string | null;
+  },
+>(
+  current: T,
+  patch: {
+    avatar_url: string | null;
+    avatar_path: string | null;
+    avatar_updated_at: string | null;
+  },
+) {
+  if (
+    current.avatar_url === patch.avatar_url &&
+    current.avatar_path === patch.avatar_path &&
+    current.avatar_updated_at === patch.avatar_updated_at
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    avatar_url: patch.avatar_url,
+    avatar_path: patch.avatar_path,
+    avatar_updated_at: patch.avatar_updated_at,
+  };
+}
+
+type FriendsPanelProps = {
+  onMessagesUpdated?: () => void;
+};
+
+export default function FriendsPanel({ onMessagesUpdated }: FriendsPanelProps) {
   const [currentUserId, setCurrentUserId] = useState("");
   const [friends, setFriends] = useState<FriendListItem[]>([]);
   const [isLoadingFriends, setIsLoadingFriends] = useState(true);
@@ -194,6 +242,7 @@ export default function FriendsPanel() {
   const [messageError, setMessageError] = useState("");
   const [draftMessage, setDraftMessage] = useState("");
   const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [unreadByFriendship, setUnreadByFriendship] = useState<Record<string, number>>({});
 
   const [friendProfiles, setFriendProfiles] = useState<ProfileStore>({});
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -221,6 +270,7 @@ export default function FriendsPanel() {
   const currentUserIdRef = useRef("");
   const selectedFriendshipIdRef = useRef("");
   const isMountedRef = useRef(false);
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
 
   const selectedFriend = useMemo(
     () => friends.find((friend) => friend.friendship_id === selectedFriendshipId) ?? null,
@@ -231,6 +281,33 @@ export default function FriendsPanel() {
     () => (selectedFriend ? messagesByFriendship[selectedFriend.friendship_id] ?? [] : []),
     [messagesByFriendship, selectedFriend],
   );
+  const friendByFriendshipId = useMemo(
+    () => new Map(friends.map((friend) => [friend.friendship_id, friend] as const)),
+    [friends],
+  );
+  const watchedAvatarUserIds = useMemo(() => {
+    const ids = new Set<string>();
+    friends.forEach((friend) => {
+      if (friend.user_id) {
+        ids.add(friend.user_id);
+      }
+    });
+    if (searchResult?.id) {
+      ids.add(searchResult.id);
+    }
+    if (selectedSearchUser?.id) {
+      ids.add(selectedSearchUser.id);
+    }
+    if (selectedProfile?.user_id) {
+      ids.add(selectedProfile.user_id);
+    }
+    Object.values(friendProfiles).forEach((profile) => {
+      if (profile?.user_id) {
+        ids.add(profile.user_id);
+      }
+    });
+    return Array.from(ids);
+  }, [friendProfiles, friends, searchResult?.id, selectedProfile?.user_id, selectedSearchUser?.id]);
 
   function openAvatarPreview(params: {
     avatarUrl: string | null;
@@ -247,6 +324,19 @@ export default function FriendsPanel() {
   useEffect(() => {
     selectedFriendshipIdRef.current = selectedFriendshipId;
   }, [selectedFriendshipId]);
+
+  useEffect(() => {
+    const validIds = new Set(friends.map((friend) => friend.friendship_id));
+    setUnreadByFriendship((previous) => {
+      const nextEntries = Object.entries(previous).filter(([friendshipId]) =>
+        validIds.has(friendshipId),
+      );
+      if (nextEntries.length === Object.keys(previous).length) {
+        return previous;
+      }
+      return Object.fromEntries(nextEntries);
+    });
+  }, [friends]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -300,9 +390,14 @@ export default function FriendsPanel() {
       }
       setCurrentUserId(result.payload.current_user_id?.trim() ?? "");
 
-      const nextFriends = (result.payload.friends ?? []).filter(
-        (friend) => friend.friendship_status === "accepted",
-      );
+      const nextFriends = (result.payload.friends ?? [])
+        .filter((friend) => friend.friendship_status === "accepted")
+        .map((friend) => ({
+          ...friend,
+          avatar_url: friend.avatar_url ?? null,
+          avatar_path: friend.avatar_path ?? null,
+          avatar_updated_at: friend.avatar_updated_at ?? null,
+        }));
       setFriends(nextFriends);
       setSelectedFriendshipId((previous) => {
         if (previous && nextFriends.some((friend) => friend.friendship_id === previous)) {
@@ -344,7 +439,50 @@ export default function FriendsPanel() {
     }
   }
 
-  async function loadMessagesForFriendship(friendshipId: string) {
+  const markMessagesAsRead = useCallback(async (friendshipId: string) => {
+    if (!friendshipId || !currentUserIdRef.current) {
+      return;
+    }
+
+    try {
+      await fetch("/api/messages/read", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          friendship_id: friendshipId,
+        }),
+      });
+    } catch {
+      // Keep local state stable even if read-sync request fails.
+    }
+
+    setMessagesByFriendship((previous) => {
+      const currentMessages = previous[friendshipId];
+      if (!currentMessages || currentMessages.length === 0) {
+        return previous;
+      }
+      return {
+        ...previous,
+        [friendshipId]: currentMessages.map((message) =>
+          message.sender_id !== currentUserIdRef.current
+            ? {
+                ...message,
+                is_read: true,
+              }
+            : message,
+        ),
+      };
+    });
+    setUnreadByFriendship((previous) => ({
+      ...previous,
+      [friendshipId]: 0,
+    }));
+    onMessagesUpdated?.();
+  }, [onMessagesUpdated]);
+
+  const loadMessagesForFriendship = useCallback(async (friendshipId: string) => {
     if (!friendshipId) {
       return;
     }
@@ -362,18 +500,39 @@ export default function FriendsPanel() {
       if (!response.ok || !payload.success) {
         throw new Error(payload.message ?? "Unable to load chat history.");
       }
+      const nextMessages = payload.messages ?? [];
+      nextMessages.forEach((message) => {
+        if (message.id) {
+          seenMessageIdsRef.current.add(message.id);
+        }
+      });
+      const unreadCount = nextMessages.filter(
+        (message) =>
+          !message.is_read &&
+          message.sender_id !== currentUserIdRef.current &&
+          message.friendship_id === friendshipId,
+      ).length;
 
       setMessagesByFriendship((previous) => ({
         ...previous,
-        [friendshipId]: payload.messages ?? [],
+        [friendshipId]: nextMessages,
       }));
+      setUnreadByFriendship((previous) => ({
+        ...previous,
+        [friendshipId]: unreadCount,
+      }));
+      onMessagesUpdated?.();
+
+      if (unreadCount > 0) {
+        void markMessagesAsRead(friendshipId);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to load chat history.";
       setMessageError(message);
     } finally {
       setIsLoadingMessages(false);
     }
-  }
+  }, [markMessagesAsRead, onMessagesUpdated]);
 
   useEffect(() => {
     void loadFriends({
@@ -385,13 +544,15 @@ export default function FriendsPanel() {
     if (selectedFriendshipId) {
       void loadMessagesForFriendship(selectedFriendshipId);
     }
-  }, [selectedFriendshipId]);
+  }, [loadMessagesForFriendship, selectedFriendshipId]);
 
   useEffect(() => {
-    if (!selectedFriendshipId || !currentUserId) {
+    const friendshipIds = Array.from(friendByFriendshipId.keys()).filter(Boolean);
+    if (!currentUserId || friendshipIds.length === 0) {
       return;
     }
 
+    const friendshipIdSet = new Set(friendshipIds);
     let active = true;
     let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
     try {
@@ -404,66 +565,92 @@ export default function FriendsPanel() {
     }
 
     const channel = supabaseClient
-      .channel(`direct-messages:${selectedFriendshipId}`)
+      .channel(`direct-messages:${currentUserId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "direct_messages",
-          filter: `friendship_id=eq.${selectedFriendshipId}`,
         },
         (payload) => {
           if (!active) {
             return;
           }
           const mapped = mapDirectRealtimeMessage(payload.new);
-          if (!mapped.id || mapped.friendship_id !== selectedFriendshipId) {
+          if (!mapped.id || !mapped.friendship_id) {
             return;
           }
+          if (!friendshipIdSet.has(mapped.friendship_id)) {
+            return;
+          }
+          if (seenMessageIdsRef.current.has(mapped.id)) {
+            return;
+          }
+          seenMessageIdsRef.current.add(mapped.id);
 
-          if (
-            selectedFriend &&
-            mapped.sender_id !== currentUserId &&
-            mapped.sender_id !== selectedFriend.user_id
-          ) {
+          const friendship = friendByFriendshipId.get(mapped.friendship_id);
+          if (!friendship) {
+            return;
+          }
+          if (mapped.sender_id !== currentUserId && mapped.sender_id !== friendship.user_id) {
             console.warn("[direct_messages_realtime] unauthorized_sender_ignored", {
-              friendship_id: selectedFriendshipId,
+              friendship_id: mapped.friendship_id,
               sender_id: mapped.sender_id,
-              expected_user_ids: [currentUserId, selectedFriend.user_id],
+              expected_user_ids: [currentUserId, friendship.user_id],
             });
             return;
           }
+          const isIncoming = mapped.sender_id !== currentUserId;
+          const isActiveConversation = selectedFriendshipIdRef.current === mapped.friendship_id;
 
           console.info("[direct_messages_realtime] message_received", {
             conversation_id: mapped.conversation_id,
             friendship_id: mapped.friendship_id,
             sender_id: mapped.sender_id,
             message_id: mapped.id,
+            incoming: isIncoming,
+            active_conversation: isActiveConversation,
           });
 
           setMessagesByFriendship((previous) =>
-            appendMessageUnique(previous, selectedFriendshipId, {
+            appendMessageUnique(previous, mapped.friendship_id, {
               id: mapped.id,
               friendship_id: mapped.friendship_id,
               sender_id: mapped.sender_id,
               body: mapped.body,
-              is_read: mapped.is_read,
+              is_read: isIncoming && isActiveConversation ? true : mapped.is_read,
               created_at: mapped.created_at,
             }),
           );
+
+          if (!isIncoming) {
+            return;
+          }
+
+          playSound("notification");
+          if (isActiveConversation) {
+            void markMessagesAsRead(mapped.friendship_id);
+            return;
+          }
+          setUnreadByFriendship((previous) => ({
+            ...previous,
+            [mapped.friendship_id]: (previous[mapped.friendship_id] ?? 0) + 1,
+          }));
+          onMessagesUpdated?.();
         },
       )
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           console.info("[direct_messages_realtime] subscription_succeeded", {
-            conversation_id: selectedFriendshipId,
+            conversation_id: "all_friendships",
+            friendship_count: friendshipIds.length,
           });
           return;
         }
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           console.error("[direct_messages_realtime] subscription_failed", {
-            conversation_id: selectedFriendshipId,
+            conversation_id: "all_friendships",
             status,
           });
         }
@@ -472,14 +659,145 @@ export default function FriendsPanel() {
     return () => {
       active = false;
       console.info("[direct_messages_realtime] subscription_cleanup", {
-        conversation_id: selectedFriendshipId,
+        conversation_id: "all_friendships",
       });
       void channel.unsubscribe();
       if (supabaseClient) {
         void supabaseClient.removeChannel(channel);
       }
     };
-  }, [currentUserId, selectedFriend, selectedFriendshipId]);
+  }, [currentUserId, friendByFriendshipId, markMessagesAsRead, onMessagesUpdated]);
+
+  useEffect(() => {
+    if (watchedAvatarUserIds.length === 0) {
+      return;
+    }
+
+    let active = true;
+    let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
+    try {
+      supabaseClient = getSupabaseBrowserClient();
+    } catch (error) {
+      console.warn("[friends_avatar_realtime] client_init_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const watchedUserIdSet = new Set(watchedAvatarUserIds);
+    const channel = supabaseClient
+      .channel(`friends-avatar-updates:${currentUserId || "anonymous"}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "users",
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? {}) as Record<string, unknown>;
+          const updatedUserId = typeof row.id === "string" ? row.id : "";
+          if (!updatedUserId || !watchedUserIdSet.has(updatedUserId)) {
+            return;
+          }
+
+          const patch = {
+            avatar_url: toNullableString(row.avatar_url),
+            avatar_path: toNullableString(row.avatar_path),
+            avatar_updated_at: toNullableString(row.avatar_updated_at),
+          };
+
+          if (process.env.NODE_ENV !== "production") {
+            console.info("[friends_avatar_realtime] avatar_updated", {
+              user_id: updatedUserId,
+              avatar_updated_at: patch.avatar_updated_at,
+            });
+          }
+
+          setFriends((previous) => {
+            let changed = false;
+            const next = previous.map((friend) => {
+              if (friend.user_id !== updatedUserId) {
+                return friend;
+              }
+              const patched = applyAvatarPatch(friend, patch);
+              if (patched !== friend) {
+                changed = true;
+              }
+              return patched;
+            });
+            return changed ? next : previous;
+          });
+
+          setSearchResult((previous) => {
+            if (!previous || previous.id !== updatedUserId) {
+              return previous;
+            }
+            return applyAvatarPatch(previous, patch);
+          });
+          setSelectedSearchUser((previous) => {
+            if (!previous || previous.id !== updatedUserId) {
+              return previous;
+            }
+            return applyAvatarPatch(previous, patch);
+          });
+          setSelectedProfile((previous) => {
+            if (!previous || previous.user_id !== updatedUserId) {
+              return previous;
+            }
+            return applyAvatarPatch(previous, patch);
+          });
+          setFriendProfiles((previous) => {
+            let changed = false;
+            const next: ProfileStore = {};
+            Object.entries(previous).forEach(([key, profile]) => {
+              if (profile.user_id !== updatedUserId) {
+                next[key] = profile;
+                return;
+              }
+              const patched = applyAvatarPatch(profile, patch);
+              next[key] = patched;
+              if (patched !== profile) {
+                changed = true;
+              }
+            });
+            return changed ? next : previous;
+          });
+        },
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          if (process.env.NODE_ENV !== "production") {
+            console.info("[friends_avatar_realtime] subscription_succeeded", {
+              watched_users: watchedAvatarUserIds.length,
+            });
+          }
+          return;
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("[friends_avatar_realtime] subscription_failed", {
+            status,
+            watched_users: watchedAvatarUserIds.length,
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[friends_avatar_realtime] subscription_cleanup", {
+          watched_users: watchedAvatarUserIds.length,
+        });
+      }
+      void channel.unsubscribe();
+      if (supabaseClient) {
+        void supabaseClient.removeChannel(channel);
+      }
+    };
+  }, [currentUserId, watchedAvatarUserIds]);
 
   async function handleSendMessage() {
     const text = draftMessage.trim();
@@ -507,6 +825,9 @@ export default function FriendsPanel() {
         throw new Error(payload.message ?? "Unable to send message right now.");
       }
       const directMessage = payload.direct_message;
+      if (directMessage.id) {
+        seenMessageIdsRef.current.add(directMessage.id);
+      }
 
       console.info("[direct_messages] send_succeeded", {
         conversation_id: selectedFriend.friendship_id,
@@ -546,11 +867,17 @@ export default function FriendsPanel() {
       throw new Error(payload.message ?? "Unable to load friend profile right now.");
     }
 
+    const normalizedProfile: FriendProfile = {
+      ...payload.profile,
+      avatar_url: payload.profile.avatar_url ?? null,
+      avatar_path: payload.profile.avatar_path ?? null,
+      avatar_updated_at: payload.profile.avatar_updated_at ?? null,
+    };
     setFriendProfiles((previous) => ({
       ...previous,
-      [friendUserId]: payload.profile as FriendProfile,
+      [friendUserId]: normalizedProfile,
     }));
-    return payload.profile as FriendProfile;
+    return normalizedProfile;
   }
 
   async function handleOpenProfile() {
@@ -620,7 +947,16 @@ export default function FriendsPanel() {
         throw new Error(payload.message ?? "Unable to search users right now.");
       }
 
-      setSearchResult(payload.user ?? null);
+      setSearchResult(
+        payload.user
+          ? {
+              ...payload.user,
+              avatar_url: payload.user.avatar_url ?? null,
+              avatar_path: payload.user.avatar_path ?? null,
+              avatar_updated_at: payload.user.avatar_updated_at ?? null,
+            }
+          : null,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to search users right now.";
       setSearchError(message);
@@ -741,6 +1077,7 @@ export default function FriendsPanel() {
             <div className="space-y-2">
               {friends.map((friend) => {
                 const isActive = selectedFriendshipId === friend.friendship_id;
+                const unreadCount = unreadByFriendship[friend.friendship_id] ?? 0;
                 return (
                   <div
                     key={friend.friendship_id}
@@ -788,10 +1125,17 @@ export default function FriendsPanel() {
                           }`}
                         />
                       </button>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-extrabold text-[#1F2937]">
-                          {friend.username}
-                        </p>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="truncate text-sm font-extrabold text-[#1F2937]">
+                            {friend.username}
+                          </p>
+                          {unreadCount > 0 ? (
+                            <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[#58CC02] px-1.5 py-0.5 text-[10px] font-extrabold leading-none text-white">
+                              {unreadCount}
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="truncate text-xs font-semibold text-[#1F2937]/65">
                           {friend.current_learning_field_title ?? "No active learning field"}
                         </p>

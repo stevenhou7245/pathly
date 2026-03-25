@@ -169,30 +169,44 @@ export async function markSystemMessageReadForUser(params: {
 }
 
 export async function getInboxUnreadSummary(userId: string) {
-  const [friendRequestsResult, unreadSystemMessagesCount, pendingStudyInvitations] = await Promise.all([
-    supabaseAdmin
-      .from("friendships")
-      .select("id", { count: "exact", head: true })
-      .eq("addressee_id", userId)
-      .eq("status", "pending"),
+  const [friendships, unreadSystemMessagesCount, pendingStudyInvitations] = await Promise.all([
+    getFriendshipsForUser(userId),
     getUnreadOfficialMessagesCount(userId),
     getPendingStudyRoomInvitationsCount(userId),
   ]);
 
-  if (friendRequestsResult.error) {
-    if (friendRequestsResult.error) {
-      console.error("[inbox_summary] friend_requests_count_failed", {
-        table: "friendships",
+  const pendingFriendRequestsCount = friendships.filter(
+    (row) => row.status === "pending" && row.addressee_id === userId,
+  ).length;
+  const acceptedFriendshipIds = friendships
+    .filter((row) => row.status === "accepted")
+    .map((row) => row.id)
+    .filter(Boolean);
+
+  let unreadFriendMessagesCount = 0;
+  if (acceptedFriendshipIds.length > 0) {
+    const unreadMessagesResult = await supabaseAdmin
+      .from("direct_messages")
+      .select("id", { count: "exact", head: true })
+      .in("friendship_id", acceptedFriendshipIds)
+      .neq("sender_id", userId)
+      .eq("is_read", false);
+    if (unreadMessagesResult.error) {
+      console.error("[inbox_summary] unread_friend_messages_count_failed", {
+        table: "direct_messages",
         user_id: userId,
-        ...toErrorDetails(friendRequestsResult.error),
+        accepted_friendship_count: acceptedFriendshipIds.length,
+        ...toErrorDetails(unreadMessagesResult.error),
       });
+      throw new Error(`Failed to load unread inbox summary. user_id=${userId}`);
     }
-    throw new Error(`Failed to load unread inbox summary. user_id=${userId}`);
+    unreadFriendMessagesCount = unreadMessagesResult.count ?? 0;
   }
 
-  const pendingFriendRequestsCount = friendRequestsResult.count ?? 0;
-
   return {
+    user_id: userId,
+    accepted_friendship_ids: acceptedFriendshipIds,
+    unread_friend_messages: unreadFriendMessagesCount,
     pending_friend_requests: pendingFriendRequestsCount,
     unread_system_messages: unreadSystemMessagesCount,
     pending_study_invitations: pendingStudyInvitations,

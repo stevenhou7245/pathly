@@ -5,6 +5,7 @@ import DashboardSummaryCards from "@/components/DashboardSummaryCards";
 import FriendsPanel from "@/components/FriendsPanel";
 import LearningFieldPanel from "@/components/LearningFieldPanel";
 import MessagesPanel from "@/components/MessagesPanel";
+import NotebookPanel from "@/components/NotebookPanel";
 import MorePanel from "@/components/MorePanel";
 import ProfilePanel from "@/components/ProfilePanel";
 import StudyRoomsPanel, { type StudyRoomListItem } from "@/components/StudyRoomsPanel";
@@ -13,6 +14,7 @@ import {
   type LearningFolder,
 } from "@/components/dashboardData";
 import { playSound, setSoundEffectsEnabled as syncSoundEffectsEnabled } from "@/lib/sound";
+import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -80,7 +82,11 @@ type DeleteLearningFieldApiResponse = {
 };
 
 type MessagesSummaryApiResponse = {
+  success?: boolean;
   message?: string;
+  current_user_id?: string;
+  accepted_friendship_ids?: string[];
+  unread_friend_messages?: number;
   pending_friend_requests?: number;
   unread_system_messages?: number;
   pending_study_invitations?: number;
@@ -190,6 +196,9 @@ function resolveBreadcrumbLabel(view: DashboardView, folder: LearningFolder) {
   }
   if (view === "profile") {
     return "Profile";
+  }
+  if (view === "notes") {
+    return "Notes";
   }
   if (view === "friends") {
     return "Friends";
@@ -361,6 +370,8 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const [addFieldError, setAddFieldError] = useState("");
   const [deleteFieldError, setDeleteFieldError] = useState("");
   const [messagesUnreadCount, setMessagesUnreadCount] = useState(0);
+  const [friendsUnreadCount, setFriendsUnreadCount] = useState(0);
+  const [badgeRealtimeUserId, setBadgeRealtimeUserId] = useState("");
   const [isLoadingActiveSummary, setIsLoadingActiveSummary] = useState(false);
   const [activeSummaryError, setActiveSummaryError] = useState("");
   const [summaryReadyByField, setSummaryReadyByField] = useState<Record<string, boolean>>({});
@@ -380,6 +391,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const initialLoadRequestedRef = useRef(false);
   const hasInitializedUnreadRef = useRef(false);
   const previousUnreadCountRef = useRef(0);
+  const acceptedFriendshipIdsRef = useRef<Set<string>>(new Set());
 
   const loadLearningFields = useCallback(
     async (options?: { preferredField?: string; forceActiveFolderId?: string }) => {
@@ -461,17 +473,29 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           method: "GET",
           cache: "no-store",
         },
+        ttlMs: 250,
       });
       if (typeof payload.total_unread !== "number") {
         return;
       }
       const nextUnread = payload.total_unread ?? 0;
+      const nextFriendUnread =
+        typeof payload.unread_friend_messages === "number"
+          ? Math.max(0, Math.floor(payload.unread_friend_messages))
+          : 0;
+      const nextCurrentUserId = payload.current_user_id?.trim() ?? "";
+      const nextAcceptedFriendshipIds = Array.from(
+        new Set((payload.accepted_friendship_ids ?? []).map((value) => value.trim()).filter(Boolean)),
+      );
       if (hasInitializedUnreadRef.current && nextUnread > previousUnreadCountRef.current) {
         playSound("notification");
       }
       previousUnreadCountRef.current = nextUnread;
       hasInitializedUnreadRef.current = true;
       setMessagesUnreadCount(nextUnread);
+      setFriendsUnreadCount(nextFriendUnread);
+      setBadgeRealtimeUserId(nextCurrentUserId);
+      acceptedFriendshipIdsRef.current = new Set(nextAcceptedFriendshipIds);
     } catch {
       // Keep existing badge state on network errors.
     }
@@ -480,6 +504,92 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   useEffect(() => {
     void loadMessagesUnreadCount();
   }, [loadMessagesUnreadCount]);
+
+  useEffect(() => {
+    const currentUserId = badgeRealtimeUserId.trim();
+    if (!currentUserId) {
+      return;
+    }
+
+    let active = true;
+    let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
+    try {
+      supabaseClient = getSupabaseBrowserClient();
+    } catch (error) {
+      console.warn("[dashboard_badge_realtime] client_init_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const refreshUnreadBadges = () => {
+      if (!active) {
+        return;
+      }
+      void loadMessagesUnreadCount();
+    };
+
+    const channel = supabaseClient
+      .channel(`dashboard-badges:${currentUserId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "direct_messages",
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const friendshipId = typeof row?.friendship_id === "string" ? row.friendship_id : "";
+          if (!friendshipId) {
+            return;
+          }
+          if (!acceptedFriendshipIdsRef.current.has(friendshipId)) {
+            return;
+          }
+          refreshUnreadBadges();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "friendships",
+          filter: `requester_id=eq.${currentUserId}`,
+        },
+        refreshUnreadBadges,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "friendships",
+          filter: `addressee_id=eq.${currentUserId}`,
+        },
+        refreshUnreadBadges,
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("[dashboard_badge_realtime] subscription_failed", {
+            current_user_id: currentUserId,
+            status,
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      void channel.unsubscribe();
+      if (supabaseClient) {
+        void supabaseClient.removeChannel(channel);
+      }
+    };
+  }, [badgeRealtimeUserId, loadMessagesUnreadCount]);
 
   const loadStudyRooms = useCallback(async () => {
     setStudyRoomsError("");
@@ -1166,8 +1276,11 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
     if (activeView === "profile") {
       return <ProfilePanel folder={activeFolder} />;
     }
+    if (activeView === "notes") {
+      return <NotebookPanel folderName={activeFolder.name} />;
+    }
     if (activeView === "friends") {
-      return <FriendsPanel />;
+      return <FriendsPanel onMessagesUpdated={loadMessagesUnreadCount} />;
     }
     if (activeView === "messages") {
       return (
@@ -1287,6 +1400,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
             onSelectStudyRoom={handleSelectStudyRoom}
             onOpenAddFieldModal={openAddFieldModal}
             messagesUnreadCount={messagesUnreadCount}
+            friendsUnreadCount={friendsUnreadCount}
             loadingFolderId={activeView === "field" && isLoadingActiveSummary ? activeFolder.id : null}
             deletingFolderId={isDeletingField ? deleteFieldTarget?.id ?? null : null}
             studyRooms={studyRooms.map((room) => ({

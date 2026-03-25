@@ -15,11 +15,13 @@ export type FriendshipRow = {
 type UserBasicRecord = {
   id: string;
   username: string;
+  avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
 };
 
 type UserProfileRecord = {
   user_id: string;
-  avatar_url: string | null;
   bio: string | null;
   age: number | null;
   motto: string | null;
@@ -102,13 +104,12 @@ async function loadProfilesByUserIds(userIds: string[]) {
 
   const withPresence = await supabaseAdmin
     .from("user_profiles")
-    .select("user_id, avatar_url, bio, age, motto, is_online, last_seen_at")
+    .select("user_id, bio, age, motto, is_online, last_seen_at")
     .in("user_id", userIds);
 
   if (!withPresence.error) {
     return ((withPresence.data ?? []) as GenericRecord[]).map((row) => ({
       user_id: toStringValue(row.user_id),
-      avatar_url: toNullableString(row.avatar_url),
       bio: toNullableString(row.bio),
       age: toNullableNumber(row.age),
       motto: toNullableString(row.motto),
@@ -123,7 +124,7 @@ async function loadProfilesByUserIds(userIds: string[]) {
 
   const fallback = await supabaseAdmin
     .from("user_profiles")
-    .select("user_id, avatar_url, bio, age, motto")
+    .select("user_id, bio, age, motto")
     .in("user_id", userIds);
 
   if (fallback.error) {
@@ -132,7 +133,6 @@ async function loadProfilesByUserIds(userIds: string[]) {
 
   return ((fallback.data ?? []) as GenericRecord[]).map((row) => ({
     user_id: toStringValue(row.user_id),
-    avatar_url: toNullableString(row.avatar_url),
     bio: toNullableString(row.bio),
     age: toNullableNumber(row.age),
     motto: toNullableString(row.motto),
@@ -321,6 +321,8 @@ export async function getUsersBasicWithProfiles(userIds: string[]) {
         id: string;
         username: string;
         avatar_url: string | null;
+        avatar_path: string | null;
+        avatar_updated_at: string | null;
         bio: string | null;
         age: number | null;
         motto: string | null;
@@ -333,7 +335,7 @@ export async function getUsersBasicWithProfiles(userIds: string[]) {
   const [usersResult, profiles] = await Promise.all([
     supabaseAdmin
       .from("users")
-      .select("id, username")
+      .select("id, username, avatar_url, avatar_path, avatar_updated_at")
       .in("id", userIds),
     loadProfilesByUserIds(userIds),
   ]);
@@ -353,6 +355,8 @@ export async function getUsersBasicWithProfiles(userIds: string[]) {
       id: string;
       username: string;
       avatar_url: string | null;
+      avatar_path: string | null;
+      avatar_updated_at: string | null;
       bio: string | null;
       age: number | null;
       motto: string | null;
@@ -367,7 +371,9 @@ export async function getUsersBasicWithProfiles(userIds: string[]) {
     map.set(typedUser.id, {
       id: typedUser.id,
       username: typedUser.username,
-      avatar_url: profile?.avatar_url ?? null,
+      avatar_url: toNullableString(typedUser.avatar_url),
+      avatar_path: toNullableString(typedUser.avatar_path),
+      avatar_updated_at: toNullableString(typedUser.avatar_updated_at),
       bio: profile?.bio ?? null,
       age: profile?.age ?? null,
       motto: profile?.motto ?? null,
