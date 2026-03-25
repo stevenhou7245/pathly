@@ -7,6 +7,7 @@ import LearningFieldPanel from "@/components/LearningFieldPanel";
 import MessagesPanel from "@/components/MessagesPanel";
 import MorePanel from "@/components/MorePanel";
 import ProfilePanel from "@/components/ProfilePanel";
+import StudyRoomsPanel, { type StudyRoomListItem } from "@/components/StudyRoomsPanel";
 import {
   type DashboardView,
   type LearningFolder,
@@ -82,7 +83,14 @@ type MessagesSummaryApiResponse = {
   message?: string;
   pending_friend_requests?: number;
   unread_system_messages?: number;
+  pending_study_invitations?: number;
   total_unread?: number;
+};
+
+type StudyRoomsApiResponse = {
+  success: boolean;
+  message?: string;
+  rooms?: StudyRoomListItem[];
 };
 
 type LearningSummaryApiResponse = {
@@ -188,6 +196,9 @@ function resolveBreadcrumbLabel(view: DashboardView, folder: LearningFolder) {
   }
   if (view === "messages") {
     return "Messages";
+  }
+  if (view === "study_rooms") {
+    return "Study Rooms";
   }
   return "More";
 }
@@ -360,6 +371,9 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
+  const [studyRooms, setStudyRooms] = useState<StudyRoomListItem[]>([]);
+  const [activeStudyRoomId, setActiveStudyRoomId] = useState("");
+  const [studyRoomsError, setStudyRoomsError] = useState("");
   const activeSummaryRequestIdRef = useRef(0);
   const inFlightSummaryFieldIdsRef = useRef<Set<string>>(new Set());
   const summaryReadyByFieldRef = useRef<Record<string, boolean>>({});
@@ -466,6 +480,42 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   useEffect(() => {
     void loadMessagesUnreadCount();
   }, [loadMessagesUnreadCount]);
+
+  const loadStudyRooms = useCallback(async () => {
+    setStudyRoomsError("");
+    try {
+      const payload = await fetchJsonWithRequestDedupe<StudyRoomsApiResponse>({
+        key: "dashboard:study-rooms",
+        url: "/api/study-room/my",
+        init: {
+          method: "GET",
+          cache: "no-store",
+        },
+        ttlMs: 1500,
+      });
+      if (!payload.success) {
+        throw new Error(payload.message ?? "Unable to load study rooms right now.");
+      }
+
+      const nextRooms = payload.rooms ?? [];
+      setStudyRooms(nextRooms);
+      setActiveStudyRoomId((previous) => {
+        if (previous && nextRooms.some((room) => room.id === previous)) {
+          return previous;
+        }
+        return nextRooms[0]?.id ?? "";
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load study rooms.";
+      setStudyRoomsError(message);
+      setStudyRooms([]);
+      setActiveStudyRoomId("");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStudyRooms();
+  }, [loadStudyRooms]);
 
   const loadSettings = useCallback(async () => {
     setIsSettingsLoading(true);
@@ -869,6 +919,11 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
     setActiveView("field");
   }
 
+  function handleSelectStudyRoom(roomId: string) {
+    setActiveStudyRoomId(roomId);
+    setActiveView("study_rooms");
+  }
+
   const handlePathProgressChange = useCallback(
     (update: {
       fieldEntryId: string;
@@ -1100,7 +1155,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
                 reason: "manual_retry",
               });
             }}
-            className="btn-3d btn-3d-white mt-4 inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937]"
+            className="btn-3d btn-3d-white mt-4 inline-flex h-10 items-center justify-center px-5 !text-sm"
           >
             Retry
           </button>
@@ -1115,7 +1170,33 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       return <FriendsPanel />;
     }
     if (activeView === "messages") {
-      return <MessagesPanel onInboxUpdated={loadMessagesUnreadCount} />;
+      return (
+        <MessagesPanel
+          onInboxUpdated={loadMessagesUnreadCount}
+          onOpenStudyRoom={(roomId) => {
+            setActiveView("study_rooms");
+            setActiveStudyRoomId(roomId);
+            void loadStudyRooms();
+          }}
+        />
+      );
+    }
+    if (activeView === "study_rooms") {
+      return (
+        <>
+          {studyRoomsError ? (
+            <p className="mb-3 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
+              {studyRoomsError}
+            </p>
+          ) : null}
+          <StudyRoomsPanel
+            rooms={studyRooms}
+            activeRoomId={activeStudyRoomId}
+            onSelectRoom={setActiveStudyRoomId}
+            onRoomsUpdated={loadStudyRooms}
+          />
+        </>
+      );
     }
     if (activeView === "more") {
       return (
@@ -1203,15 +1284,30 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
             onSelectFolder={handleSelectFolder}
             onRequestDeleteFolder={openDeleteFieldModal}
             onSelectView={setActiveView}
+            onSelectStudyRoom={handleSelectStudyRoom}
             onOpenAddFieldModal={openAddFieldModal}
             messagesUnreadCount={messagesUnreadCount}
             loadingFolderId={activeView === "field" && isLoadingActiveSummary ? activeFolder.id : null}
             deletingFolderId={isDeletingField ? deleteFieldTarget?.id ?? null : null}
+            studyRooms={studyRooms.map((room) => ({
+              id: room.id,
+              name: room.name,
+              style: room.style,
+              role: room.role,
+              status: room.status,
+            }))}
+            activeStudyRoomId={activeStudyRoomId}
           />
         </div>
 
         <div
-          key={`${activeView}:${activeView === "field" ? activeFolder.id : "utility"}`}
+          key={`${activeView}:${
+            activeView === "field"
+              ? activeFolder.id
+              : activeView === "study_rooms"
+                ? activeStudyRoomId || "none"
+                : "utility"
+          }`}
           className="min-w-0 motion-panel-switch"
         >
           {renderMainPanel()}
@@ -1308,7 +1404,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
                   type="button"
                   onClick={closeAddFieldModal}
                   disabled={isAddingField}
-                  className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                  className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
                 >
                   Cancel
                 </button>
@@ -1348,7 +1444,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
                 type="button"
                 onClick={closeDeleteFieldModal}
                 disabled={isDeletingField}
-                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
               >
                 Cancel
               </button>
@@ -1369,4 +1465,5 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
     </div>
   );
 }
+
 

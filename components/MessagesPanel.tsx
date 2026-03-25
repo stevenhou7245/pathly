@@ -1,10 +1,12 @@
 "use client";
 
+import AvatarPreviewModal from "@/components/AvatarPreviewModal";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type MessagesPanelProps = {
   onInboxUpdated?: () => void;
+  onOpenStudyRoom?: (roomId: string) => void;
 };
 
 type FriendRequestItem = {
@@ -28,41 +30,6 @@ type SystemMessageItem = {
   is_read: boolean;
 };
 
-type StudyInvitationItem = {
-  id: string;
-  sender_id: string;
-  receiver_id: string;
-  learning_field_id: string | null;
-  status: string;
-  created_at: string | null;
-  responded_at: string | null;
-  sender: {
-    id: string;
-    username: string;
-  };
-  learning_field_title: string | null;
-};
-
-type StudySessionItem = {
-  id: string;
-  invitation_id: string | null;
-  user_a_id: string;
-  user_b_id: string;
-  learning_field_id: string | null;
-  learning_field_title: string | null;
-  status: string;
-  created_at: string | null;
-  ended_at: string | null;
-};
-
-type StudySessionMessage = {
-  id: string;
-  session_id: string;
-  sender_id: string;
-  body: string;
-  created_at: string | null;
-};
-
 type FriendRequestsApiResponse = {
   success: boolean;
   message?: string;
@@ -77,14 +44,6 @@ type SystemMessagesApiResponse = {
   system_messages?: SystemMessageItem[];
 };
 
-type StudyInvitationsApiResponse = {
-  success: boolean;
-  message?: string;
-  current_user_id?: string;
-  invitations?: StudyInvitationItem[];
-  active_sessions?: StudySessionItem[];
-};
-
 type RespondFriendRequestApiResponse = {
   success: boolean;
   message?: string;
@@ -95,24 +54,34 @@ type MarkSystemMessageReadApiResponse = {
   message?: string;
 };
 
+type StudyInvitationItem = {
+  id: string;
+  room_id: string;
+  sender_id: string;
+  receiver_id: string;
+  status: string;
+  created_at: string | null;
+  responded_at: string | null;
+  sender_username: string;
+  room_name: string;
+  room_password: string;
+  room_style: string;
+  room_duration_minutes: number;
+  room_status: string;
+  room_expires_at: string | null;
+};
+
+type StudyInvitationsApiResponse = {
+  success: boolean;
+  message?: string;
+  current_user_id?: string;
+  study_invitations?: StudyInvitationItem[];
+};
+
 type RespondStudyInvitationApiResponse = {
   success: boolean;
   message?: string;
-  invitation_id?: string;
-  session?: StudySessionItem | null;
-};
-
-type StudySessionApiResponse = {
-  success: boolean;
-  message?: string;
-  session?: StudySessionItem;
-};
-
-type StudySessionMessagesApiResponse = {
-  success: boolean;
-  message?: string;
-  messages?: StudySessionMessage[];
-  sent_message?: StudySessionMessage;
+  room_id?: string;
 };
 
 type MessagesTab = "friend_requests" | "official_messages" | "study_invitations";
@@ -132,27 +101,22 @@ function toInitial(username: string) {
   return username.trim().charAt(0).toUpperCase() || "M";
 }
 
-export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
+export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: MessagesPanelProps) {
   const [activeTab, setActiveTab] = useState<MessagesTab>("friend_requests");
-  const [currentUserId, setCurrentUserId] = useState("");
   const [friendRequests, setFriendRequests] = useState<FriendRequestItem[]>([]);
   const [friendRequestsLoaded, setFriendRequestsLoaded] = useState(false);
   const [systemMessages, setSystemMessages] = useState<SystemMessageItem[]>([]);
   const [studyInvitations, setStudyInvitations] = useState<StudyInvitationItem[]>([]);
-  const [activeStudySessions, setActiveStudySessions] = useState<StudySessionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [panelError, setPanelError] = useState("");
   const [respondingRequestId, setRespondingRequestId] = useState("");
   const [markingReadId, setMarkingReadId] = useState("");
-  const [respondingStudyInvitationId, setRespondingStudyInvitationId] = useState("");
-
-  const [studySessionModalOpen, setStudySessionModalOpen] = useState(false);
-  const [selectedStudySession, setSelectedStudySession] = useState<StudySessionItem | null>(null);
-  const [studySessionMessages, setStudySessionMessages] = useState<StudySessionMessage[]>([]);
-  const [studySessionError, setStudySessionError] = useState("");
-  const [isLoadingStudySession, setIsLoadingStudySession] = useState(false);
-  const [studySessionDraft, setStudySessionDraft] = useState("");
-  const [isSendingStudyMessage, setIsSendingStudyMessage] = useState(false);
+  const [respondingInvitationId, setRespondingInvitationId] = useState("");
+  const [avatarPreview, setAvatarPreview] = useState<{
+    avatarUrl: string | null;
+    fallbackInitial: string;
+    displayName: string;
+  } | null>(null);
 
   const loadInboxData = useCallback(async () => {
     setIsLoading(true);
@@ -160,7 +124,7 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
     setFriendRequestsLoaded(false);
 
     try {
-      const [friendResult, systemResult, studyResult] = await Promise.allSettled([
+      const [friendResult, systemResult, studyInvitationsResult] = await Promise.allSettled([
         fetch("/api/messages/friend-requests", {
           method: "GET",
           cache: "no-store",
@@ -176,7 +140,6 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
       ]);
 
       const sectionErrors: string[] = [];
-      let resolvedCurrentUserId = "";
 
       if (friendResult.status === "fulfilled") {
         const friendResponse = friendResult.value;
@@ -184,9 +147,6 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
         if (friendResponse.ok && friendPayload.success && Array.isArray(friendPayload.friend_requests)) {
           setFriendRequests(friendPayload.friend_requests);
           setFriendRequestsLoaded(true);
-          if (!resolvedCurrentUserId && friendPayload.current_user_id?.trim()) {
-            resolvedCurrentUserId = friendPayload.current_user_id.trim();
-          }
         } else {
           sectionErrors.push(friendPayload.message ?? "Unable to load friend requests.");
         }
@@ -199,9 +159,6 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
         const systemPayload = (await systemResponse.json()) as SystemMessagesApiResponse;
         if (systemResponse.ok && systemPayload.success) {
           setSystemMessages(systemPayload.system_messages ?? []);
-          if (!resolvedCurrentUserId && systemPayload.current_user_id?.trim()) {
-            resolvedCurrentUserId = systemPayload.current_user_id.trim();
-          }
         } else {
           sectionErrors.push(systemPayload.message ?? "Unable to load official messages.");
         }
@@ -209,26 +166,18 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
         sectionErrors.push("Unable to load official messages.");
       }
 
-      if (studyResult.status === "fulfilled") {
-        const studyResponse = studyResult.value;
-        const studyPayload = (await studyResponse.json()) as StudyInvitationsApiResponse;
-        if (studyResponse.ok && studyPayload.success) {
-          setStudyInvitations(studyPayload.invitations ?? []);
-          setActiveStudySessions(studyPayload.active_sessions ?? []);
-          if (!resolvedCurrentUserId && studyPayload.current_user_id?.trim()) {
-            resolvedCurrentUserId = studyPayload.current_user_id.trim();
-          }
+      if (studyInvitationsResult.status === "fulfilled") {
+        const invitationsResponse = studyInvitationsResult.value;
+        const invitationsPayload = (await invitationsResponse.json()) as StudyInvitationsApiResponse;
+        if (invitationsResponse.ok && invitationsPayload.success) {
+          setStudyInvitations(invitationsPayload.study_invitations ?? []);
         } else {
-          sectionErrors.push(studyPayload.message ?? "Unable to load study invitations.");
+          sectionErrors.push(
+            invitationsPayload.message ?? "Unable to load study room invitations.",
+          );
         }
       } else {
-        sectionErrors.push("Unable to load study invitations.");
-      }
-
-      if (resolvedCurrentUserId) {
-        setCurrentUserId(resolvedCurrentUserId);
-      } else {
-        setCurrentUserId("");
+        sectionErrors.push("Unable to load study room invitations.");
       }
 
       if (sectionErrors.length > 0) {
@@ -251,6 +200,11 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
   const unreadSystemMessagesCount = useMemo(
     () => systemMessages.filter((message) => !message.is_read).length,
     [systemMessages],
+  );
+
+  const pendingStudyInvitationsCount = useMemo(
+    () => studyInvitations.filter((invitation) => invitation.status === "pending").length,
+    [studyInvitations],
   );
 
   async function handleRespondFriendRequest(friendshipId: string, action: "accepted" | "declined") {
@@ -327,10 +281,9 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
     invitationId: string,
     action: "accepted" | "declined",
   ) {
-    setRespondingStudyInvitationId(invitationId);
-
+    setRespondingInvitationId(invitationId);
     try {
-      const response = await fetch("/api/study/respond", {
+      const response = await fetch("/api/messages/study-invitations/respond", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -340,109 +293,34 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
           action,
         }),
       });
-
       const payload = (await response.json()) as RespondStudyInvitationApiResponse;
       if (!response.ok || !payload.success) {
         throw new Error(payload.message ?? "Unable to respond to this invitation.");
       }
 
       setStudyInvitations((previous) =>
-        previous.filter((invitation) => invitation.id !== invitationId),
+        previous.map((invitation) =>
+          invitation.id === invitationId
+            ? {
+                ...invitation,
+                status: action,
+                responded_at: new Date().toISOString(),
+              }
+            : invitation,
+        ),
       );
 
-      if (payload.session && action === "accepted") {
-        setActiveStudySessions((previous) => {
-          if (previous.some((session) => session.id === payload.session?.id)) {
-            return previous;
-          }
-          return [payload.session as StudySessionItem, ...previous];
-        });
-        await handleOpenStudySession(payload.session.id);
-      }
-
       onInboxUpdated?.();
+
+      if (action === "accepted" && payload.room_id && onOpenStudyRoom) {
+        onOpenStudyRoom(payload.room_id);
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to respond to this invitation.";
       setPanelError(message);
     } finally {
-      setRespondingStudyInvitationId("");
-    }
-  }
-
-  async function handleOpenStudySession(sessionId: string) {
-    setStudySessionModalOpen(true);
-    setIsLoadingStudySession(true);
-    setStudySessionError("");
-    setSelectedStudySession(null);
-    setStudySessionMessages([]);
-
-    try {
-      const [sessionResponse, messagesResponse] = await Promise.all([
-        fetch(`/api/study/sessions/${sessionId}`, {
-          method: "GET",
-          cache: "no-store",
-        }),
-        fetch(`/api/study/sessions/${sessionId}/messages?limit=100`, {
-          method: "GET",
-          cache: "no-store",
-        }),
-      ]);
-
-      const sessionPayload = (await sessionResponse.json()) as StudySessionApiResponse;
-      const messagesPayload = (await messagesResponse.json()) as StudySessionMessagesApiResponse;
-
-      if (!sessionResponse.ok || !sessionPayload.success || !sessionPayload.session) {
-        throw new Error(sessionPayload.message ?? "Unable to load study session.");
-      }
-      if (!messagesResponse.ok || !messagesPayload.success) {
-        throw new Error(messagesPayload.message ?? "Unable to load study session chat.");
-      }
-
-      setSelectedStudySession(sessionPayload.session);
-      setStudySessionMessages(messagesPayload.messages ?? []);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to load study session chat.";
-      setStudySessionError(message);
-    } finally {
-      setIsLoadingStudySession(false);
-    }
-  }
-
-  async function handleSendStudyMessage() {
-    const text = studySessionDraft.trim();
-    if (!selectedStudySession || !text) {
-      return;
-    }
-
-    setIsSendingStudyMessage(true);
-    setStudySessionError("");
-
-    try {
-      const response = await fetch(`/api/study/sessions/${selectedStudySession.id}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          body: text,
-        }),
-      });
-
-      const payload = (await response.json()) as StudySessionMessagesApiResponse;
-      if (!response.ok || !payload.success || !payload.sent_message) {
-        throw new Error(payload.message ?? "Unable to send study message right now.");
-      }
-
-      setStudySessionMessages((previous) => [...previous, payload.sent_message as StudySessionMessage]);
-      setStudySessionDraft("");
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to send study message right now.";
-      setStudySessionError(message);
-    } finally {
-      setIsSendingStudyMessage(false);
+      setRespondingInvitationId("");
     }
   }
 
@@ -452,7 +330,7 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
         <div>
           <h2 className="text-3xl font-extrabold text-[#1F2937]">Messages</h2>
           <p className="text-sm font-semibold text-[#1F2937]/70">
-            Friend requests, study invitations, and official Pathly updates.
+            Friend requests, study room invites, and official Pathly updates.
           </p>
         </div>
         <button
@@ -460,7 +338,7 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
           onClick={() => {
             void loadInboxData();
           }}
-          className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base !text-[#1F2937]"
+          className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base"
         >
           Refresh
         </button>
@@ -484,21 +362,6 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
 
         <button
           type="button"
-          onClick={() => setActiveTab("study_invitations")}
-          className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2 text-sm font-extrabold transition ${
-            activeTab === "study_invitations"
-              ? "border-[#1F2937] bg-[#58CC02] text-white shadow-[0_3px_0_#1f2937]"
-              : "border-[#1F2937]/15 bg-white text-[#1F2937] hover:border-[#58CC02]/45 hover:bg-[#58CC02]/10"
-          }`}
-        >
-          Study Invitations
-          <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-extrabold leading-none">
-            {studyInvitations.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
           onClick={() => setActiveTab("official_messages")}
           className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2 text-sm font-extrabold transition ${
             activeTab === "official_messages"
@@ -509,6 +372,21 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
           Official Messages
           <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[#1F2937]/12 px-1.5 py-0.5 text-[10px] font-extrabold leading-none">
             {unreadSystemMessagesCount}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("study_invitations")}
+          className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2 text-sm font-extrabold transition ${
+            activeTab === "study_invitations"
+              ? "border-[#1F2937] bg-[#58CC02] text-white shadow-[0_3px_0_#1f2937]"
+              : "border-[#1F2937]/15 bg-white text-[#1F2937] hover:border-[#58CC02]/50 hover:bg-[#58CC02]/12"
+          }`}
+        >
+          Study invitations
+          <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-extrabold leading-none">
+            {pendingStudyInvitationsCount}
           </span>
         </button>
       </div>
@@ -544,19 +422,32 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
               >
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
-                    {request.sender.avatar_url ? (
-                      <Image
-                        src={request.sender.avatar_url}
-                        alt={`${request.sender.username} avatar`}
-                        width={44}
-                        height={44}
-                        className="h-11 w-11 rounded-full border-2 border-[#1F2937]/15 object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937]">
-                        {toInitial(request.sender.username)}
-                      </div>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAvatarPreview({
+                          avatarUrl: request.sender.avatar_url,
+                          fallbackInitial: toInitial(request.sender.username),
+                          displayName: request.sender.username,
+                        })
+                      }
+                      className="rounded-full transition hover:scale-[1.02]"
+                      aria-label={`Preview ${request.sender.username} avatar`}
+                    >
+                      {request.sender.avatar_url ? (
+                        <Image
+                          src={request.sender.avatar_url}
+                          alt={`${request.sender.username} avatar`}
+                          width={44}
+                          height={44}
+                          className="h-11 w-11 rounded-full border-2 border-[#1F2937]/15 object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937]">
+                          {toInitial(request.sender.username)}
+                        </div>
+                      )}
+                    </button>
                     <div>
                       <p className="text-sm font-extrabold text-[#1F2937]">
                         {request.sender.username}
@@ -580,7 +471,7 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
                         void handleRespondFriendRequest(request.friendship_id, "declined")
                       }
                       disabled={respondingRequestId === request.friendship_id}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       Decline
                     </button>
@@ -598,98 +489,6 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
                 </div>
               </article>
             ))
-          ) : null}
-        </div>
-      ) : null}
-
-      {!isLoading && activeTab === "study_invitations" ? (
-        <div className="mt-5 space-y-3">
-          {studyInvitations.length === 0 && activeStudySessions.length === 0 ? (
-            <article className="rounded-2xl border-2 border-dashed border-[#1F2937]/15 bg-[#F8FCFF] p-5">
-              <p className="text-base font-extrabold text-[#1F2937]">No study invites right now.</p>
-              <p className="mt-1 text-sm font-semibold text-[#1F2937]/68">
-                New study invitations will appear here.
-              </p>
-            </article>
-          ) : null}
-
-          {studyInvitations.map((invitation) => (
-            <article
-              key={invitation.id}
-              className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4 shadow-[0_4px_0_rgba(31,41,55,0.08)]"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <p className="text-sm font-extrabold text-[#1F2937]">
-                    {invitation.sender.username} invited you to study together.
-                  </p>
-                  <p className="text-xs font-semibold text-[#1F2937]/65">
-                    {invitation.learning_field_title ?? "General study session"}
-                  </p>
-                  <p className="text-[11px] font-semibold text-[#1F2937]/55">
-                    {formatTimestamp(invitation.created_at)}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleRespondStudyInvitation(invitation.id, "declined")}
-                    disabled={respondingStudyInvitationId === invitation.id}
-                    className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    Decline
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleRespondStudyInvitation(invitation.id, "accepted")}
-                    disabled={respondingStudyInvitationId === invitation.id}
-                    className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    Accept
-                  </button>
-                </div>
-              </div>
-            </article>
-          ))}
-
-          {activeStudySessions.length > 0 ? (
-            <div className="pt-2">
-              <p className="text-sm font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                Active Study Sessions
-              </p>
-              <div className="mt-2 space-y-3">
-                {activeStudySessions.map((session) => {
-                  const partnerId = session.user_a_id === currentUserId ? session.user_b_id : session.user_a_id;
-                  return (
-                    <article
-                      key={session.id}
-                      className="rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4 shadow-[0_4px_0_rgba(31,41,55,0.08)]"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-extrabold text-[#1F2937]">
-                            Session with {partnerId}
-                          </p>
-                          <p className="text-xs font-semibold text-[#1F2937]/65">
-                            {session.learning_field_title ?? "General"}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleOpenStudySession(session.id);
-                          }}
-                          className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm"
-                        >
-                          Open Session
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </div>
           ) : null}
         </div>
       ) : null}
@@ -736,7 +535,7 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
                         type="button"
                         onClick={() => void handleMarkSystemMessageAsRead(message.user_message_id)}
                         disabled={markingReadId === message.user_message_id}
-                        className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-3 !text-xs !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                        className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-3 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                       >
                         Mark Read
                       </button>
@@ -749,92 +548,80 @@ export default function MessagesPanel({ onInboxUpdated }: MessagesPanelProps) {
         </div>
       ) : null}
 
-      {studySessionModalOpen ? (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
-          <div className="w-full max-w-2xl rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-7 motion-modal-content">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-2xl font-extrabold text-[#1F2937]">Study Session</h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setStudySessionModalOpen(false);
-                  setSelectedStudySession(null);
-                  setStudySessionMessages([]);
-                  setStudySessionError("");
-                }}
-                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm !text-[#1F2937]"
-              >
-                Close
-              </button>
-            </div>
-
-            {isLoadingStudySession ? (
-              <p className="mt-4 text-sm font-semibold text-[#1F2937]/70">Loading session...</p>
-            ) : null}
-
-            {studySessionError ? (
-              <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
-                {studySessionError}
+      {!isLoading && activeTab === "study_invitations" ? (
+        <div className="mt-5 space-y-3">
+          {studyInvitations.length === 0 ? (
+            <article className="rounded-2xl border-2 border-dashed border-[#1F2937]/15 bg-[#F8FCFF] p-5">
+              <p className="text-base font-extrabold text-[#1F2937]">No study room invitations yet.</p>
+              <p className="mt-1 text-sm font-semibold text-[#1F2937]/68">
+                Invitations from your friends will appear here.
               </p>
-            ) : null}
+            </article>
+          ) : (
+            studyInvitations.map((invitation) => (
+              <article
+                key={invitation.id}
+                className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4 shadow-[0_4px_0_rgba(31,41,55,0.08)]"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-base font-extrabold text-[#1F2937]">{invitation.room_name}</p>
+                    <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
+                      {invitation.sender_username} invited you to this study room.
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-[#1F2937]/65">
+                      Room ID: {invitation.room_id}
+                    </p>
+                    <p className="text-xs font-semibold text-[#1F2937]/65">
+                      Password: {invitation.room_password}
+                    </p>
+                    <p className="text-xs font-semibold text-[#1F2937]/65">
+                      Style: {invitation.room_style} · Duration: {invitation.room_duration_minutes} minutes
+                    </p>
+                    <p className="text-[11px] font-semibold text-[#1F2937]/55">
+                      {formatTimestamp(invitation.created_at)}
+                    </p>
+                  </div>
 
-            {!isLoadingStudySession && selectedStudySession ? (
-              <>
-                <p className="mt-4 text-sm font-semibold text-[#1F2937]/72">
-                  {selectedStudySession.learning_field_title ?? "General study"}
-                </p>
-
-                <div className="mt-4 flex h-64 flex-col gap-3 overflow-y-auto rounded-2xl border-2 border-[#1F2937]/10 bg-[#F9FCFF] p-3">
-                  {studySessionMessages.length === 0 ? (
-                    <div className="my-auto text-center text-sm font-semibold text-[#1F2937]/65">
-                      No messages yet. Start your shared study chat.
+                  {invitation.status === "pending" ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleRespondStudyInvitation(invitation.id, "declined")}
+                        disabled={respondingInvitationId === invitation.id}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        Decline
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRespondStudyInvitation(invitation.id, "accepted")}
+                        disabled={respondingInvitationId === invitation.id}
+                        className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        Accept
+                      </button>
                     </div>
                   ) : (
-                    studySessionMessages.map((message) => {
-                      const isMe = message.sender_id === currentUserId;
-                      return (
-                        <div
-                          key={message.id}
-                          className={`max-w-[82%] rounded-2xl px-3 py-2 text-sm font-semibold ${
-                            isMe
-                              ? "ml-auto bg-[#58CC02] text-white"
-                              : "mr-auto border-2 border-[#1F2937]/10 bg-white text-[#1F2937]"
-                          }`}
-                        >
-                          <p>{message.body}</p>
-                          <p className={`mt-1 text-[11px] ${isMe ? "text-white/80" : "text-[#1F2937]/55"}`}>
-                            {formatTimestamp(message.created_at)}
-                          </p>
-                        </div>
-                      );
-                    })
+                    <span className="rounded-full bg-[#1F2937]/10 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wide text-[#1F2937]/70">
+                      {invitation.status}
+                    </span>
                   )}
                 </div>
-
-                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                  <input
-                    type="text"
-                    value={studySessionDraft}
-                    onChange={(event) => setStudySessionDraft(event.target.value)}
-                    placeholder="Send a study message..."
-                    className="w-full rounded-2xl border-2 border-[#1F2937]/15 bg-white px-4 py-3 text-base text-[#1F2937] shadow-[0_2px_0_rgba(31,41,55,0.08)] outline-none transition placeholder:text-[#1F2937]/35 focus:border-[#58CC02] focus:ring-2 focus:ring-[#58CC02]/20"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void handleSendStudyMessage();
-                    }}
-                    disabled={isSendingStudyMessage}
-                    className="btn-3d btn-3d-green inline-flex h-12 shrink-0 items-center justify-center px-6 !text-base disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    {isSendingStudyMessage ? "Sending..." : "Send"}
-                  </button>
-                </div>
-              </>
-            ) : null}
-          </div>
+              </article>
+            ))
+          )}
         </div>
       ) : null}
+
+      <AvatarPreviewModal
+        isOpen={Boolean(avatarPreview)}
+        avatarUrl={avatarPreview?.avatarUrl ?? null}
+        fallbackInitial={avatarPreview?.fallbackInitial ?? "M"}
+        displayName={avatarPreview?.displayName ?? "Avatar"}
+        onClose={() => setAvatarPreview(null)}
+      />
     </section>
   );
 }
+

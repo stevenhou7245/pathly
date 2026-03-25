@@ -1,4 +1,10 @@
-export type DashboardView = "field" | "profile" | "friends" | "messages" | "more";
+export type DashboardView =
+  | "field"
+  | "profile"
+  | "friends"
+  | "messages"
+  | "study_rooms"
+  | "more";
 
 export type LearningFolder = {
   id: string;

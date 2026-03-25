@@ -107,7 +107,7 @@ export default function ExplorePage() {
           </Link>
           <Link
             href="/"
-            className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base !text-[#1F2937]"
+            className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base"
           >
             Back
           </Link>
@@ -199,7 +199,7 @@ export default function ExplorePage() {
                       <button
                         type="button"
                         onClick={() => handleSelectPath(path.title)}
-                        className="btn-3d btn-3d-white mt-4 inline-flex h-10 items-center justify-center px-5 !text-[#1F2937]"
+                        className="btn-3d btn-3d-white mt-4 inline-flex h-10 items-center justify-center px-5"
                       >
                         Explore
                       </button>
@@ -286,3 +286,4 @@ export default function ExplorePage() {
     </div>
   );
 }
+

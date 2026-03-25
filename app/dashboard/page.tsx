@@ -1,6 +1,7 @@
 import DashboardHeader from "@/components/DashboardHeader";
 import DashboardShell from "@/components/DashboardShell";
 import { resolveAuthenticatedSessionUser } from "@/lib/sessionAuth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { redirect } from "next/navigation";
 
 type DashboardPageProps = {
@@ -15,6 +16,24 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
     redirect("/auth-gate");
   }
   const avatarInitial = sessionResolution.user.username?.trim().charAt(0).toUpperCase() || "M";
+  let avatarUrl: string | null = null;
+  const { data: avatarRow, error: avatarError } = await supabaseAdmin
+    .from("users")
+    .select("avatar_url")
+    .eq("id", sessionResolution.user.id)
+    .limit(1)
+    .maybeSingle<{ avatar_url: string | null }>();
+  if (avatarError) {
+    console.warn("[dashboard_page] avatar_lookup_failed", {
+      user_id: sessionResolution.user.id,
+      reason: avatarError.message,
+      code: (avatarError as unknown as Record<string, unknown>).code ?? null,
+      details: (avatarError as unknown as Record<string, unknown>).details ?? null,
+      hint: (avatarError as unknown as Record<string, unknown>).hint ?? null,
+    });
+  } else {
+    avatarUrl = (avatarRow?.avatar_url ?? "").trim() || null;
+  }
 
   const resolvedSearchParams = await searchParams;
   const rawField = resolvedSearchParams?.field;
@@ -23,7 +42,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
 
   return (
     <div className="min-h-screen bg-[#F7F7F7] text-[#1F2937]">
-      <DashboardHeader avatarInitial={avatarInitial} />
+      <DashboardHeader avatarInitial={avatarInitial} avatarUrl={avatarUrl} />
 
       <main className="relative overflow-hidden pb-12 pt-28 sm:pt-32">
         <div className="pointer-events-none absolute inset-0">

@@ -8,13 +8,14 @@ import {
   toStringValue,
   type DifficultyBand,
 } from "@/lib/ai/common";
-import { calculateTotalSteps } from "@/lib/learningPath";
+import { calculateTotalSteps, LESSONS_PER_LEVEL_GAP } from "@/lib/learningPath";
 import { loadUserResourcePreferenceProfile, type ResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
 import { installAiPipelineDebugLogFilter } from "@/lib/aiPipelineDebugLogging";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type GenericRecord = Record<string, unknown>;
+const JOURNEY_TEMPLATE_PROMPT_VERSION = "journey_template_v2";
 
 export type JourneyPlanStep = {
   step_number: number;
@@ -153,20 +154,17 @@ function hasGenericStepTitles(steps: JourneyPlanStep[]) {
   });
 }
 
-function estimateSteps(startLevel: string, targetLevel: string, desiredTotalSteps?: number | null) {
-  if (desiredTotalSteps && Number.isFinite(desiredTotalSteps) && desiredTotalSteps > 0) {
-    return Math.max(1, Math.min(20, Math.floor(desiredTotalSteps)));
-  }
-  return Math.max(3, Math.min(20, calculateTotalSteps(startLevel, targetLevel)));
+function estimateSteps(startLevel: string, targetLevel: string) {
+  const fixedTotalSteps = calculateTotalSteps(startLevel, targetLevel);
+  return Math.max(1, Math.min(20, fixedTotalSteps));
 }
 
 function buildDeterministicJourneyPlan(input: {
   fieldTitle: string;
   startLevel: string;
   targetLevel: string;
-  desiredTotalSteps?: number | null;
 }): z.infer<typeof journeyTemplateOutputSchema> {
-  const totalSteps = estimateSteps(input.startLevel, input.targetLevel, input.desiredTotalSteps);
+  const totalSteps = estimateSteps(input.startLevel, input.targetLevel);
   const steps: z.infer<typeof journeyTemplateOutputSchema>["journey_plan"] = [];
 
   const difficultyByIndex: DifficultyBand[] = [
@@ -282,13 +280,21 @@ export async function resolveOrCreateJourneyTemplate(params: {
   userPreferenceProfile?: ResourcePreferenceProfile | null;
 }): Promise<JourneyTemplateResult> {
   installAiPipelineDebugLogFilter();
+  const rawComputedTotalSteps = calculateTotalSteps(params.startLevel, params.targetLevel);
+  const fixedTotalSteps = Math.max(1, rawComputedTotalSteps);
+  const levelDistance = Math.max(
+    0,
+    Math.floor(rawComputedTotalSteps / LESSONS_PER_LEVEL_GAP),
+  );
 
   const templateSourceHash = sha256Hash({
     learning_field_id: params.learningFieldId,
     start_level: params.startLevel,
     target_level: params.targetLevel,
-    desired_total_steps: params.desiredTotalSteps ?? null,
-    prompt_version: "journey_template_v1",
+    level_distance: levelDistance,
+    total_steps: fixedTotalSteps,
+    lessons_per_level_gap: LESSONS_PER_LEVEL_GAP,
+    prompt_version: JOURNEY_TEMPLATE_PROMPT_VERSION,
   });
 
   try {
@@ -318,31 +324,45 @@ export async function resolveOrCreateJourneyTemplate(params: {
               learning_field_id: params.learningFieldId,
               template_id: templateId,
             });
+          } else if (loadedSteps.length !== fixedTotalSteps) {
+            console.info("[journey_ai] template_reuse_skipped_step_count_mismatch", {
+              learning_field_id: params.learningFieldId,
+              template_id: templateId,
+              expected_total_steps: fixedTotalSteps,
+              existing_total_steps: loadedSteps.length,
+            });
           } else {
-          console.info("[journey_ai] template_reuse", {
-            learning_field_id: params.learningFieldId,
-            template_id: templateId,
-            start_level: params.startLevel,
-            target_level: params.targetLevel,
-          });
-          return {
-            template_id: templateId,
-            template_version: Math.max(1, Math.floor(toNumberValue((existingTemplate as GenericRecord).template_version))),
-            total_steps: loadedSteps.length,
-            source_hash: toStringValue((existingTemplate as GenericRecord).source_hash) || templateSourceHash,
-            reused_existing: true,
-            ai_provenance: {
-              provider: "deterministic",
-              model: toStringValue((existingTemplate as GenericRecord).ai_model) || "reused-template",
-              prompt_version:
-                toStringValue((existingTemplate as GenericRecord).ai_prompt_version) || "journey_template_v1",
-              generated_at:
-                toStringValue((existingTemplate as GenericRecord).ai_generated_at) || new Date().toISOString(),
-              fallback_used: false,
-              failure_reason: null,
-            },
-            steps: loadedSteps,
-          };
+            console.info("[journey_ai] template_reuse", {
+              learning_field_id: params.learningFieldId,
+              template_id: templateId,
+              start_level: params.startLevel,
+              target_level: params.targetLevel,
+              total_steps: fixedTotalSteps,
+            });
+            return {
+              template_id: templateId,
+              template_version: Math.max(
+                1,
+                Math.floor(toNumberValue((existingTemplate as GenericRecord).template_version)),
+              ),
+              total_steps: loadedSteps.length,
+              source_hash:
+                toStringValue((existingTemplate as GenericRecord).source_hash) || templateSourceHash,
+              reused_existing: true,
+              ai_provenance: {
+                provider: "deterministic",
+                model: toStringValue((existingTemplate as GenericRecord).ai_model) || "reused-template",
+                prompt_version:
+                  toStringValue((existingTemplate as GenericRecord).ai_prompt_version) ||
+                  JOURNEY_TEMPLATE_PROMPT_VERSION,
+                generated_at:
+                  toStringValue((existingTemplate as GenericRecord).ai_generated_at) ||
+                  new Date().toISOString(),
+                fallback_used: false,
+                failure_reason: null,
+              },
+              steps: loadedSteps,
+            };
           }
         }
       }
@@ -365,6 +385,9 @@ export async function resolveOrCreateJourneyTemplate(params: {
     "You are a learning journey planner.",
     "Return JSON only with this exact top-level field: journey_plan (array).",
     "Each journey_plan item must include: title, description, objective, difficulty, skill_tags, concept_tags.",
+    `Level order is fixed: beginner -> basic -> intermediate -> advanced -> expert.`,
+    `Each adjacent level gap must always equal exactly ${LESSONS_PER_LEVEL_GAP} lessons.`,
+    "Use total_steps from input exactly. Do not return more or fewer lessons than total_steps.",
     "Create progressively harder steps from start to target level.",
     "difficulty must be exactly one of: beginner, basic, intermediate, advanced, expert.",
     "Use lowercase difficulty values only.",
@@ -387,6 +410,8 @@ export async function resolveOrCreateJourneyTemplate(params: {
     has_field_title: Boolean(promptFieldTitle),
     has_start_level: Boolean(promptStartLevel),
     has_target_level: Boolean(promptTargetLevel),
+    level_distance: levelDistance,
+    total_steps: fixedTotalSteps,
     missing_fields: missingPromptFields,
   });
 
@@ -415,12 +440,11 @@ export async function resolveOrCreateJourneyTemplate(params: {
       fieldTitle: promptFieldTitle || "Learning",
       startLevel: promptStartLevel || "Beginner",
       targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
-      desiredTotalSteps: params.desiredTotalSteps ?? null,
     });
     provenance = {
       provider: "deterministic",
       model: "deterministic-fallback",
-      prompt_version: "journey_template_v1",
+      prompt_version: JOURNEY_TEMPLATE_PROMPT_VERSION,
       generated_at: new Date().toISOString(),
       fallback_used: true,
       failure_reason: `Missing prompt fields: ${missingPromptFields.join(", ")}`,
@@ -436,18 +460,24 @@ export async function resolveOrCreateJourneyTemplate(params: {
       field_title: promptFieldTitle,
       start_level: promptStartLevel,
       target_level: promptTargetLevel,
-      desired_total_steps: params.desiredTotalSteps ?? null,
+      level_distance: levelDistance,
+      total_steps: fixedTotalSteps,
+      requested_desired_total_steps: params.desiredTotalSteps ?? null,
     });
     const generation = await generateStructuredJson({
       feature: "journey_template",
-      promptVersion: "journey_template_v1",
+      promptVersion: JOURNEY_TEMPLATE_PROMPT_VERSION,
       systemInstruction,
       input: {
         learning_field_id: params.learningFieldId,
         field_title: promptFieldTitle,
         start_level: promptStartLevel,
         target_level: promptTargetLevel,
-        desired_total_steps: params.desiredTotalSteps ?? null,
+        level_order: ["beginner", "basic", "intermediate", "advanced", "expert"],
+        lessons_per_adjacent_level_gap: LESSONS_PER_LEVEL_GAP,
+        level_distance: levelDistance,
+        total_steps: fixedTotalSteps,
+        requested_desired_total_steps: params.desiredTotalSteps ?? null,
         user_preference_profile: preferenceProfile,
       },
       outputSchema: journeyTemplateLooseOutputSchema,
@@ -456,7 +486,6 @@ export async function resolveOrCreateJourneyTemplate(params: {
           fieldTitle: promptFieldTitle || "Learning",
           startLevel: promptStartLevel || "Beginner",
           targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
-          desiredTotalSteps: params.desiredTotalSteps ?? null,
         }),
     });
     const looseOutput = generation.output;
@@ -499,12 +528,11 @@ export async function resolveOrCreateJourneyTemplate(params: {
         fieldTitle: promptFieldTitle || "Learning",
         startLevel: promptStartLevel || "Beginner",
         targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
-        desiredTotalSteps: params.desiredTotalSteps ?? null,
       });
       provenance = {
         provider: "deterministic",
         model: "deterministic-fallback",
-        prompt_version: "journey_template_v1",
+        prompt_version: JOURNEY_TEMPLATE_PROMPT_VERSION,
         generated_at: new Date().toISOString(),
         fallback_used: true,
         failure_reason: "schema_validation_failed_after_normalization",
@@ -546,7 +574,6 @@ export async function resolveOrCreateJourneyTemplate(params: {
         fieldTitle: promptFieldTitle || "Learning",
         startLevel: promptStartLevel || "Beginner",
         targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
-        desiredTotalSteps: params.desiredTotalSteps ?? null,
       });
     } else {
       console.info("[journey_template] schema_validation_succeeded", {
@@ -562,15 +589,27 @@ export async function resolveOrCreateJourneyTemplate(params: {
     count: Array.isArray(output.journey_plan) ? output.journey_plan.length : 0,
   });
 
-  const estimatedTotal = estimateSteps(
-    promptStartLevel || "Beginner",
-    promptTargetLevel || "Intermediate",
-    params.desiredTotalSteps ?? null,
-  );
-  const normalizedSteps = normalizeSteps(
+  let normalizedSteps = normalizeSteps(
     output.journey_plan,
-    Math.max(1, estimatedTotal),
+    Math.max(1, fixedTotalSteps),
   );
+  if (normalizedSteps.length !== fixedTotalSteps) {
+    const deterministicFallback = normalizeSteps(
+      buildDeterministicJourneyPlan({
+        fieldTitle: promptFieldTitle || "Learning",
+        startLevel: promptStartLevel || "Beginner",
+        targetLevel: promptTargetLevel || promptStartLevel || "Intermediate",
+      }).journey_plan,
+      fixedTotalSteps,
+    );
+    normalizedSteps = deterministicFallback;
+    console.warn("[journey_template] normalized_step_count_adjusted_to_fixed_rule", {
+      learning_field_id: params.learningFieldId,
+      expected_total_steps: fixedTotalSteps,
+      normalized_step_count: normalizedSteps.length,
+      reason: "enforced_fixed_level_gap_rule",
+    });
+  }
   console.info("[journey_template] generation_result", {
     learning_field_id: params.learningFieldId,
     field_title: params.fieldTitle,
@@ -581,6 +620,7 @@ export async function resolveOrCreateJourneyTemplate(params: {
     raw_ai_response_text: debug.raw_response_text,
     parsed_ai_json: debug.parsed_output_json,
     normalized_step_count: normalizedSteps.length,
+    expected_total_steps: fixedTotalSteps,
   });
   const normalizedTotalSteps = normalizedSteps.length;
   const sourceHash = sha256Hash({
@@ -602,7 +642,7 @@ export async function resolveOrCreateJourneyTemplate(params: {
         template_name: `${promptFieldTitle || "Learning"} ${promptStartLevel || "Start"} to ${promptTargetLevel || "Target"}`,
         start_level: params.startLevel,
         target_level: params.targetLevel,
-        desired_total_steps: params.desiredTotalSteps ?? null,
+        desired_total_steps: fixedTotalSteps,
         total_steps: normalizedTotalSteps,
         status: "ready",
         template_version: templateVersion,
@@ -614,7 +654,11 @@ export async function resolveOrCreateJourneyTemplate(params: {
             field_title: params.fieldTitle,
             start_level: params.startLevel,
             target_level: params.targetLevel,
-            desired_total_steps: params.desiredTotalSteps ?? null,
+            level_order: ["beginner", "basic", "intermediate", "advanced", "expert"],
+            lessons_per_adjacent_level_gap: LESSONS_PER_LEVEL_GAP,
+            level_distance: levelDistance,
+            total_steps: fixedTotalSteps,
+            requested_desired_total_steps: params.desiredTotalSteps ?? null,
             user_preference_profile: preferenceProfile,
           }),
         ),
@@ -662,7 +706,7 @@ export async function resolveOrCreateJourneyTemplate(params: {
         skill_tags_json: step.skill_tags,
         concept_tags_json: step.concept_tags,
         metadata_json: {
-          created_by: "journey_template_v1",
+          created_by: JOURNEY_TEMPLATE_PROMPT_VERSION,
         },
         source_hash: sha256Hash({
           template_id: templateId,

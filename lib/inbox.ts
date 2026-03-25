@@ -4,7 +4,12 @@ import {
   getUsersBasicWithProfiles,
   respondToFriendRequest,
 } from "@/lib/friends";
-import { getPendingStudyInvitationsCount } from "@/lib/study";
+import {
+  getOfficialMessagesForUser,
+  getUnreadOfficialMessagesCount,
+  markOfficialMessageRead,
+} from "@/lib/officialMessages";
+import { getPendingStudyRoomInvitationsCount } from "@/lib/studyRoom";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type GenericRecord = Record<string, unknown>;
@@ -17,22 +22,14 @@ function toNullableString(value: unknown) {
   return typeof value === "string" ? value : null;
 }
 
-function toBoolean(value: unknown) {
-  return typeof value === "boolean" ? value : false;
-}
-
-function getSystemMessageFromRelation(value: unknown): GenericRecord | null {
-  if (!value) {
-    return null;
-  }
-  if (Array.isArray(value)) {
-    const first = value[0];
-    return first && typeof first === "object" ? (first as GenericRecord) : null;
-  }
-  if (typeof value === "object") {
-    return value as GenericRecord;
-  }
-  return null;
+function toErrorDetails(error: unknown) {
+  const record = (error ?? {}) as GenericRecord;
+  return {
+    message: toStringValue(record.message) || "Unknown error",
+    code: toNullableString(record.code),
+    details: toNullableString(record.details),
+    hint: toNullableString(record.hint),
+  };
 }
 
 export async function getIncomingPendingFriendRequestsForUser(userId: string) {
@@ -138,84 +135,68 @@ export async function respondToIncomingFriendRequest(params: {
 }
 
 export async function getSystemMessagesForUser(userId: string) {
-  const { data, error } = await supabaseAdmin
-    .from("user_system_messages")
-    .select(
-      "id, user_id, system_message_id, is_read, created_at, read_at, system_messages(id, title, body, created_at)",
-    )
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error("Failed to load system messages.");
-  }
-
-  return ((data ?? []) as GenericRecord[]).map((row) => {
-    const systemMessage = getSystemMessageFromRelation(row.system_messages);
-
-    return {
-      user_message_id: toStringValue(row.id),
-      system_message_id: toStringValue(row.system_message_id),
-      title: toStringValue(systemMessage?.title) || "Update from Pathly",
-      body: toStringValue(systemMessage?.body) || "",
-      created_at: toNullableString(systemMessage?.created_at) ?? toNullableString(row.created_at),
-      is_read: toBoolean(row.is_read),
-    };
-  });
+  const officialMessages = await getOfficialMessagesForUser(userId);
+  return officialMessages.map((message) => ({
+    user_message_id: message.id,
+    system_message_id: message.id,
+    title: message.title || "Update from Pathly",
+    body: message.body || "",
+    created_at: message.created_at,
+    is_read: message.read,
+  }));
 }
 
 export async function markSystemMessageReadForUser(params: {
   userId: string;
   userMessageId: string;
 }) {
-  const { data, error } = await supabaseAdmin
-    .from("user_system_messages")
-    .update({
-      is_read: true,
-      read_at: new Date().toISOString(),
-    })
-    .eq("id", params.userMessageId)
-    .eq("user_id", params.userId)
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error("Failed to mark system message as read.");
+  const result = await markOfficialMessageRead({
+    userId: params.userId,
+    messageId: params.userMessageId,
+  });
+  if (!result.ok) {
+    if (result.code === "FORBIDDEN") {
+      console.warn("[official_messages] mark_read_forbidden_in_legacy_route", {
+        user_id: params.userId,
+        message_id: params.userMessageId,
+      });
+    }
+    return null;
   }
-
-  return data ? { id: toStringValue(data.id) } : null;
+  return {
+    id: result.message_id,
+  };
 }
 
 export async function getInboxUnreadSummary(userId: string) {
-  const [friendRequestsResult, systemMessagesResult, pendingStudyInvitationsCount] =
-    await Promise.all([
+  const [friendRequestsResult, unreadSystemMessagesCount, pendingStudyInvitations] = await Promise.all([
     supabaseAdmin
       .from("friendships")
       .select("id", { count: "exact", head: true })
       .eq("addressee_id", userId)
       .eq("status", "pending"),
-    supabaseAdmin
-      .from("user_system_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .eq("is_read", false),
-    getPendingStudyInvitationsCount(userId),
-    ]);
+    getUnreadOfficialMessagesCount(userId),
+    getPendingStudyRoomInvitationsCount(userId),
+  ]);
 
-  if (friendRequestsResult.error || systemMessagesResult.error) {
-    throw new Error("Failed to load unread inbox summary.");
+  if (friendRequestsResult.error) {
+    if (friendRequestsResult.error) {
+      console.error("[inbox_summary] friend_requests_count_failed", {
+        table: "friendships",
+        user_id: userId,
+        ...toErrorDetails(friendRequestsResult.error),
+      });
+    }
+    throw new Error(`Failed to load unread inbox summary. user_id=${userId}`);
   }
 
   const pendingFriendRequestsCount = friendRequestsResult.count ?? 0;
-  const unreadSystemMessagesCount = systemMessagesResult.count ?? 0;
 
   return {
     pending_friend_requests: pendingFriendRequestsCount,
     unread_system_messages: unreadSystemMessagesCount,
-    pending_study_invitations: pendingStudyInvitationsCount,
-    total_unread:
-      pendingFriendRequestsCount + unreadSystemMessagesCount + pendingStudyInvitationsCount,
+    pending_study_invitations: pendingStudyInvitations,
+    total_unread: pendingFriendRequestsCount + unreadSystemMessagesCount + pendingStudyInvitations,
   };
 }
 

@@ -1,67 +1,49 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
-import {
-  getActiveStudySessionsForUser,
-  getPendingStudyInvitationsForUser,
-} from "@/lib/study";
+import { getStudyRoomInvitationsForUser } from "@/lib/studyRoom";
 
 export const runtime = "nodejs";
 
-type StudyInvitationsInboxResponse = {
+type StudyInvitationItem = {
+  id: string;
+  room_id: string;
+  sender_id: string;
+  receiver_id: string;
+  status: string;
+  created_at: string | null;
+  responded_at: string | null;
+  sender_username: string;
+  room_name: string;
+  room_password: string;
+  room_style: string;
+  room_duration_minutes: number;
+  room_status: string;
+  room_expires_at: string | null;
+};
+
+type StudyInvitationsResponse = {
   success: boolean;
   message?: string;
   current_user_id?: string;
-  invitations?: Array<{
-    id: string;
-    sender_id: string;
-    receiver_id: string;
-    learning_field_id: string | null;
-    status: string;
-    created_at: string | null;
-    responded_at: string | null;
-    sender: {
-      id: string;
-      username: string;
-    };
-    learning_field_title: string | null;
-  }>;
-  active_sessions?: Array<{
-    id: string;
-    invitation_id: string | null;
-    user_a_id: string;
-    user_b_id: string;
-    learning_field_id: string | null;
-    learning_field_title: string | null;
-    status: string;
-    created_at: string | null;
-    ended_at: string | null;
-  }>;
+  study_invitations?: StudyInvitationItem[];
 };
 
 export async function GET() {
   try {
     const sessionUser = await getAuthenticatedSessionUser();
     if (!sessionUser) {
-      return NextResponse.json<StudyInvitationsInboxResponse>(
-        {
-          success: false,
-          message: "Unauthorized.",
-        },
+      return NextResponse.json<StudyInvitationsResponse>(
+        { success: false, message: "Unauthorized." },
         { status: 401 },
       );
     }
 
-    const [invitations, activeSessions] = await Promise.all([
-      getPendingStudyInvitationsForUser(sessionUser.id),
-      getActiveStudySessionsForUser(sessionUser.id),
-    ]);
-
-    return NextResponse.json<StudyInvitationsInboxResponse>(
+    const invitations = await getStudyRoomInvitationsForUser(sessionUser.id);
+    return NextResponse.json<StudyInvitationsResponse>(
       {
         success: true,
         current_user_id: sessionUser.id,
-        invitations,
-        active_sessions: activeSessions,
+        study_invitations: invitations,
       },
       {
         headers: {
@@ -69,11 +51,17 @@ export async function GET() {
         },
       },
     );
-  } catch {
-    return NextResponse.json<StudyInvitationsInboxResponse>(
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("[study_room_invite] fetch_failed", {
+      route: "/api/messages/study-invitations",
+      reason,
+    });
+    return NextResponse.json<StudyInvitationsResponse>(
       {
         success: false,
-        message: "Unable to load study invitations right now.",
+        message: reason,
+        study_invitations: [],
       },
       { status: 500 },
     );

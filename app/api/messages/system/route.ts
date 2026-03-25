@@ -40,10 +40,16 @@ export async function GET() {
         "Cache-Control": "no-store",
       },
     });
-  } catch {
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("[messages_system] route_failed", {
+      route: "/api/messages/system",
+      reason,
+    });
     const payload: SystemMessagesResponse = {
       success: false,
-      message: "Unable to load official messages right now.",
+      message: reason || "Unable to load official messages right now.",
+      system_messages: [],
     };
     return NextResponse.json(payload, { status: 500 });
   }

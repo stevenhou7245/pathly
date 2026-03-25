@@ -25,7 +25,7 @@ export default function HelpHeader({ actions }: HelpHeaderProps) {
             const className =
               variant === "green"
                 ? "btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 text-base"
-                : "btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base !text-[#1F2937]";
+                : "btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base";
 
             return (
               <Link key={`${action.href}-${action.label}`} href={action.href} className={className}>
@@ -38,3 +38,4 @@ export default function HelpHeader({ actions }: HelpHeaderProps) {
     </header>
   );
 }
+

@@ -274,7 +274,7 @@ export default function ResetPasswordForm() {
                 type="button"
                 onClick={() => void loadCaptcha(true)}
                 disabled={isCaptchaLoading || isSubmitting}
-                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isCaptchaLoading ? "Refreshing..." : "Refresh"}
               </button>
@@ -336,3 +336,4 @@ export default function ResetPasswordForm() {
     </div>
   );
 }
+

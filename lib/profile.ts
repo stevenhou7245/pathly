@@ -9,6 +9,8 @@ export type PublicUserProfile = {
   email: string;
   age: number | null;
   avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   bio: string | null;
   motto: string | null;
   current_learning_field: string | null;
@@ -24,6 +26,9 @@ type UserRecord = {
   id: string;
   username: string;
   email: string;
+  avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
 };
 
 type UserProfileRecord = {
@@ -125,7 +130,7 @@ export async function getPublicUserProfileByUserId(
 ): Promise<PublicUserProfile | null> {
   const userResult = await supabaseAdmin
     .from("users")
-    .select("id, username, email")
+    .select("id, username, email, avatar_url, avatar_path, avatar_updated_at")
     .eq("id", userId)
     .limit(1)
     .maybeSingle<UserRecord>();
@@ -149,7 +154,9 @@ export async function getPublicUserProfileByUserId(
     username: userResult.data.username,
     email: userResult.data.email,
     age: profile?.age ?? null,
-    avatar_url: profile?.avatar_url ?? null,
+    avatar_url: userResult.data.avatar_url ?? profile?.avatar_url ?? null,
+    avatar_path: userResult.data.avatar_path ?? null,
+    avatar_updated_at: userResult.data.avatar_updated_at ?? null,
     bio: profile?.bio ?? null,
     motto: profile?.motto ?? null,
     current_learning_field: learningSnapshot.current_learning_field,

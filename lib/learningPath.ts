@@ -8,6 +8,7 @@ export const LEARNING_LEVELS = [
 
 export type LearningLevel = (typeof LEARNING_LEVELS)[number];
 export type LearningPathStepStatus = "completed" | "current" | "locked";
+export const LESSONS_PER_LEVEL_GAP = 4;
 
 const LEVEL_TO_VALUE: Record<LearningLevel, number> = {
   Beginner: 1,
@@ -24,9 +25,6 @@ const NORMALIZED_LEVEL_MAP: Record<string, LearningLevel> = {
   advanced: "Advanced",
   expert: "Expert",
 };
-
-const BASE_STEPS = 3;
-const EXTRA_STEPS_PER_GAP = 2;
 
 function toFiniteInteger(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -63,19 +61,14 @@ export function calculateTotalSteps(currentLevel: unknown, targetLevel: unknown)
   const currentValue = LEVEL_TO_VALUE[normalizedCurrent];
   const targetValue = LEVEL_TO_VALUE[normalizedTarget];
 
-  const distance = Math.max(0, Math.min(4, targetValue - currentValue));
-  if (distance <= 0) {
-    return BASE_STEPS;
-  }
-
-  // Treat each required progression stage as a gap unit.
-  // Example: Basic -> Advanced has 3 stages (Basic, Intermediate, Advanced) => 3 + 3*2 = 9.
-  const effectiveGap = distance + 1;
-  return BASE_STEPS + effectiveGap * EXTRA_STEPS_PER_GAP;
+  const levelDistance = Math.max(0, Math.min(4, targetValue - currentValue));
+  // Fixed rule: each adjacent level gap always equals 4 lessons.
+  // Example: Basic -> Expert => distance 3 => total_steps 12.
+  return levelDistance * LESSONS_PER_LEVEL_GAP;
 }
 
 export function normalizePathState(totalStepsValue: unknown, currentStepIndexValue: unknown) {
-  const fallbackTotal = BASE_STEPS;
+  const fallbackTotal = LESSONS_PER_LEVEL_GAP;
   const parsedTotal = toFiniteInteger(totalStepsValue);
   const totalSteps = parsedTotal > 0 ? parsedTotal : fallbackTotal;
 

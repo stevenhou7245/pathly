@@ -42,7 +42,7 @@ export default function ResourceDetailPanel({
           href={step.link}
           target="_blank"
           rel="noreferrer"
-          className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center !text-base !text-[#1F2937]"
+          className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center !text-base"
         >
           Open Resource
         </a>
@@ -70,3 +70,4 @@ export default function ResourceDetailPanel({
     </div>
   );
 }
+

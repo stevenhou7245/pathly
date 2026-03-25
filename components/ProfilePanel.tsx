@@ -12,6 +12,9 @@ type ProfileData = {
   username: string;
   email: string;
   age: number | null;
+  avatar_url: string | null;
+  avatar_path: string | null;
+  avatar_updated_at: string | null;
   motto: string | null;
   current_learning_field: string | null;
   current_level: string | null;
@@ -26,12 +29,23 @@ type ProfileApiResponse = {
     username: string;
     email: string;
     age: number | null;
+    avatar_url: string | null;
+    avatar_path: string | null;
+    avatar_updated_at: string | null;
     motto: string | null;
     current_learning_field: string | null;
     current_level: string | null;
     target_level: string | null;
     current_progress: number;
   };
+};
+
+type AvatarUploadApiResponse = {
+  success: boolean;
+  message?: string;
+  avatar_url?: string | null;
+  avatar_path?: string | null;
+  avatar_updated_at?: string | null;
 };
 
 type JourneySummaryLesson = {
@@ -63,6 +77,8 @@ type EditProfileValues = {
 
 const EMPTY_MOTTO_TEXT = "No motto right now.";
 const PROFILE_REQUEST_CACHE_TTL_MS = 2500;
+const MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_AVATAR_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const profileRequestInFlight = new Map<string, Promise<unknown>>();
 const profileRequestCache = new Map<string, { expiresAt: number; data: unknown }>();
 
@@ -188,6 +204,9 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
   const [profileError, setProfileError] = useState("");
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [avatarUploadError, setAvatarUploadError] = useState("");
+  const [avatarUploadSuccessMessage, setAvatarUploadSuccessMessage] = useState("");
   const [editError, setEditError] = useState("");
   const [saveSuccessMessage, setSaveSuccessMessage] = useState("");
   const [recentCompletedLessons, setRecentCompletedLessons] = useState<JourneySummaryLesson[]>(
@@ -205,6 +224,7 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
     motto: "",
   });
   const journeyPathRef = useRef<SVGPathElement | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadProfile = useCallback(async () => {
     setIsLoadingProfile(true);
@@ -228,6 +248,9 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
         username: payload.profile.username,
         email: payload.profile.email,
         age: payload.profile.age,
+        avatar_url: payload.profile.avatar_url,
+        avatar_path: payload.profile.avatar_path,
+        avatar_updated_at: payload.profile.avatar_updated_at,
         motto: payload.profile.motto,
         current_learning_field: payload.profile.current_learning_field,
         current_level: payload.profile.current_level,
@@ -436,6 +459,9 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
         username: payload.profile.username,
         email: payload.profile.email,
         age: payload.profile.age,
+        avatar_url: payload.profile.avatar_url,
+        avatar_path: payload.profile.avatar_path,
+        avatar_updated_at: payload.profile.avatar_updated_at,
         motto: payload.profile.motto,
         current_learning_field: payload.profile.current_learning_field,
         current_level: payload.profile.current_level,
@@ -455,13 +481,108 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
     }
   }
 
+  function openAvatarFilePicker() {
+    if (isUploadingAvatar || isLoadingProfile) {
+      return;
+    }
+    avatarInputRef.current?.click();
+  }
+
+  async function handleAvatarFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.target.files?.[0];
+    event.currentTarget.value = "";
+    if (!selectedFile) {
+      return;
+    }
+
+    setAvatarUploadError("");
+    setAvatarUploadSuccessMessage("");
+
+    if (!ALLOWED_AVATAR_MIME_TYPES.has(selectedFile.type)) {
+      setAvatarUploadError("Only JPEG, PNG, and WEBP images are allowed.");
+      return;
+    }
+
+    if (selectedFile.size <= 0 || selectedFile.size > MAX_AVATAR_SIZE_BYTES) {
+      setAvatarUploadError("Image is too large. Maximum size is 5MB.");
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const response = await fetch("/api/profile/avatar", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as AvatarUploadApiResponse;
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message ?? "Unable to upload avatar right now.");
+      }
+
+      setProfile((previous) => {
+        if (!previous) {
+          return previous;
+        }
+        return {
+          ...previous,
+          avatar_url: (payload.avatar_url ?? "").trim() || null,
+          avatar_path: (payload.avatar_path ?? "").trim() || null,
+          avatar_updated_at: (payload.avatar_updated_at ?? "").trim() || new Date().toISOString(),
+        };
+      });
+      profileRequestCache.delete("profile:data");
+      setAvatarUploadSuccessMessage("Avatar updated successfully.");
+      await loadProfile();
+      router.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to upload avatar right now.";
+      setAvatarUploadError(message);
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  }
+
   return (
     <section className="space-y-5">
       <div className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_8px_0_#1F2937,0_18px_28px_rgba(31,41,55,0.12)] sm:p-7">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-[#1F2937] bg-[#FFD84D] text-xl font-extrabold text-[#1F2937]">
-              {toInitial(profile?.username ?? "M")}
+            <div className="flex flex-col items-center gap-1">
+              <button
+                type="button"
+                onClick={openAvatarFilePicker}
+                disabled={isUploadingAvatar || isLoadingProfile}
+                className="group relative rounded-full border-2 border-[#1F2937] bg-[#FFD84D] transition disabled:cursor-not-allowed disabled:opacity-70"
+                aria-label="Upload avatar"
+              >
+                {profile?.avatar_url ? (
+                  <img
+                    src={profile.avatar_url}
+                    alt={`${profile.username} avatar`}
+                    className="h-16 w-16 rounded-full object-cover"
+                  />
+                ) : (
+                  <span className="flex h-16 w-16 items-center justify-center text-xl font-extrabold text-[#1F2937]">
+                    {toInitial(profile?.username ?? "M")}
+                  </span>
+                )}
+                <span className="pointer-events-none absolute inset-x-0 bottom-0 rounded-b-full bg-[#1F2937]/75 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-white opacity-0 transition group-hover:opacity-100">
+                  Upload
+                </span>
+              </button>
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleAvatarFileChange}
+                className="hidden"
+              />
+              <p className="text-[11px] font-semibold text-[#1F2937]/65">
+                {isUploadingAvatar ? "Uploading..." : "Click avatar to upload"}
+              </p>
             </div>
             <div>
               <h2 className="text-3xl font-extrabold text-[#1F2937]">My Profile</h2>
@@ -474,7 +595,7 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
             type="button"
             onClick={openEditModal}
             disabled={isLoadingProfile || !profile}
-            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base disabled:cursor-not-allowed disabled:opacity-70"
           >
             Edit Profile
           </button>
@@ -485,9 +606,19 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
             {profileError}
           </p>
         ) : null}
+        {avatarUploadError ? (
+          <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
+            {avatarUploadError}
+          </p>
+        ) : null}
         {saveSuccessMessage ? (
           <p className="mt-4 rounded-xl bg-[#f1fff1] px-3 py-2 text-sm font-semibold text-[#2e7d32]">
             {saveSuccessMessage}
+          </p>
+        ) : null}
+        {avatarUploadSuccessMessage ? (
+          <p className="mt-4 rounded-xl bg-[#f1fff1] px-3 py-2 text-sm font-semibold text-[#2e7d32]">
+            {avatarUploadSuccessMessage}
           </p>
         ) : null}
 
@@ -744,7 +875,7 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
                   type="button"
                   onClick={closeEditModal}
                   disabled={isSavingProfile}
-                  className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                  className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
                 >
                   Cancel
                 </button>
@@ -763,3 +894,4 @@ export default function ProfilePanel({ folder }: ProfilePanelProps) {
     </section>
   );
 }
+

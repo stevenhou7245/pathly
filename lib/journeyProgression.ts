@@ -885,14 +885,21 @@ export async function generateOrGetJourney(params: {
 
   const normalizedCurrentLevel = normalizeLearningLevel(params.startingPoint) as LearningLevel | null;
   const normalizedTargetLevel = normalizeLearningLevel(params.destination) as LearningLevel | null;
-  const fallbackTotalSteps = calculateTotalSteps(
+  const computedTotalSteps = calculateTotalSteps(
     normalizedCurrentLevel ?? params.startingPoint,
     normalizedTargetLevel ?? params.destination,
   );
-  const requestedTotalSteps =
-    params.desiredTotalSteps && Number.isFinite(params.desiredTotalSteps)
-      ? Math.max(1, Math.floor(params.desiredTotalSteps))
-      : fallbackTotalSteps;
+  const totalSteps = Math.max(1, computedTotalSteps);
+  if (
+    params.desiredTotalSteps &&
+    Number.isFinite(params.desiredTotalSteps) &&
+    Math.floor(params.desiredTotalSteps) !== totalSteps
+  ) {
+    logJourneyStep("requested_total_steps_ignored_fixed_level_gap_rule", {
+      requested_total_steps: Math.floor(params.desiredTotalSteps),
+      computed_total_steps: totalSteps,
+    });
+  }
   const fieldTitle = getFieldTitle(learningField);
   const preferenceProfile = await loadUserResourcePreferenceProfile(params.userId);
   const journeyTemplate = await resolveOrCreateJourneyTemplate({
@@ -901,16 +908,12 @@ export async function generateOrGetJourney(params: {
     fieldTitle,
     startLevel: normalizedCurrentLevel ?? params.startingPoint,
     targetLevel: normalizedTargetLevel ?? params.destination,
-    desiredTotalSteps: requestedTotalSteps,
+    desiredTotalSteps: totalSteps,
     userPreferenceProfile: preferenceProfile,
   });
-  const totalSteps = Math.max(
-    1,
-    requestedTotalSteps,
-    journeyTemplate.total_steps || 0,
-  );
   logJourneyStep("build_ordered_journey_steps:total_steps", {
     total_steps: totalSteps,
+    computed_total_steps: computedTotalSteps,
     normalized_current_level: normalizedCurrentLevel ?? null,
     normalized_target_level: normalizedTargetLevel ?? null,
     template_id: journeyTemplate.template_id,

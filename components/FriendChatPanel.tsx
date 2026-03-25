@@ -1,3 +1,6 @@
+import AvatarPreviewModal from "@/components/AvatarPreviewModal";
+import { useEffect, useRef, useState } from "react";
+
 type FriendListItem = {
   friendship_id: string;
   user_id: string;
@@ -25,9 +28,7 @@ type FriendChatPanelProps = {
   onDraftChange: (value: string) => void;
   onSendMessage: () => void;
   onOpenProfile: () => void;
-  onStudyTogether: () => void;
   isSendingMessage: boolean;
-  isSendingStudyInvitation: boolean;
 };
 
 function toInitial(value: string) {
@@ -70,10 +71,59 @@ export default function FriendChatPanel({
   onDraftChange,
   onSendMessage,
   onOpenProfile,
-  onStudyTogether,
   isSendingMessage,
-  isSendingStudyInvitation,
 }: FriendChatPanelProps) {
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const previousMessageCountRef = useRef(0);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [newMessagesCount, setNewMessagesCount] = useState(0);
+  const [isAvatarPreviewOpen, setIsAvatarPreviewOpen] = useState(false);
+
+  function scrollMessagesToBottom() {
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function checkIsAtBottom() {
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return true;
+    }
+    return container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
+  }
+
+  useEffect(() => {
+    previousMessageCountRef.current = 0;
+    requestAnimationFrame(() => {
+      setNewMessagesCount(0);
+      setIsAtBottom(true);
+      scrollMessagesToBottom();
+    });
+  }, [friend?.friendship_id]);
+
+  useEffect(() => {
+    const previousCount = previousMessageCountRef.current;
+    const hasNewMessages = messages.length > previousCount;
+
+    if (hasNewMessages) {
+      if (isAtBottom) {
+        requestAnimationFrame(() => {
+          scrollMessagesToBottom();
+          setNewMessagesCount(0);
+        });
+      } else {
+        requestAnimationFrame(() => {
+          setNewMessagesCount((count) => count + (messages.length - previousCount));
+        });
+      }
+    }
+
+    previousMessageCountRef.current = messages.length;
+  }, [isAtBottom, messages]);
+
   if (!friend) {
     return (
       <div className="flex min-h-[360px] items-center justify-center rounded-3xl border-2 border-dashed border-[#1F2937]/20 bg-[#F7FCFF] p-6 text-center">
@@ -88,17 +138,31 @@ export default function FriendChatPanel({
   }
 
   return (
-    <div className="rounded-3xl border-2 border-[#1F2937]/12 bg-white p-4 shadow-[0_5px_0_rgba(31,41,55,0.08)] sm:p-5">
+    <>
+      <div className="rounded-3xl border-2 border-[#1F2937]/12 bg-white p-4 shadow-[0_5px_0_rgba(31,41,55,0.08)] sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#1F2937]/10 pb-3">
         <div className="flex items-center gap-3">
-          <div className="relative flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/20 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937]">
-            {toInitial(friend.username)}
+          <button
+            type="button"
+            onClick={() => setIsAvatarPreviewOpen(true)}
+            className="relative flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/20 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937] transition hover:scale-[1.02]"
+            aria-label={`Preview ${friend.username} avatar`}
+          >
+            {friend.avatar_url ? (
+              <img
+                src={friend.avatar_url}
+                alt={`${friend.username} avatar`}
+                className="h-11 w-11 rounded-full object-cover"
+              />
+            ) : (
+              toInitial(friend.username)
+            )}
             <span
               className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white ${
                 friend.is_online ? "bg-[#58CC02]" : "bg-zinc-400"
               }`}
             />
-          </div>
+          </button>
           <div>
             <p className="text-lg font-extrabold text-[#1F2937]">{friend.username}</p>
             <p className="text-sm font-semibold text-[#1F2937]/65">
@@ -115,14 +179,6 @@ export default function FriendChatPanel({
           >
             View Profile
           </button>
-          <button
-            type="button"
-            onClick={onStudyTogether}
-            disabled={!friend.is_online || isSendingStudyInvitation}
-            className="rounded-full border-2 border-[#1F2937]/15 bg-[#58CC02]/15 px-4 py-2 text-sm font-bold text-[#1F2937] transition hover:border-[#58CC02]/60 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {isSendingStudyInvitation ? "Sending..." : "Study Together"}
-          </button>
         </div>
       </div>
 
@@ -130,7 +186,17 @@ export default function FriendChatPanel({
         {getStatusText(friend)}
       </p>
 
-      <div className="mt-4 flex h-60 flex-col gap-3 overflow-y-auto rounded-2xl border-2 border-[#1F2937]/10 bg-[#F9FCFF] p-3">
+      <div
+        ref={messagesContainerRef}
+        onScroll={() => {
+          const atBottom = checkIsAtBottom();
+          setIsAtBottom(atBottom);
+          if (atBottom) {
+            setNewMessagesCount(0);
+          }
+        }}
+        className="mt-4 flex h-60 flex-col gap-3 overflow-y-auto rounded-2xl border-2 border-[#1F2937]/10 bg-[#F9FCFF] p-3"
+      >
         {messages.length === 0 ? (
           <div className="my-auto text-center text-sm font-semibold text-[#1F2937]/65">
             No messages yet. Start the conversation.
@@ -157,6 +223,22 @@ export default function FriendChatPanel({
         )}
       </div>
 
+      {newMessagesCount > 0 && !isAtBottom ? (
+        <div className="mt-2 flex justify-center">
+          <button
+            type="button"
+            onClick={() => {
+              scrollMessagesToBottom();
+              setIsAtBottom(true);
+              setNewMessagesCount(0);
+            }}
+            className="rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] px-4 py-1.5 text-xs font-extrabold text-[#1F2937]"
+          >
+            New messages ({newMessagesCount})
+          </button>
+        </div>
+      ) : null}
+
       <div className="mt-4 flex flex-col gap-3 sm:flex-row">
         <input
           type="text"
@@ -174,7 +256,14 @@ export default function FriendChatPanel({
           {isSendingMessage ? "Sending..." : "Send"}
         </button>
       </div>
-    </div>
+      </div>
+      <AvatarPreviewModal
+        isOpen={isAvatarPreviewOpen}
+        avatarUrl={friend.avatar_url}
+        fallbackInitial={toInitial(friend.username)}
+        displayName={friend.username}
+        onClose={() => setIsAvatarPreviewOpen(false)}
+      />
+    </>
   );
 }
-

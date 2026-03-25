@@ -54,12 +54,22 @@ export async function POST(request: Request) {
 
     const { friendship_id, body: messageBody } = parsed.data;
 
+    console.info("[direct_messages] send_started", {
+      friendship_id,
+      sender_id: sessionUser.id,
+    });
+
     const access = await getAcceptedFriendshipForUser({
       friendshipId: friendship_id,
       userId: sessionUser.id,
     });
 
     if (!access.ok) {
+      console.warn("[direct_messages] send_forbidden", {
+        friendship_id,
+        sender_id: sessionUser.id,
+        code: access.code,
+      });
       if (access.code === "not_found") {
         const payload: SendMessageResponse = {
           success: false,
@@ -89,6 +99,13 @@ export async function POST(request: Request) {
       body: messageBody,
     });
 
+    console.info("[direct_messages] send_completed", {
+      friendship_id: access.friendship.id,
+      sender_id: sessionUser.id,
+      message_id: directMessage.id,
+      realtime_mode: "postgres_changes",
+    });
+
     const payload: SendMessageResponse = {
       success: true,
       message: "Message sent.",
@@ -96,7 +113,10 @@ export async function POST(request: Request) {
     };
 
     return NextResponse.json(payload, { status: 201 });
-  } catch {
+  } catch (error) {
+    console.error("[direct_messages] send_failed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
     const payload: SendMessageResponse = {
       success: false,
       message: "Unable to send message right now.",

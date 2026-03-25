@@ -26,7 +26,7 @@ export default function AuthHeader({
         <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
           <Link
             href={backHref}
-            className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base !text-[#1F2937]"
+            className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 text-base"
           >
             {backLabel}
           </Link>
@@ -46,3 +46,4 @@ export default function AuthHeader({
     </header>
   );
 }
+

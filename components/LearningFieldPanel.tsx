@@ -283,20 +283,40 @@ function formatDateTime(value: string) {
   }).format(parsed);
 }
 
-function getScoreBandMessage(score: number) {
+function getScoreBandFeedback(score: number) {
   if (score >= 100) {
-    return "Mark: 100  Excellent!";
+    return "Excellent!";
   }
   if (score >= 90) {
-    return `Mark: ${score}  Great Work!`;
+    return "Great Work!";
   }
   if (score >= 80) {
-    return `Mark: ${score}  Good Job!`;
+    return "Good Job!";
   }
   if (score >= 60) {
-    return `Mark: ${score}  Passed!`;
+    return "Passed!";
   }
-  return `Mark: ${score}  Continue Learning~`;
+  return "Continue Learning~";
+}
+
+function getScoreBandMessage(score: number) {
+  return `Mark: ${score}  ${getScoreBandFeedback(score)}`;
+}
+
+function getScoreBandEmoji(score: number) {
+  if (score >= 100) {
+    return "🏆";
+  }
+  if (score >= 90) {
+    return "🎉";
+  }
+  if (score >= 80) {
+    return "⭐";
+  }
+  if (score >= 60) {
+    return "🙂";
+  }
+  return "💪";
 }
 
 function getResultStatusIcon(status: "correct" | "partial" | "incorrect") {
@@ -333,11 +353,8 @@ function getNodeClassName(status: CourseNodeStatus, options?: { pop?: boolean })
   return `${base} cursor-not-allowed border-[#9CA3AF] bg-[#D1D5DB] text-[#6B7280] opacity-60${popClass}`;
 }
 
-function getConnectorClassName(current: CourseNodeStatus, next: CourseNodeStatus) {
+function getConnectorClassName(_current: CourseNodeStatus, next: CourseNodeStatus) {
   const active =
-    current === "passed" ||
-    current === "in_progress" ||
-    current === "ready_for_test" ||
     next === "passed" ||
     next === "in_progress" ||
     next === "ready_for_test" ||
@@ -408,6 +425,8 @@ export default function LearningFieldPanel({
   const [resultPopupPayload, setResultPopupPayload] = useState<{
     score: number;
     passed: boolean;
+    feedback: string;
+    emoji: string;
     message: string;
   } | null>(null);
   const [hasAnyPreviousTestAttempts, setHasAnyPreviousTestAttempts] = useState(false);
@@ -419,7 +438,6 @@ export default function LearningFieldPanel({
   const courseRequestIdRef = useRef(0);
   const journeyRef = useRef<JourneyData | null>(null);
   const nodePopTimeoutRef = useRef<number | null>(null);
-  const resultPopupTimeoutRef = useRef<number | null>(null);
   const initStatusByFieldRef = useRef<Map<string, JourneyInitStatus>>(new Map());
   const inFlightGenerateFieldRef = useRef<Map<string, Promise<JourneyData>>>(new Map());
 
@@ -505,9 +523,6 @@ export default function LearningFieldPanel({
     () => () => {
       if (nodePopTimeoutRef.current !== null) {
         window.clearTimeout(nodePopTimeoutRef.current);
-      }
-      if (resultPopupTimeoutRef.current !== null) {
-        window.clearTimeout(resultPopupTimeoutRef.current);
       }
     },
     [],
@@ -773,10 +788,6 @@ export default function LearningFieldPanel({
     setShowResultPopup(false);
     setResultPopupPayload(null);
     setHasAnyPreviousTestAttempts(false);
-    if (resultPopupTimeoutRef.current !== null) {
-      window.clearTimeout(resultPopupTimeoutRef.current);
-      resultPopupTimeoutRef.current = null;
-    }
     setRatingDraft({});
     setCommentDraft({});
   }, [folder.id]);
@@ -910,10 +921,6 @@ export default function LearningFieldPanel({
     setShowResultPopup(false);
     setResultPopupPayload(null);
     setHasAnyPreviousTestAttempts(false);
-    if (resultPopupTimeoutRef.current !== null) {
-      window.clearTimeout(resultPopupTimeoutRef.current);
-      resultPopupTimeoutRef.current = null;
-    }
   }
 
   function closeAiTestModal() {
@@ -922,7 +929,13 @@ export default function LearningFieldPanel({
     }
     setAiTestError("");
     setShowResultPopup(false);
+    setResultPopupPayload(null);
     setIsAiTestModalOpen(false);
+  }
+
+  function dismissResultPopup() {
+    setShowResultPopup(false);
+    setResultPopupPayload(null);
   }
 
   async function handleNodeClick(node: JourneyNode) {
@@ -1028,10 +1041,6 @@ export default function LearningFieldPanel({
     setAttemptHistory([]);
     setShowResultPopup(false);
     setResultPopupPayload(null);
-    if (resultPopupTimeoutRef.current !== null) {
-      window.clearTimeout(resultPopupTimeoutRef.current);
-      resultPopupTimeoutRef.current = null;
-    }
 
     try {
       const response = await fetch("/api/course/test/start", {
@@ -1316,19 +1325,15 @@ export default function LearningFieldPanel({
       setActiveUserTestId(reviewResult.user_test_id);
 
       const popupMessage = getScoreBandMessage(reviewResult.score);
+      const popupFeedback = getScoreBandFeedback(reviewResult.score);
       setResultPopupPayload({
         score: reviewResult.score,
         passed: reviewResult.passed,
+        feedback: popupFeedback,
+        emoji: getScoreBandEmoji(reviewResult.score),
         message: popupMessage,
       });
       setShowResultPopup(true);
-      if (resultPopupTimeoutRef.current !== null) {
-        window.clearTimeout(resultPopupTimeoutRef.current);
-      }
-      resultPopupTimeoutRef.current = window.setTimeout(() => {
-        setShowResultPopup(false);
-        resultPopupTimeoutRef.current = null;
-      }, 3000);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to submit AI test right now.";
       setAiTestError(message);
@@ -1451,7 +1456,7 @@ export default function LearningFieldPanel({
               force: true,
             });
           }}
-          className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937]"
+          className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm"
         >
           Refresh
         </button>
@@ -1488,8 +1493,8 @@ export default function LearningFieldPanel({
             </p>
           </div>
 
-          <div className="mt-6 max-h-[620px] overflow-y-auto pr-1">
-            <div className="flex flex-col items-center">
+          <div className="mt-7 max-h-[620px] overflow-y-auto pr-1 sm:mt-8">
+            <div className="flex flex-col items-center pt-2 sm:pt-3">
               {journey.nodes.map((node, index) => {
                 const nextNode = journey.nodes[index + 1];
                 const isLocked = node.status === "locked";
@@ -1497,30 +1502,32 @@ export default function LearningFieldPanel({
 
                 return (
                   <div key={node.course_id} className="flex flex-col items-center">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handleNodeClick(node);
-                      }}
-                      className={getNodeClassName(node.status, { pop: shouldPop })}
-                      aria-label={`${node.title} ${node.status}`}
-                    >
-                      {node.status === "passed" ? "✓" : node.step_number}
-                      {isLocked ? (
-                        <span className="absolute -right-1 -top-1 rounded-full bg-[#6B7280] px-1.5 py-0.5 text-[10px] font-extrabold text-white">
-                          🔒
-                        </span>
-                      ) : null}
-                      {node.passed_score ? (
-                        <span
-                          className={`absolute -right-2 -top-2 rounded-full border-2 border-[#1F2937] px-1.5 py-0.5 text-[10px] font-extrabold text-white ${
-                            node.passed_score >= 60 ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
-                          }`}
-                        >
-                          {node.passed_score}
-                        </span>
-                      ) : null}
-                    </button>
+                    <div className="journey-node-coin-wrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleNodeClick(node);
+                        }}
+                        className={`${getNodeClassName(node.status, { pop: shouldPop })} journey-node-coin`}
+                        aria-label={`${node.title} ${node.status}`}
+                      >
+                        {node.status === "passed" ? "✓" : node.step_number}
+                        {isLocked ? (
+                          <span className="absolute -right-1 -top-1 rounded-full bg-[#6B7280] px-1.5 py-0.5 text-[10px] font-extrabold text-white">
+                            🔒
+                          </span>
+                        ) : null}
+                        {node.passed_score ? (
+                          <span
+                            className={`absolute -right-2 -top-2 rounded-full border-2 border-[#1F2937] px-1.5 py-0.5 text-[10px] font-extrabold text-white ${
+                              node.passed_score >= 60 ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
+                            }`}
+                          >
+                            {node.passed_score}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
                     <p className="mt-2 max-w-[180px] text-center text-xs font-semibold text-[#1F2937]/70">
                       {node.title}
                     </p>
@@ -1615,7 +1622,7 @@ export default function LearningFieldPanel({
                         void handleStartCourse();
                       }}
                       disabled={isStartingCourse || !selectedResourceId}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       Continue learning
                     </button>
@@ -1627,7 +1634,7 @@ export default function LearningFieldPanel({
                         void handlePrepareTest();
                       }}
                       disabled={isPreparingTest || isSubmittingTest}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       {isPreparingTest ? "Preparing test..." : "Take AI Test"}
                     </button>
@@ -1655,7 +1662,7 @@ export default function LearningFieldPanel({
                         void handleLoadAttemptHistory({ openFirstAttempt: true });
                       }}
                       disabled={isSubmittingTest || isCheckingPreviousTests}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       {isCheckingPreviousTests
                         ? "Checking..."
@@ -1721,7 +1728,7 @@ export default function LearningFieldPanel({
                             void handleSubmitRating(resource.id);
                           }}
                           disabled={isSubmittingResourceAction}
-                          className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-4 !text-xs !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                          className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           Save Rating
                         </button>
@@ -1746,7 +1753,7 @@ export default function LearningFieldPanel({
                             void handleSubmitComment(resource.id);
                           }}
                           disabled={isSubmittingResourceAction}
-                          className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-4 !text-xs !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                          className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           Post Comment
                         </button>
@@ -1786,7 +1793,7 @@ export default function LearningFieldPanel({
                       isSubmittingResourceAction ||
                       isAiTestModalOpen
                     }
-                    className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                    className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
                   >
                     Close
                   </button>
@@ -1812,22 +1819,51 @@ export default function LearningFieldPanel({
                 type="button"
                 onClick={closeAiTestModal}
                 disabled={isPreparingTest || isSubmittingTest}
-                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
                 Back to Course
               </button>
             </div>
 
             {showResultPopup && resultPopupPayload ? (
-              <div className="pointer-events-none absolute right-6 top-6 z-20">
+              <div className="absolute right-6 top-6 z-20 w-[min(92vw,360px)]">
                 <div
-                  className={`rounded-2xl border-2 border-[#1F2937] px-4 py-3 font-extrabold shadow-[0_6px_0_#1F2937] ${
-                    resultPopupPayload.passed
-                      ? "bg-[#ECFFE1] text-sm text-[#1F2937]"
-                      : "bg-[#FFE3E3] text-base text-[#B91C1C]"
+                  className={`rounded-3xl border-2 border-[#1F2937] px-4 py-4 shadow-[0_8px_0_#1F2937,0_14px_24px_rgba(31,41,55,0.18)] ${
+                    resultPopupPayload.passed ? "bg-[#ECFFE1]" : "bg-[#FFE3E3]"
                   }`}
+                  role="status"
+                  aria-live="polite"
                 >
-                  {resultPopupPayload.message}
+                  <button
+                    type="button"
+                    onClick={dismissResultPopup}
+                    className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/80 text-base font-extrabold text-[#1F2937] transition hover:bg-white"
+                    aria-label="Close result popup"
+                  >
+                    ×
+                  </button>
+
+                  <div className="pr-8">
+                    <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/70">
+                      AI Test Result
+                    </p>
+                    <div className="mt-2 flex items-center gap-3">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/20 bg-white text-2xl">
+                        {resultPopupPayload.emoji}
+                      </span>
+                      <div>
+                        <p className="text-xl font-extrabold text-[#1F2937]">
+                          Mark: {resultPopupPayload.score}
+                        </p>
+                        <p className="text-sm font-semibold text-[#1F2937]/80">
+                          {resultPopupPayload.feedback}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="mt-2 text-xs font-semibold text-[#1F2937]/75">
+                      {resultPopupPayload.message}
+                    </p>
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -2061,7 +2097,7 @@ export default function LearningFieldPanel({
                       void handleLoadAttemptHistory({ openFirstAttempt: true });
                     }}
                     disabled={isLoadingAttemptHistory || isLoadingAttemptDetail}
-                    className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                    className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                   >
                     {isLoadingAttemptHistory ? "Loading..." : "Previous Tests with Answers"}
                   </button>
@@ -2081,7 +2117,7 @@ export default function LearningFieldPanel({
                 type="button"
                 onClick={closeAiTestModal}
                 disabled={isPreparingTest || isSubmittingTest}
-                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
                 Close
               </button>
@@ -2092,4 +2128,5 @@ export default function LearningFieldPanel({
     </section>
   );
 }
+
 

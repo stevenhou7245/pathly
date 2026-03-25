@@ -66,10 +66,15 @@ export async function PATCH(request: Request) {
       message: "System message marked as read.",
     };
     return NextResponse.json(payload);
-  } catch {
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("[messages_system_read] route_failed", {
+      route: "/api/messages/system/read",
+      reason,
+    });
     const payload: MarkSystemMessageReadResponse = {
       success: false,
-      message: "Unable to mark system message as read right now.",
+      message: reason || "Unable to mark system message as read right now.",
     };
     return NextResponse.json(payload, { status: 500 });
   }

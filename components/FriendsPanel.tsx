@@ -1,6 +1,9 @@
 "use client";
 
+import AvatarPreviewModal from "@/components/AvatarPreviewModal";
 import FriendChatPanel from "@/components/FriendChatPanel";
+import { mapDirectRealtimeMessage } from "@/lib/chatRealtime";
+import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type FriendListItem = {
@@ -93,12 +96,6 @@ type FriendProfileApiResponse = {
   profile?: FriendProfile;
 };
 
-type InviteStudyApiResponse = {
-  success: boolean;
-  message?: string;
-  invitation_id?: string;
-};
-
 type MessageStore = Record<string, DirectMessageItem[]>;
 type ProfileStore = Record<string, FriendProfile>;
 
@@ -168,6 +165,23 @@ function getRelationshipLabel(status: string | null) {
   return "";
 }
 
+function appendMessageUnique(
+  previous: MessageStore,
+  friendshipId: string,
+  message: DirectMessageItem,
+) {
+  const currentMessages = previous[friendshipId] ?? [];
+  if (currentMessages.some((item) => item.id === message.id)) {
+    return previous;
+  }
+  return {
+    ...previous,
+    [friendshipId]: [...currentMessages, message].sort((a, b) =>
+      (a.created_at ?? "").localeCompare(b.created_at ?? ""),
+    ),
+  };
+}
+
 export default function FriendsPanel() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [friends, setFriends] = useState<FriendListItem[]>([]);
@@ -187,10 +201,6 @@ export default function FriendsPanel() {
   const [profileError, setProfileError] = useState("");
   const [isLoadingProfile, setIsLoadingProfile] = useState(false);
 
-  const [isSendingStudyInvitation, setIsSendingStudyInvitation] = useState(false);
-  const [studyFeedback, setStudyFeedback] = useState("");
-  const [studyError, setStudyError] = useState("");
-
   const [isAddFriendModalOpen, setIsAddFriendModalOpen] = useState(false);
   const [searchUsername, setSearchUsername] = useState("");
   const [isSearching, setIsSearching] = useState(false);
@@ -201,6 +211,11 @@ export default function FriendsPanel() {
   const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [requestFeedback, setRequestFeedback] = useState("");
   const [requestError, setRequestError] = useState("");
+  const [avatarPreview, setAvatarPreview] = useState<{
+    avatarUrl: string | null;
+    fallbackInitial: string;
+    displayName: string;
+  } | null>(null);
   const latestLoadRequestIdRef = useRef(0);
   const fetchCountRef = useRef(0);
   const currentUserIdRef = useRef("");
@@ -216,6 +231,14 @@ export default function FriendsPanel() {
     () => (selectedFriend ? messagesByFriendship[selectedFriend.friendship_id] ?? [] : []),
     [messagesByFriendship, selectedFriend],
   );
+
+  function openAvatarPreview(params: {
+    avatarUrl: string | null;
+    fallbackInitial: string;
+    displayName: string;
+  }) {
+    setAvatarPreview(params);
+  }
 
   useEffect(() => {
     currentUserIdRef.current = currentUserId;
@@ -364,6 +387,100 @@ export default function FriendsPanel() {
     }
   }, [selectedFriendshipId]);
 
+  useEffect(() => {
+    if (!selectedFriendshipId || !currentUserId) {
+      return;
+    }
+
+    let active = true;
+    let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
+    try {
+      supabaseClient = getSupabaseBrowserClient();
+    } catch (error) {
+      console.warn("[direct_messages_realtime] client_init_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const channel = supabaseClient
+      .channel(`direct-messages:${selectedFriendshipId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "direct_messages",
+          filter: `friendship_id=eq.${selectedFriendshipId}`,
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const mapped = mapDirectRealtimeMessage(payload.new);
+          if (!mapped.id || mapped.friendship_id !== selectedFriendshipId) {
+            return;
+          }
+
+          if (
+            selectedFriend &&
+            mapped.sender_id !== currentUserId &&
+            mapped.sender_id !== selectedFriend.user_id
+          ) {
+            console.warn("[direct_messages_realtime] unauthorized_sender_ignored", {
+              friendship_id: selectedFriendshipId,
+              sender_id: mapped.sender_id,
+              expected_user_ids: [currentUserId, selectedFriend.user_id],
+            });
+            return;
+          }
+
+          console.info("[direct_messages_realtime] message_received", {
+            conversation_id: mapped.conversation_id,
+            friendship_id: mapped.friendship_id,
+            sender_id: mapped.sender_id,
+            message_id: mapped.id,
+          });
+
+          setMessagesByFriendship((previous) =>
+            appendMessageUnique(previous, selectedFriendshipId, {
+              id: mapped.id,
+              friendship_id: mapped.friendship_id,
+              sender_id: mapped.sender_id,
+              body: mapped.body,
+              is_read: mapped.is_read,
+              created_at: mapped.created_at,
+            }),
+          );
+        },
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          console.info("[direct_messages_realtime] subscription_succeeded", {
+            conversation_id: selectedFriendshipId,
+          });
+          return;
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("[direct_messages_realtime] subscription_failed", {
+            conversation_id: selectedFriendshipId,
+            status,
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      console.info("[direct_messages_realtime] subscription_cleanup", {
+        conversation_id: selectedFriendshipId,
+      });
+      void channel.unsubscribe();
+      if (supabaseClient) {
+        void supabaseClient.removeChannel(channel);
+      }
+    };
+  }, [currentUserId, selectedFriend, selectedFriendshipId]);
+
   async function handleSendMessage() {
     const text = draftMessage.trim();
     if (!selectedFriend || !text) {
@@ -391,17 +508,23 @@ export default function FriendsPanel() {
       }
       const directMessage = payload.direct_message;
 
+      console.info("[direct_messages] send_succeeded", {
+        conversation_id: selectedFriend.friendship_id,
+        message_id: directMessage.id,
+        sender_id: directMessage.sender_id,
+      });
+
       setMessagesByFriendship((previous) => {
-        const currentMessages = previous[selectedFriend.friendship_id] ?? [];
-        return {
-          ...previous,
-          [selectedFriend.friendship_id]: [...currentMessages, directMessage],
-        };
+        return appendMessageUnique(previous, selectedFriend.friendship_id, directMessage);
       });
       setDraftMessage("");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to send message right now.";
+      console.error("[direct_messages] send_failed", {
+        conversation_id: selectedFriend.friendship_id,
+        reason: message,
+      });
       setMessageError(message);
     } finally {
       setIsSendingMessage(false);
@@ -449,47 +572,6 @@ export default function FriendsPanel() {
       setProfileError(message);
     } finally {
       setIsLoadingProfile(false);
-    }
-  }
-
-  async function handleStudyTogether() {
-    if (!selectedFriend || !selectedFriend.is_online) {
-      return;
-    }
-
-    setIsSendingStudyInvitation(true);
-    setStudyFeedback("");
-    setStudyError("");
-
-    try {
-      const cachedProfile = friendProfiles[selectedFriend.user_id] ?? null;
-      const learningFieldId = cachedProfile?.current_learning_field?.field_id ?? undefined;
-
-      const response = await fetch("/api/study/invite", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          receiver_user_id: selectedFriend.user_id,
-          learning_field_id: learningFieldId,
-        }),
-      });
-
-      const payload = (await response.json()) as InviteStudyApiResponse;
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.message ?? "Unable to send study invitation right now.");
-      }
-
-      setStudyFeedback(payload.message ?? "Study invitation sent.");
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Unable to send study invitation right now.";
-      setStudyError(message);
-    } finally {
-      setIsSendingStudyInvitation(false);
     }
   }
 
@@ -621,14 +703,14 @@ export default function FriendsPanel() {
                 reason: "manual_refresh",
               });
             }}
-            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-sm !text-[#1F2937]"
+            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-sm"
           >
             Refresh
           </button>
           <button
             type="button"
             onClick={openAddFriendModal}
-            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base !text-[#1F2937]"
+            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-base"
           >
             Add Friend
           </button>
@@ -645,17 +727,6 @@ export default function FriendsPanel() {
           {messageError}
         </p>
       ) : null}
-      {studyFeedback ? (
-        <p className="mt-4 rounded-xl bg-[#ecffe1] px-3 py-2 text-sm font-semibold text-[#2f7d14]">
-          {studyFeedback}
-        </p>
-      ) : null}
-      {studyError ? (
-        <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
-          {studyError}
-        </p>
-      ) : null}
-
       <div className="mt-6 grid gap-5 lg:grid-cols-[300px_minmax(0,1fr)]">
         <div className="rounded-3xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-3">
           {isLoadingFriends ? (
@@ -671,10 +742,17 @@ export default function FriendsPanel() {
               {friends.map((friend) => {
                 const isActive = selectedFriendshipId === friend.friendship_id;
                 return (
-                  <button
+                  <div
                     key={friend.friendship_id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelectedFriendshipId(friend.friendship_id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedFriendshipId(friend.friendship_id);
+                      }
+                    }}
                     className={`w-full rounded-2xl border-2 px-3 py-3 text-left transition ${
                       isActive
                         ? "border-[#1F2937] bg-[#58CC02]/15 shadow-[0_4px_0_#1f2937]"
@@ -682,14 +760,34 @@ export default function FriendsPanel() {
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <div className="relative flex h-10 w-10 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-xs font-extrabold text-[#1F2937]">
-                        {toInitial(friend.username)}
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openAvatarPreview({
+                            avatarUrl: friend.avatar_url,
+                            fallbackInitial: toInitial(friend.username),
+                            displayName: friend.username,
+                          });
+                        }}
+                        className="relative flex h-10 w-10 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-xs font-extrabold text-[#1F2937] transition hover:scale-[1.02]"
+                        aria-label={`Preview ${friend.username} avatar`}
+                      >
+                        {friend.avatar_url ? (
+                          <img
+                            src={friend.avatar_url}
+                            alt={`${friend.username} avatar`}
+                            className="h-10 w-10 rounded-full object-cover"
+                          />
+                        ) : (
+                          toInitial(friend.username)
+                        )}
                         <span
                           className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white ${
                             friend.is_online ? "bg-[#58CC02]" : "bg-zinc-400"
                           }`}
                         />
-                      </div>
+                      </button>
                       <div className="min-w-0">
                         <p className="truncate text-sm font-extrabold text-[#1F2937]">
                           {friend.username}
@@ -699,7 +797,7 @@ export default function FriendsPanel() {
                         </p>
                       </div>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -722,11 +820,7 @@ export default function FriendsPanel() {
             onOpenProfile={() => {
               void handleOpenProfile();
             }}
-            onStudyTogether={() => {
-              void handleStudyTogether();
-            }}
             isSendingMessage={isSendingMessage}
-            isSendingStudyInvitation={isSendingStudyInvitation}
           />
         </div>
       </div>
@@ -744,9 +838,28 @@ export default function FriendsPanel() {
               <>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-base font-extrabold text-[#1F2937]">
-                      {toInitial(selectedProfile.username)}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openAvatarPreview({
+                          avatarUrl: selectedProfile.avatar_url,
+                          fallbackInitial: toInitial(selectedProfile.username),
+                          displayName: selectedProfile.username,
+                        })
+                      }
+                      className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-base font-extrabold text-[#1F2937] transition hover:scale-[1.02]"
+                      aria-label={`Preview ${selectedProfile.username} avatar`}
+                    >
+                      {selectedProfile.avatar_url ? (
+                        <img
+                          src={selectedProfile.avatar_url}
+                          alt={`${selectedProfile.username} avatar`}
+                          className="h-12 w-12 rounded-full object-cover"
+                        />
+                      ) : (
+                        toInitial(selectedProfile.username)
+                      )}
+                    </button>
                     <div>
                       <h3 className="text-2xl font-extrabold text-[#1F2937]">
                         {selectedProfile.username}
@@ -817,7 +930,7 @@ export default function FriendsPanel() {
                   setSelectedProfile(null);
                   setProfileError("");
                 }}
-                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937]"
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6"
               >
                 Close
               </button>
@@ -867,19 +980,48 @@ export default function FriendsPanel() {
             ) : null}
 
             {searchResult ? (
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => {
                   setSelectedSearchUser(searchResult);
                   setRequestFeedback("");
                   setRequestError("");
                 }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedSearchUser(searchResult);
+                    setRequestFeedback("");
+                    setRequestError("");
+                  }
+                }}
                 className="mt-4 w-full rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4 text-left transition hover:border-[#58CC02]/45 hover:bg-[#F0FFE3]"
               >
                 <div className="flex items-center gap-3">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937]">
-                    {toInitial(searchResult.username)}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openAvatarPreview({
+                        avatarUrl: searchResult.avatar_url,
+                        fallbackInitial: toInitial(searchResult.username),
+                        displayName: searchResult.username,
+                      });
+                    }}
+                    className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-sm font-extrabold text-[#1F2937] transition hover:scale-[1.02]"
+                    aria-label={`Preview ${searchResult.username} avatar`}
+                  >
+                    {searchResult.avatar_url ? (
+                      <img
+                        src={searchResult.avatar_url}
+                        alt={`${searchResult.username} avatar`}
+                        className="h-11 w-11 rounded-full object-cover"
+                      />
+                    ) : (
+                      toInitial(searchResult.username)
+                    )}
+                  </button>
                   <div className="min-w-0">
                     <p className="truncate text-base font-extrabold text-[#1F2937]">
                       {searchResult.username}
@@ -889,7 +1031,7 @@ export default function FriendsPanel() {
                     </p>
                   </div>
                 </div>
-              </button>
+              </div>
             ) : null}
 
             <div className="mt-5 flex justify-end">
@@ -897,7 +1039,7 @@ export default function FriendsPanel() {
                 type="button"
                 onClick={closeAddFriendModal}
                 disabled={isSearching}
-                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
               >
                 Close
               </button>
@@ -911,9 +1053,28 @@ export default function FriendsPanel() {
           <div className="w-full max-w-xl rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-7 motion-modal-content">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-base font-extrabold text-[#1F2937]">
-                  {toInitial(selectedSearchUser.username)}
-                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openAvatarPreview({
+                      avatarUrl: selectedSearchUser.avatar_url,
+                      fallbackInitial: toInitial(selectedSearchUser.username),
+                      displayName: selectedSearchUser.username,
+                    })
+                  }
+                  className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-[#1F2937]/15 bg-[#FFD84D] text-base font-extrabold text-[#1F2937] transition hover:scale-[1.02]"
+                  aria-label={`Preview ${selectedSearchUser.username} avatar`}
+                >
+                  {selectedSearchUser.avatar_url ? (
+                    <img
+                      src={selectedSearchUser.avatar_url}
+                      alt={`${selectedSearchUser.username} avatar`}
+                      className="h-12 w-12 rounded-full object-cover"
+                    />
+                  ) : (
+                    toInitial(selectedSearchUser.username)
+                  )}
+                </button>
                 <div>
                   <h3 className="text-2xl font-extrabold text-[#1F2937]">
                     {selectedSearchUser.username}
@@ -975,7 +1136,7 @@ export default function FriendsPanel() {
                 type="button"
                 onClick={() => setSelectedSearchUser(null)}
                 disabled={isSendingRequest}
-                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-[#1F2937] disabled:cursor-not-allowed disabled:opacity-70"
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
               >
                 Close
               </button>
@@ -983,6 +1144,15 @@ export default function FriendsPanel() {
           </div>
         </div>
       ) : null}
+
+      <AvatarPreviewModal
+        isOpen={Boolean(avatarPreview)}
+        avatarUrl={avatarPreview?.avatarUrl ?? null}
+        fallbackInitial={avatarPreview?.fallbackInitial ?? "M"}
+        displayName={avatarPreview?.displayName ?? "Avatar"}
+        onClose={() => setAvatarPreview(null)}
+      />
     </section>
   );
 }
+

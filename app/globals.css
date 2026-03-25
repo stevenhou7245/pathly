@@ -28,6 +28,9 @@ body {
 :root[data-theme="dark"] {
   --background: #0f1724;
   --foreground: #e5edf8;
+  --button-text-dark: var(--foreground);
+  --button-text-on-bright: #1f2937;
+  --button-text-dark-muted: rgba(229, 237, 248, 0.72);
 }
 
 :root[data-theme="dark"] body {
@@ -83,11 +86,55 @@ body {
   --btn-edge: #334155;
   border-color: #475569;
   background-color: #1f2937;
-  color: #e2e8f0;
+  color: var(--button-text-dark) !important;
 }
 
 :root[data-theme="dark"] .btn-3d-white:hover {
   background-color: #334155;
+}
+
+/* Centralized dark-mode button text strategy:
+   1) default button text uses the same readable token as dark foreground
+   2) bright-background buttons use dark text for contrast
+   3) nested spans/icons inherit button text color
+*/
+:root[data-theme="dark"] button,
+:root[data-theme="dark"] .btn-3d,
+:root[data-theme="dark"] .btn-3d-white {
+  color: var(--button-text-dark) !important;
+}
+
+:root[data-theme="dark"] button[class*="!text-"],
+:root[data-theme="dark"] button span[class*="!text-"],
+:root[data-theme="dark"] button svg[class*="!text-"] {
+  color: var(--button-text-dark) !important;
+}
+
+:root[data-theme="dark"] button[class*="bg-[#FFD84D"],
+:root[data-theme="dark"] button[class*="bg-[#58CC02"],
+:root[data-theme="dark"] button[class*="bg-[#E9FFD8"],
+:root[data-theme="dark"] button[class*="bg-[#FFF9DD"],
+:root[data-theme="dark"] button[class*="bg-[#FFF7CF"] {
+  color: var(--button-text-on-bright) !important;
+}
+
+:root[data-theme="dark"] .btn-3d-green {
+  color: #ffffff !important;
+}
+
+:root[data-theme="dark"] button span,
+:root[data-theme="dark"] button svg,
+:root[data-theme="dark"] .btn-3d span,
+:root[data-theme="dark"] .btn-3d svg {
+  color: inherit !important;
+  fill: currentColor;
+  stroke: currentColor;
+}
+
+:root[data-theme="dark"] button:disabled,
+:root[data-theme="dark"] button:disabled span,
+:root[data-theme="dark"] button:disabled svg {
+  color: var(--button-text-dark-muted) !important;
 }
 
 :root[data-animations="off"] *,
@@ -193,6 +240,27 @@ button:hover {
   }
 }
 
+@keyframes journey-node-coin-flip {
+  0% {
+    transform: rotateY(0deg) rotateX(0deg) scale(1);
+  }
+  18% {
+    transform: rotateY(120deg) rotateX(8deg) scale(1.03);
+  }
+  42% {
+    transform: rotateY(360deg) rotateX(12deg) scale(1.09);
+  }
+  68% {
+    transform: rotateY(560deg) rotateX(6deg) scale(1.06);
+  }
+  86% {
+    transform: rotateY(680deg) rotateX(2deg) scale(1.02);
+  }
+  100% {
+    transform: rotateY(720deg) rotateX(0deg) scale(1);
+  }
+}
+
 :root[data-animations="on"] button:not(:disabled):not(.btn-3d) {
   transition: transform 0.16s ease-out, box-shadow 0.16s ease-out, background-color 0.16s ease-out,
     color 0.16s ease-out, border-color 0.16s ease-out;
@@ -231,14 +299,31 @@ button:hover {
     border-color 0.18s ease-out, box-shadow 0.18s ease-out;
 }
 
-:root[data-animations="on"] .motion-journey-node.is-clickable:hover {
+:root[data-animations="on"] .motion-journey-node.is-clickable:not(.journey-node-coin):hover {
   transform: translateY(-2px) scale(1.03);
 }
 
-:root[data-animations="on"] .motion-journey-node.is-clickable:active {
+:root[data-animations="on"] .motion-journey-node.is-clickable:not(.journey-node-coin):active {
   transform: scale(0.98);
 }
 
 :root[data-animations="on"] .motion-node-pop {
   animation: node-pop-in 0.24s ease-out;
+}
+
+:root[data-animations="on"] .journey-node-coin-wrap {
+  perspective: 920px;
+}
+
+:root[data-animations="on"] .journey-node-coin {
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :root[data-animations="on"] .journey-node-coin.is-clickable:hover {
+    animation: journey-node-coin-flip 1.2s cubic-bezier(0.18, 0.78, 0.22, 1) 1 both;
+  }
 }

@@ -43,7 +43,7 @@ export default function AuthGatePage() {
                 </Link>
                 <Link
                   href="/register"
-                  className="btn-3d btn-3d-white inline-flex h-12 items-center justify-center px-7 !text-[#1F2937]"
+                  className="btn-3d btn-3d-white inline-flex h-12 items-center justify-center px-7"
                 >
                   Sign Up
                 </Link>
@@ -111,3 +111,4 @@ export default function AuthGatePage() {
     </div>
   );
 }
+

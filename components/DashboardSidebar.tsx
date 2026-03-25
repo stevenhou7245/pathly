@@ -10,10 +10,19 @@ type DashboardSidebarProps = {
   onSelectFolder: (folderId: string) => void;
   onRequestDeleteFolder: (folder: LearningFolder) => void;
   onSelectView: (view: Exclude<DashboardView, "field">) => void;
+  onSelectStudyRoom: (roomId: string) => void;
   onOpenAddFieldModal: () => void;
   messagesUnreadCount?: number;
   loadingFolderId?: string | null;
   deletingFolderId?: string | null;
+  studyRooms?: Array<{
+    id: string;
+    name: string;
+    style: string;
+    role: string;
+    status: string;
+  }>;
+  activeStudyRoomId?: string;
 };
 
 type UtilityItem = {
@@ -25,6 +34,7 @@ const UTILITY_ITEMS: UtilityItem[] = [
   { id: "profile", label: "Profile" },
   { id: "friends", label: "Friends" },
   { id: "messages", label: "Messages" },
+  { id: "study_rooms", label: "Study Rooms" },
   { id: "more", label: "More" },
 ];
 
@@ -58,6 +68,16 @@ function UtilityIcon({ item }: { item: UtilityItem["id"] }) {
     );
   }
 
+  if (item === "study_rooms") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="4.2" y="6.5" width="15.6" height="11" rx="1.8" />
+        <path d="M8 11.5h8" />
+        <path d="M8 14.5h5" />
+      </svg>
+    );
+  }
+
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="6" cy="12" r="1.4" />
@@ -74,10 +94,13 @@ export default function DashboardSidebar({
   onSelectFolder,
   onRequestDeleteFolder,
   onSelectView,
+  onSelectStudyRoom,
   onOpenAddFieldModal,
   messagesUnreadCount = 0,
   loadingFolderId = null,
   deletingFolderId = null,
+  studyRooms = [],
+  activeStudyRoomId = "",
 }: DashboardSidebarProps) {
   return (
     <>
@@ -152,6 +175,29 @@ export default function DashboardSidebar({
                   {shouldShowBadge ? <UnreadBadge count={messagesUnreadCount} /> : null}
                 </span>
                 {item.label}
+              </button>
+            );
+          })}
+
+          {studyRooms.map((room) => {
+            const isActive = activeView === "study_rooms" && room.id === activeStudyRoomId;
+            return (
+              <button
+                key={room.id}
+                type="button"
+                onClick={() => {
+                  onSelectStudyRoom(room.id);
+                }}
+                className={`inline-flex shrink-0 items-center gap-2 rounded-full border-2 px-3 py-2 text-sm font-bold transition ${
+                  isActive
+                    ? "border-[#1F2937] bg-[#58CC02] text-white shadow-[0_3px_0_#1f2937]"
+                    : "border-[#1F2937]/15 bg-white text-[#1F2937] hover:border-[#58CC02]/45 hover:bg-[#58CC02]/10"
+                }`}
+              >
+                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/80 text-[10px] font-extrabold text-[#1F2937]">
+                  R
+                </span>
+                {room.name}
               </button>
             );
           })}
@@ -261,6 +307,42 @@ export default function DashboardSidebar({
                   </button>
                 );
               })}
+            </div>
+
+            <div className="mt-5 border-t-2 border-dashed border-[#1F2937]/10 pt-4">
+              <p className="rounded-full border-2 border-[#1F2937]/15 bg-[#E9FFD8] px-3 py-1 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/70">
+                Active Rooms
+              </p>
+              {studyRooms.length === 0 ? (
+                <p className="mt-3 text-xs font-semibold text-[#1F2937]/60">
+                  No active room yet.
+                </p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {studyRooms.map((room) => {
+                    const isActive = activeView === "study_rooms" && room.id === activeStudyRoomId;
+                    return (
+                      <button
+                        key={room.id}
+                        type="button"
+                        onClick={() => {
+                          onSelectStudyRoom(room.id);
+                        }}
+                        className={`w-full rounded-xl border-2 px-3 py-2 text-left transition ${
+                          isActive
+                            ? "border-[#1F2937] bg-[#58CC02]/18 shadow-[0_3px_0_#1f2937]"
+                            : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/45 hover:bg-[#F0FFE3]"
+                        }`}
+                      >
+                        <p className="truncate text-sm font-extrabold text-[#1F2937]">{room.name}</p>
+                        <p className="truncate text-[11px] font-semibold text-[#1F2937]/62">
+                          {room.style} · {room.role}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>

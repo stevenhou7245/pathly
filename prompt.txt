@@ -1,0 +1,104 @@
+现在的study room如图：有一些设计的问题： 1. 现在的room虽然有创建的时间，最好房间右下角设计一下房间创建的持续时间，然后时间到了预计时间就会弹出提醒弹窗给创建者：提醒用户房间时间已到，给用户两个选择：一. 关闭房间 二. 继续开房，然后可以接着输入房间的持续时间。 2. room的ID和密码显示旁边设计一个copy的元素，可以让用户直接复制给其他人。并且再设计一个按钮，创建者可以直接邀请朋友进入房间，接收到的朋友在messages中找到邀请，点击确认后即可进入房间。 3. 创建者点击close room会弹窗提醒 让用户确认是否要提前关闭房间，点击确认则房间关闭。并且创建者不可以点击离开房间。其他用户只能点击离开房间，不显示关闭room的按钮。其他用户点击关闭房间也会弹窗确认。 然后房间里发消息也会所有用户立刻同步，不需要刷新，并且每条消息要显示来源，是哪个用户发的。 写出prompt让CodeX修改.
+
+
+现在创建完study room之后，出现报错： Failed to load room participants. table=study_room_participants room_id=c0f080ec-f909-4cd3-9522-b5e122ccde53 user_id=d03dadf8-a4a2-4f58-ae67-46ad178dc1b3 reason=Could not find a relationship between 'study_room_participants' and 'users' in the schema cache 并且使用network查看后，问题是：http://localhost:3001/api/study-room/c0f080ec-f909-4cd3-9522-b5e122ccde53
+请求方法
+GET
+状态代码
+500 Internal Server Error
+远程地址
+[::1]:3001
+引荐来源网址政策
+strict-origin-when-cross-origin {    
+"success": false,    
+"message": "Failed to load room participants. table=study_room_participants room_id=c0f080ec-f909-4cd3-9522-b5e122ccde53 user_id=d03dadf8-a4a2-4f58-ae67-46ad178dc1b3 reason=Could not find a relationship between 'study_room_participants' and 'users' in the schema cache"
+} 仔细分析问题
+
+
+我现在还想设计一下有关animation的效果：当用户打开animation的开关之后，用户的鼠标hover到每个课程的圆圈上时，圆圈会翻转起来，像掷硬币一样，翻转一圈然后停止。如何实现这样的动画效果？
+
+
+现在还有一个设计的问题：现在用户和朋友在聊天框里聊天时，虽然消息发出去了，但是没有办法同步，可能要刷新、等待才可能在对方的聊天框中也出现。写出prompt让CodeX帮助我进行修改。
+
+
+现在想要更灵活，扩展性更好，引入以下的功能：
+	1.	引入多用户 session
+	2.	可选直接创建 session（即时加入） 然后你再设计一下，多用户参加到一个session之后，可以开展哪些行为？然后学习室的创建是不是可以放在用户的dashboard的左侧bar里面？然后我的设想是：创建学习室时用户可以选择持续时间，以及学习室的风格。然后创建成功之后会提供给创建的用户房间号以及密码让用户可以邀请其他用户。然后进入学习室的页面你可以根据风格进行设计。并且学习室里面可以开展的活动你也可以设计，尽量要增加一些用户之间的交互和交流。然后还要设计房间的退出等完善功能。此外根据这样的设计，对数据库的改动有哪些？写出所有需要的SQL命令，以及完整的prompt给CodeX进行功能的创建。然后创建房间后用户也可以直接邀请在线的朋友来使用。你需要先把当前两个人共同学习的邀请以及开展等功能都先删除了，然后改成创建学习室的功能。
+
+
+还有个与新建的official_messages有关的功能实现，official消息的发送和接收功能（针对用户的role，普通用户不能发，只能接收），写出详细清晰的prompt来让CodeX修改。
+
+
+现在的问题是： 当用户点击自己的messages box时，friend_requests显示没有问题，但是system messages和study invitations的显示都有问题。问题类似，比如：请求网址
+https://pathly-blush.vercel.app/api/messages/system
+请求方法
+GET
+状态代码
+500 Internal Server Error
+远程地址
+64.29.17.195:443
+引荐来源网址政策
+strict-origin-when-cross-origin {"success":false,"message":"Unable to load official messages right now."} 那么问题出在哪里呢？并且我测试发现，其他用户点击朋友的study together请求按钮后，被请求的用户的message box会有提醒的音效，也会显示有1个消息，但是点开messages还是没有消息。那么问题出在哪里哦？
+
+好的，现在基本上能够运行了。还有一些需要修改的小地方：1. 在测试题目的生成中，无论是什么领域的什么课程，尽量要设计更实践一些的内容，减少概念性的内容。比如在ML的第一课python中，题目的题干尽量就写一段代码，然后选项可以是让用户写出模拟运行的结果。 2. 在填空题和简答题中，也尽量不要是概念题，最好是实践题，然后能够接受的答案就是包含所有关键词关键信息就正确，包含部分则部分正确，不包含则错误。 写出详细清晰的prompt让CodeX完善设计。
+
+现在能够生成测试题目了。但是有一些问题：1. 生成的简答题只有题目，没有答题的空白区域，导致用户无法答题提交。 2. 同一个用户在同一个课程重复考试时，题目会不一样，可以先在数据库中找，如果有一套与previous_test不一样的模版，就直接使用。否则会使用AI生成的题目。但是如果不同的用户同一个课程考试，如果数据库里有测试题目，可以直接使用，不需要再去生成。根据我的需求，写出prompt让CodeX进行针对性修改。要写的很具体很清晰。
+
+现在的问题是 我添加了点击学习就讲课程资源选择存入数据库之前，有一些课程就已经学习了。所以要再次设计，点击continue learning之后，还是会将资源的选择插入数据库，如果本来就有则更新
+
+
+你把这几点我需要把哪一段代码换成什么代码说清楚：	2.	给 insertTemplateQuestions 增加题型分布校验。
+	3.	给 findReusableTemplate 增加新规则校验，不要只看 count > 0。
+	4.	不要让 fallback 错误覆盖原始错误，保留真实 message。
+	5.	把 options/acceptable_answers/skill_tags/concept_tags 在 schema 里直接 transform 成数组。
+
+我的目的是：统一题型为：multiple_choice
+fill_blank
+short_answer三类型。 每一次出题都是：多选题和填空题加起来7道，每一道10分。最后的简答题两道，每道15分。一共100分。 然后删除所有旧的skill_tag和concept_tag的逻辑。 写出详细仔细的prompt让CodeX修改 并且把test.ts和app/api/test/route.js里面的格式要统一，防止再报错。
+
+
+现在资源可以加载了，点击开始学习也可以学习了，但是显示这些资源没办法评分和评论，是因为数据表里面没有这些列吗
+
+
+这是course_resource_options的结构，有没有哪些列没有必要？有没有需要添加什么列？我求你了，修改之后，让deepseek返回的数据结构要严格遵循修改后的表格结构。
+
+
+好的，按照你现在的设计，我现在把Tavily的API加在了环境变量中，你写出详细的prompt，将后端调用搜索API然后利用DeepSeek筛选输出然后和前端以及数据库的interaction的示例都写清楚，让CodeX了解整个的流程，并且提供给deepseek的提示词要清晰，详细，让DeepSeek充分思考并给出结果。 
+
+
+现在AI模型可以生成课程 每个课程也有内容。但是我发现几个问题： 1.  数据库中课程的资源的link如图，很多都是虚假的，没有办法访问的。并且能够访问的url点开也并不是直接是资源，而是在搜索引擎输入内容后出现的页面，我需要用户点击开始学习后就直接跳转到资源的网页 不需要用户别的操作。 2. 对于AI输出的内容，比如课程设计和课程资源，存入数据库中之后，再次点击课程之后就不需要AI再生成，直接从数据库中加载即可。写出prompt来让CodeX修改，尤其是提供给deepseek模型的课程资源生成的提示词需要详细修改，要先进行全网搜索，然后再进行内容的生成。
+
+
+左侧bar中每个课程还是没有删除的按钮。问题出在哪里，写出prompt让CodeX修改
+
+
+如何删除用户的学习领域？你写一段prompt，让CodeX写出来，用户在dashboard上，每一个学习领域的文件夹的右上角都有一个删除（叉号），点击了之后会先跳出来弹窗询问用户是否要删除？如果用户点击确认，则会删除这个领域的内容，也同时会在数据库中删除相关的表格的内容（删除和该用户以及该课程相关的表格的内容），对于生成的存储在共享的表格供AI查询的课程内容，可以保留不删除。写出完整详细的prompt。
+
+现在的问题是：我如何完成在用户输入新的领域时，先访问数据库查看有没有类似的或者一致的课程信息，如果有就直接调用信息，然后返回到前端进行课程的显示。如果没有，则先输入给AI 模型，由AI模型输出课程的设置，然后返回JSON数据，再用前端进行课程的显示。
+
+
+Failed to load study rooms. table=study_room_participants user_id=d03dadf8-a4a2-4f58-ae67-46ad178dc1b3 reason=column study_rooms_1.expires_at does not exist 根据现在的报错，需要在数据库中添加过期时间的column吗？写出SQL命令修改
+
+
+现在要实现这些功能： 1. 尽量让study room弹窗，不是让room的UI元素存在在study rooms下面，显示在页面右边那一小块领域。而是要弹窗，并且窗口的大小可调节，最大可以直接满屏。2. 实现实时协作状态，设计状态，已学习时间以及streak。并且可以设计专注模式。 3. 每个用户进入之后可以写出自己的目标，然后完成之后可以自主更新状态。 4. 设计一个共享白板以及笔记区，即Markdown编辑区，支持粘代码以及写笔记和分享思路。 5. 资源分享区，支持添加link，PDF以及Youtube。 6. 然后设计一个AI助教按钮，点击之后用户可以提问，AI助教会进行回答。这类聊天会被特殊标记，并且记录在白板上。 针对上述的功能，帮助我写出完整的prompt给CodeX进行创建。并且给出需要新建的数据库的SQL命令。
+
+
+好的，现在对于study room的设计改动是：当前study room的右上角有Maximize按钮，变成选择性的窗口大小百分比（百分之零，百分之二十五，百分之五十，百分之七十五，百分之百等），或者可以让用户利用鼠标的滚轮进行大小的缩放。然后窗口最大的尺寸可以再变大一些。写出prompt让CodeX修改。
+
+现在的问题是：在study room的resouce分享功能中，上传时只能填写link，如何做到上传PDF文件等？此外分享的资源类型只有link，PDF，Youtube比较片面，能不能改成这几种：vedio，article，website.你觉得呢？给出你认为最合理的设计。此外针对文件的上传，需要设置文件上传的按钮以及相关的功能。请针对这样的设计写出prompt以及数据库需要的命令。
+
+点击upload file之后，上传文件功能的按钮里面写的是中文，改成英文
+
+然后请完善调用DeepSeek模型回答的功能，流程是用户在AI tutor页面发送的问题，会在后端加工后，利用预设的提示词让DeepSeek给出很合适的回答，然后可以存到数据库中，与用户联系到一起，并且返回到前端进行渲染。此外DeepSeek回答时是否还可以先调用数据库中用户的课程学习的相关数据和资料？写出你认为合适的设计。然后写出完整的prompt以及数据库需要的修改命令。
+
+让用户dashboard里messages元素中的Study invites按钮改名成Study invitations。
+
+还有个问题，输出SQL命令让content_md允许是null。并且尽量让note也和用户绑定，这样会让tutor的输出更个性化 更准确。在前端也要显示每段笔记的来源。从数据库的改动和给CodeX的prompt写起。
+
+将用户dashboard里面Messages元素里面的Study invites按钮改名成Study invitations 
+
+之后还有一个设计改变：在用户进行AI Test并答完题目提交之后，会有一个小弹窗：上面会显示用户这次测试的成绩，并根据成绩显示不同的语句（与当前测试题目右上角的设计相同，不过需要同时显示在弹窗里面）。然后弹窗右上角设计一个叉号供用户返回。弹窗的元素和文字风格要符合网站的风格特点。可以再加入一些表情之类的加强用户交互体验。
+
+现在再添加一个设计：用户可以上传图片作为自己的头像。然后便会储存在数据库中。在所有需要显示头像的部分都先从数据库提取然后渲染。
+
+当前如果在dashboard点击右上角的头像，弹出的头像预览位置过高，会被遮挡。往下面移动一些，让头像的顶部和Welcome back to Pathly元素对齐
