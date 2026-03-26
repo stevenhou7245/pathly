@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
-import { updateUserNotebook, type UserNotebookRecord } from "@/lib/notebook";
+import {
+  deleteUserNotebook,
+  updateUserNotebook,
+  type UserNotebookRecord,
+} from "@/lib/notebook";
 
 export const runtime = "nodejs";
 
@@ -10,7 +14,7 @@ const notebookPatchSchema = z
     name: z.string().trim().min(1, "name is required").max(200, "name is too long"),
   });
 
-type NotebookPatchResponse = {
+type NotebookRouteResponse = {
   success: boolean;
   message?: string;
   notebook?: UserNotebookRecord;
@@ -23,7 +27,7 @@ export async function PATCH(
   try {
     const sessionUser = await getAuthenticatedSessionUser();
     if (!sessionUser) {
-      return NextResponse.json<NotebookPatchResponse>(
+      return NextResponse.json<NotebookRouteResponse>(
         { success: false, message: "Unauthorized." },
         { status: 401 },
       );
@@ -31,7 +35,7 @@ export async function PATCH(
 
     const { id } = await context.params;
     if (!id) {
-      return NextResponse.json<NotebookPatchResponse>(
+      return NextResponse.json<NotebookRouteResponse>(
         { success: false, message: "Notebook id is required." },
         { status: 400 },
       );
@@ -41,7 +45,7 @@ export async function PATCH(
     try {
       body = await request.json();
     } catch {
-      return NextResponse.json<NotebookPatchResponse>(
+      return NextResponse.json<NotebookRouteResponse>(
         { success: false, message: "Invalid request payload." },
         { status: 400 },
       );
@@ -49,7 +53,7 @@ export async function PATCH(
 
     const parsed = notebookPatchSchema.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json<NotebookPatchResponse>(
+      return NextResponse.json<NotebookRouteResponse>(
         { success: false, message: parsed.error.issues[0]?.message ?? "Invalid request payload." },
         { status: 400 },
       );
@@ -62,13 +66,13 @@ export async function PATCH(
     });
 
     if (!notebook) {
-      return NextResponse.json<NotebookPatchResponse>(
+      return NextResponse.json<NotebookRouteResponse>(
         { success: false, message: "Notebook not found." },
         { status: 404 },
       );
     }
 
-    return NextResponse.json<NotebookPatchResponse>({
+    return NextResponse.json<NotebookRouteResponse>({
       success: true,
       notebook,
     });
@@ -78,7 +82,57 @@ export async function PATCH(
       route: "/api/notebooks/[id] PATCH",
       reason,
     });
-    return NextResponse.json<NotebookPatchResponse>(
+    return NextResponse.json<NotebookRouteResponse>(
+      { success: false, message: reason },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const sessionUser = await getAuthenticatedSessionUser();
+    if (!sessionUser) {
+      return NextResponse.json<NotebookRouteResponse>(
+        { success: false, message: "Unauthorized." },
+        { status: 401 },
+      );
+    }
+
+    const { id } = await context.params;
+    if (!id) {
+      return NextResponse.json<NotebookRouteResponse>(
+        { success: false, message: "Notebook id is required." },
+        { status: 400 },
+      );
+    }
+
+    const notebook = await deleteUserNotebook({
+      userId: sessionUser.id,
+      notebookId: id,
+    });
+    if (!notebook) {
+      return NextResponse.json<NotebookRouteResponse>(
+        { success: false, message: "Notebook not found." },
+        { status: 404 },
+      );
+    }
+
+    return NextResponse.json<NotebookRouteResponse>({
+      success: true,
+      message: "Notebook deleted.",
+      notebook,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("[notebook_api] delete_failed", {
+      route: "/api/notebooks/[id] DELETE",
+      reason,
+    });
+    return NextResponse.json<NotebookRouteResponse>(
       { success: false, message: reason },
       { status: 500 },
     );

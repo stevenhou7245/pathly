@@ -92,6 +92,8 @@ export default function NotebookPanel() {
   const [isSavingNotebookName, setIsSavingNotebookName] = useState(false);
   const [isCreatingEntry, setIsCreatingEntry] = useState(false);
   const [isSavingEntry, setIsSavingEntry] = useState(false);
+  const [isDeletingNotebook, setIsDeletingNotebook] = useState(false);
+  const [isDeletingEntry, setIsDeletingEntry] = useState(false);
 
   const [newNotebookName, setNewNotebookName] = useState("");
   const [newEntryTopic, setNewEntryTopic] = useState("");
@@ -99,6 +101,8 @@ export default function NotebookPanel() {
 
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [notebookToDelete, setNotebookToDelete] = useState<NotebookRecord | null>(null);
+  const [entryToDelete, setEntryToDelete] = useState<NotebookEntryRecord | null>(null);
 
   const sortedNotebooks = useMemo(() => sortNotebooks(notebooks), [notebooks]);
   const sortedEntries = useMemo(() => sortEntries(entries), [entries]);
@@ -342,6 +346,98 @@ export default function NotebookPanel() {
     }
   }
 
+  async function handleDeleteNotebookConfirmed() {
+    if (!notebookToDelete) {
+      return;
+    }
+    setIsDeletingNotebook(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/notebooks/${encodeURIComponent(notebookToDelete.id)}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as NotebooksResponse;
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message ?? "Unable to delete notebook.");
+      }
+
+      const deletedNotebookId = notebookToDelete.id;
+      const remainingNotebooks = sortNotebooks(
+        notebooks.filter((notebook) => notebook.id !== deletedNotebookId),
+      );
+      setNotebooks(remainingNotebooks);
+
+      const hasCurrentSelection = remainingNotebooks.some(
+        (notebook) => notebook.id === selectedNotebookId,
+      );
+      const nextNotebook =
+        hasCurrentSelection && selectedNotebookId !== deletedNotebookId
+          ? remainingNotebooks.find((notebook) => notebook.id === selectedNotebookId) ?? null
+          : remainingNotebooks[0] ?? null;
+      setSelectedNotebookId(nextNotebook?.id ?? "");
+      setSelectedNotebookNameDraft(nextNotebook?.name ?? "");
+
+      if (!nextNotebook) {
+        setEntries([]);
+        setSelectedEntryId("");
+        setSelectedEntryTopicDraft("");
+        setSelectedEntryContentDraft("");
+        setIsEntryDetailOpen(false);
+      } else if (nextNotebook.id !== selectedNotebookId || selectedNotebookId === deletedNotebookId) {
+        await loadNotebookEntries(nextNotebook.id);
+      }
+
+      setNotebookToDelete(null);
+      setMessage("Notebook deleted.");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to delete notebook.");
+    } finally {
+      setIsDeletingNotebook(false);
+    }
+  }
+
+  async function handleDeleteEntryConfirmed() {
+    if (!entryToDelete) {
+      return;
+    }
+    setIsDeletingEntry(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(
+        `/api/notebooks/entries/${encodeURIComponent(entryToDelete.id)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      const payload = (await response.json()) as NotebookEntryUpdateResponse;
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message ?? "Unable to delete notebook entry.");
+      }
+
+      const deletedEntryId = entryToDelete.id;
+      const remainingEntries = sortEntries(entries.filter((entry) => entry.id !== deletedEntryId));
+      setEntries(remainingEntries);
+
+      if (selectedEntryId === deletedEntryId) {
+        const nextEntry = remainingEntries[0] ?? null;
+        setSelectedEntryId(nextEntry?.id ?? "");
+        setSelectedEntryTopicDraft(nextEntry?.topic ?? "");
+        setSelectedEntryContentDraft(nextEntry?.content_md ?? "");
+        setIsEntryDetailOpen(false);
+      }
+
+      setEntryToDelete(null);
+      setMessage("Notebook entry deleted.");
+      await loadNotebooks();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to delete notebook entry.");
+    } finally {
+      setIsDeletingEntry(false);
+    }
+  }
+
   useEffect(() => {
     void loadNotebooks();
   }, []);
@@ -422,8 +518,10 @@ export default function NotebookPanel() {
             <ol className="mt-3 max-h-[420px] space-y-2 overflow-y-auto">
               {sortedNotebooks.map((notebook) => {
                 const isActive = notebook.id === selectedNotebookId;
+                const isDeletingThisNotebook =
+                  isDeletingNotebook && notebookToDelete?.id === notebook.id;
                 return (
-                  <li key={notebook.id}>
+                  <li key={notebook.id} className="relative">
                     <button
                       type="button"
                       onClick={() => {
@@ -431,7 +529,7 @@ export default function NotebookPanel() {
                         setSelectedNotebookNameDraft(notebook.name);
                         setMessage("");
                       }}
-                      className={`w-full rounded-xl border-2 px-3 py-2 text-left transition ${
+                      className={`w-full rounded-xl border-2 px-3 py-2 pr-10 text-left transition ${
                         isActive
                           ? "border-[#1F2937] bg-[#E9FFD8] shadow-[0_3px_0_#1F2937]"
                           : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
@@ -441,6 +539,20 @@ export default function NotebookPanel() {
                       <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/62">
                         Updated: {formatTimestamp(notebook.updated_at)}
                       </p>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete ${notebook.name}`}
+                      disabled={isDeletingThisNotebook}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setNotebookToDelete(notebook);
+                        setMessage("");
+                      }}
+                      className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/95 text-xs font-extrabold text-[#1F2937]/70 transition hover:border-[#c62828]/40 hover:bg-[#ffeaea] hover:text-[#c62828] disabled:cursor-not-allowed disabled:opacity-55"
+                    >
+                      X
                     </button>
                   </li>
                 );
@@ -519,8 +631,9 @@ export default function NotebookPanel() {
                   <ol className="mt-2 max-h-[420px] space-y-2 overflow-y-auto">
                     {sortedEntries.map((entry) => {
                       const isActive = entry.id === selectedEntryId;
+                      const isDeletingThisEntry = isDeletingEntry && entryToDelete?.id === entry.id;
                       return (
-                        <li key={entry.id}>
+                        <li key={entry.id} className="relative">
                           <button
                             type="button"
                             onClick={() => {
@@ -530,7 +643,7 @@ export default function NotebookPanel() {
                               setIsEntryDetailOpen(true);
                               setMessage("");
                             }}
-                            className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                            className={`w-full rounded-lg border px-3 py-2 pr-10 text-left transition ${
                               isActive
                                 ? "border-[#1F2937] bg-[#E9FFD8]"
                                 : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
@@ -540,6 +653,20 @@ export default function NotebookPanel() {
                             <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/60">
                               Updated: {formatTimestamp(entry.updated_at)}
                             </p>
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Delete ${entry.topic}`}
+                            disabled={isDeletingThisEntry}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setEntryToDelete(entry);
+                              setMessage("");
+                            }}
+                            className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/95 text-xs font-extrabold text-[#1F2937]/70 transition hover:border-[#c62828]/40 hover:bg-[#ffeaea] hover:text-[#c62828] disabled:cursor-not-allowed disabled:opacity-55"
+                          >
+                            X
                           </button>
                         </li>
                       );
@@ -613,6 +740,69 @@ export default function NotebookPanel() {
                 className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isSavingEntry ? "Saving..." : "Save Entry"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {notebookToDelete ? (
+        <div className="fixed inset-0 z-[83] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
+          <div className="w-full max-w-md rounded-[1.8rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] motion-modal-content">
+            <p className="text-xl font-extrabold text-[#1F2937]">Delete this notebook?</p>
+            <p className="mt-2 text-sm font-semibold text-[#1F2937]/72">
+              This will remove notebook <span className="font-extrabold">"{notebookToDelete.name}"</span> and
+              its related entries.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setNotebookToDelete(null)}
+                disabled={isDeletingNotebook}
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDeleteNotebookConfirmed();
+                }}
+                disabled={isDeletingNotebook}
+                className="btn-3d inline-flex h-10 items-center justify-center border-[#A22020] bg-[#E53935] px-4 !text-sm text-white shadow-[0_4px_0_#7f1d1d] transition hover:-translate-y-0.5 hover:bg-[#d93431] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isDeletingNotebook ? "Deleting..." : "Confirm Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {entryToDelete ? (
+        <div className="fixed inset-0 z-[84] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
+          <div className="w-full max-w-md rounded-[1.8rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] motion-modal-content">
+            <p className="text-xl font-extrabold text-[#1F2937]">Delete this entry?</p>
+            <p className="mt-2 text-sm font-semibold text-[#1F2937]/72">
+              This will remove entry <span className="font-extrabold">"{entryToDelete.topic}"</span> only.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEntryToDelete(null)}
+                disabled={isDeletingEntry}
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDeleteEntryConfirmed();
+                }}
+                disabled={isDeletingEntry}
+                className="btn-3d inline-flex h-10 items-center justify-center border-[#A22020] bg-[#E53935] px-4 !text-sm text-white shadow-[0_4px_0_#7f1d1d] transition hover:-translate-y-0.5 hover:bg-[#d93431] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isDeletingEntry ? "Deleting..." : "Confirm Delete"}
               </button>
             </div>
           </div>

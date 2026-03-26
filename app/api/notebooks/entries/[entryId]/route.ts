@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
-import { updateNotebookEntry, type UserNotebookEntryRecord } from "@/lib/notebook";
+import {
+  deleteNotebookEntry,
+  updateNotebookEntry,
+  type UserNotebookEntryRecord,
+} from "@/lib/notebook";
 
 export const runtime = "nodejs";
 
@@ -76,6 +80,56 @@ export async function PATCH(
     const reason = error instanceof Error ? error.message : String(error);
     console.error("[notebook_api] entry_update_failed", {
       route: "/api/notebooks/entries/[entryId] PATCH",
+      reason,
+    });
+    return NextResponse.json<NotebookEntryUpdateResponse>(
+      { success: false, message: reason },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ entryId: string }> },
+) {
+  try {
+    const sessionUser = await getAuthenticatedSessionUser();
+    if (!sessionUser) {
+      return NextResponse.json<NotebookEntryUpdateResponse>(
+        { success: false, message: "Unauthorized." },
+        { status: 401 },
+      );
+    }
+
+    const { entryId } = await context.params;
+    if (!entryId) {
+      return NextResponse.json<NotebookEntryUpdateResponse>(
+        { success: false, message: "Entry id is required." },
+        { status: 400 },
+      );
+    }
+
+    const deleted = await deleteNotebookEntry({
+      userId: sessionUser.id,
+      entryId,
+    });
+    if (!deleted) {
+      return NextResponse.json<NotebookEntryUpdateResponse>(
+        { success: false, message: "Notebook entry not found." },
+        { status: 404 },
+      );
+    }
+
+    return NextResponse.json<NotebookEntryUpdateResponse>({
+      success: true,
+      message: "Notebook entry deleted.",
+      entry: deleted,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("[notebook_api] entry_delete_failed", {
+      route: "/api/notebooks/entries/[entryId] DELETE",
       reason,
     });
     return NextResponse.json<NotebookEntryUpdateResponse>(

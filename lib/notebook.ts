@@ -467,6 +467,70 @@ export async function updateUserNotebook(params: {
   return mapNotebookRow(data as GenericRecord);
 }
 
+export async function deleteUserNotebook(params: {
+  userId: string;
+  notebookId: string;
+}) {
+  const owned = await requireNotebookOwnership({
+    userId: params.userId,
+    notebookId: params.notebookId,
+  });
+  if (!owned) {
+    return null;
+  }
+
+  const nowIso = new Date().toISOString();
+  const { error: markEntriesDeletedError } = await supabaseAdmin
+    .from("user_notebook_entries")
+    .update({
+      is_deleted: true,
+      updated_at: nowIso,
+    })
+    .eq("notebook_id", params.notebookId)
+    .eq("is_deleted", false);
+  if (markEntriesDeletedError) {
+    const details = toErrorDetails(markEntriesDeletedError);
+    console.error("[user_notebook] delete_mark_entries_failed", {
+      table: "user_notebook_entries",
+      notebook_id: params.notebookId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(
+      `Failed to delete notebook entries. table=user_notebook_entries reason=${details.message}`,
+    );
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("user_notebooks")
+    .update({
+      is_deleted: true,
+      updated_at: nowIso,
+    })
+    .eq("id", params.notebookId)
+    .eq("user_id", params.userId)
+    .eq("is_deleted", false)
+    .select("id, user_id, name, created_at, updated_at, is_deleted")
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] delete_failed", {
+      table: "user_notebooks",
+      user_id: params.userId,
+      notebook_id: params.notebookId,
+      ...details,
+    });
+    throw new Error(`Failed to delete notebook. table=user_notebooks reason=${details.message}`);
+  }
+  if (!data) {
+    return null;
+  }
+
+  return mapNotebookRow(data as GenericRecord);
+}
+
 export async function listNotebookEntries(params: {
   userId: string;
   notebookId: string;
@@ -639,6 +703,96 @@ export async function updateNotebookEntry(params: {
   }
   if (!data) {
     return null;
+  }
+
+  return mapEntryRow(data as GenericRecord);
+}
+
+export async function deleteNotebookEntry(params: {
+  userId: string;
+  entryId: string;
+}) {
+  const entryLookup = await supabaseAdmin
+    .from("user_notebook_entries")
+    .select("id, notebook_id")
+    .eq("id", params.entryId)
+    .eq("is_deleted", false)
+    .limit(1)
+    .maybeSingle();
+
+  if (entryLookup.error) {
+    const details = toErrorDetails(entryLookup.error);
+    console.error("[user_notebook] entry_delete_lookup_failed", {
+      table: "user_notebook_entries",
+      entry_id: params.entryId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(
+      `Failed to load notebook entry. table=user_notebook_entries reason=${details.message}`,
+    );
+  }
+  if (!entryLookup.data) {
+    return null;
+  }
+
+  const notebookId = toStringValue((entryLookup.data as GenericRecord).notebook_id);
+  const owned = await requireNotebookOwnership({
+    userId: params.userId,
+    notebookId,
+  });
+  if (!owned) {
+    return null;
+  }
+
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from("user_notebook_entries")
+    .update({
+      is_deleted: true,
+      updated_at: nowIso,
+    })
+    .eq("id", params.entryId)
+    .eq("notebook_id", notebookId)
+    .eq("is_deleted", false)
+    .select(
+      "id, notebook_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted",
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    const details = toErrorDetails(error);
+    console.error("[user_notebook] entry_delete_failed", {
+      table: "user_notebook_entries",
+      entry_id: params.entryId,
+      notebook_id: notebookId,
+      user_id: params.userId,
+      ...details,
+    });
+    throw new Error(
+      `Failed to delete notebook entry. table=user_notebook_entries reason=${details.message}`,
+    );
+  }
+  if (!data) {
+    return null;
+  }
+
+  const notebookTouchResult = await supabaseAdmin
+    .from("user_notebooks")
+    .update({
+      updated_at: nowIso,
+    })
+    .eq("id", notebookId)
+    .eq("user_id", params.userId)
+    .eq("is_deleted", false);
+  if (notebookTouchResult.error) {
+    console.warn("[user_notebook] entry_delete_touch_notebook_failed", {
+      table: "user_notebooks",
+      notebook_id: notebookId,
+      user_id: params.userId,
+      ...toErrorDetails(notebookTouchResult.error),
+    });
   }
 
   return mapEntryRow(data as GenericRecord);
