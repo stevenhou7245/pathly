@@ -11,8 +11,7 @@ type GenericRecord = Record<string, unknown>;
 
 export type UserNotebookSourceType =
   | "manual"
-  | "study_room_exit_save"
-  | "study_room_manual_save";
+  | "study_room_selection";
 
 export type UserNotebookEntryItemSourceKind =
   | "study_room_note"
@@ -97,12 +96,16 @@ function toBoolean(value: unknown) {
 
 function normalizeSourceType(value: unknown): UserNotebookSourceType {
   const normalized = toStringValue(value).trim().toLowerCase();
+  if (normalized === "manual") {
+    return normalized;
+  }
   if (
-    normalized === "manual" ||
+    normalized === "study_room_selection" ||
     normalized === "study_room_exit_save" ||
     normalized === "study_room_manual_save"
   ) {
-    return normalized;
+    // Backward compatibility for historical rows written before source_type unification.
+    return "study_room_selection";
   }
   return "manual";
 }
@@ -553,6 +556,7 @@ export async function createNotebookEntry(params: {
       notebook_id: params.notebookId,
       user_id: params.userId,
       payload_keys: Object.keys(payload),
+      payload_source_type: payload.source_type,
       ...details,
     });
     throw new Error(`Failed to create notebook entry. table=user_notebook_entries reason=${details.message}`);
@@ -780,7 +784,7 @@ export async function saveStudyRoomContentToNotebookEntry(params: {
     notebookId: params.notebookId,
     topic: params.entryTopic,
     contentMd: markdownContent,
-    sourceType: "study_room_exit_save",
+    sourceType: "study_room_selection",
     sourceRoomId: params.roomId,
   });
 

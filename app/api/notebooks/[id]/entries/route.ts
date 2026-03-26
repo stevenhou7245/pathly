@@ -14,7 +14,7 @@ const createEntrySchema = z.object({
   topic: z.string().trim().min(1, "topic is required").max(200, "topic is too long"),
   content_md: z.string().max(500_000, "content is too large").optional().nullable(),
   source_type: z
-    .enum(["manual", "study_room_exit_save", "study_room_manual_save"])
+    .enum(["manual", "study_room_selection"])
     .optional(),
   source_room_id: z.string().uuid("source_room_id must be a valid uuid").optional().nullable(),
 });
