@@ -1928,6 +1928,25 @@ export default function StudyRoomsPanel({
   }, [activeRoomId, roomDetail?.status]);
 
   useEffect(() => {
+    if (!isWorkspaceOpen || !activeRoomId) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadRoomDataRef.current(activeRoomId);
+    }, 5000);
+    console.info("[study_room_collecting_sync] status_polling_started", {
+      room_id: activeRoomId,
+      interval_ms: 5000,
+    });
+    return () => {
+      window.clearInterval(timer);
+      console.info("[study_room_collecting_sync] status_polling_stopped", {
+        room_id: activeRoomId,
+      });
+    };
+  }, [activeRoomId, isWorkspaceOpen]);
+
+  useEffect(() => {
     if (trackedRoomIds.length === 0) {
       return;
     }
