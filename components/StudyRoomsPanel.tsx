@@ -931,11 +931,22 @@ export default function StudyRoomsPanel({
   const roomStatusRef = useRef("");
   const autoCloseSaveModalEventKeysRef = useRef<Set<string>>(new Set());
   const expiryCollectingTriggerRef = useRef("");
+  const activeRoomIdRef = useRef(activeRoomId);
+  const onSelectRoomRef = useRef(onSelectRoom);
+  const onRoomsUpdatedRef = useRef(onRoomsUpdated);
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) ?? null,
     [activeRoomId, rooms],
   );
+  const trackedRoomIds = useMemo(
+    () =>
+      Array.from(new Set(rooms.map((room) => room.id.trim()).filter(Boolean))).sort(
+        (a, b) => a.localeCompare(b),
+      ),
+    [rooms],
+  );
+  const trackedRoomIdsKey = useMemo(() => trackedRoomIds.join("|"), [trackedRoomIds]);
   const isMobileWorkspace = viewportWidth < 900;
 
   const workspacePresetOptions = [25, 50, 75, 100] as const;
@@ -1041,6 +1052,18 @@ export default function StudyRoomsPanel({
   useEffect(() => {
     roomStatusRef.current = roomDetail?.status ?? "";
   }, [roomDetail?.status]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    onSelectRoomRef.current = onSelectRoom;
+  }, [onSelectRoom]);
+
+  useEffect(() => {
+    onRoomsUpdatedRef.current = onRoomsUpdated;
+  }, [onRoomsUpdated]);
 
   function scrollMessagesToBottom() {
     const container = messagesContainerRef.current;
@@ -1903,6 +1926,114 @@ export default function StudyRoomsPanel({
       eventKey: `${activeRoomId}:collecting-status`,
     });
   }, [activeRoomId, roomDetail?.status]);
+
+  useEffect(() => {
+    if (trackedRoomIds.length === 0) {
+      return;
+    }
+
+    let active = true;
+    let supabaseClient: ReturnType<typeof getSupabaseBrowserClient> | null = null;
+    try {
+      supabaseClient = getSupabaseBrowserClient();
+    } catch (error) {
+      console.warn("[study_room_collecting_sync] client_init_failed", {
+        tracked_room_ids: trackedRoomIds,
+        ...toRealtimeLogDetails(error),
+      });
+      return;
+    }
+
+    const trackedRoomIdSet = new Set(trackedRoomIds);
+    const channelName = `study-room-collecting-sync-${Date.now()}`;
+    console.info("[study_room_collecting_sync] subscription_start", {
+      channel: channelName,
+      tracked_room_ids: trackedRoomIds,
+    });
+
+    const channel = supabaseClient
+      .channel(channelName)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "study_rooms",
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
+          const roomId = toSafeString(newRow?.id ?? oldRow?.id);
+          if (!roomId || !trackedRoomIdSet.has(roomId)) {
+            return;
+          }
+
+          const nextStatus = toSafeString(newRow?.status).trim().toLowerCase();
+          const previousStatus = toSafeString(oldRow?.status).trim().toLowerCase();
+          const closureStartedAt =
+            toSafeNullableString(newRow?.closure_started_at) ??
+            toSafeNullableString(newRow?.ended_at) ??
+            "no-closure-start";
+          const closeEventKey = `${roomId}:${closureStartedAt}`;
+
+          console.info("[study_room_collecting_sync] room_state_event", {
+            room_id: roomId,
+            previous_status: previousStatus || null,
+            next_status: nextStatus || null,
+            close_event_key: closeEventKey,
+          });
+
+          if (nextStatus === "active") {
+            clearAutoSaveModalCloseEventKeysForRoom(roomId);
+          }
+
+          if (nextStatus === "collecting" && previousStatus !== "collecting") {
+            if (activeRoomIdRef.current !== roomId) {
+              onSelectRoomRef.current(roomId);
+              setIsWorkspaceOpen(true);
+            }
+            void openAutoSaveModalForCollecting({
+              roomId,
+              eventKey: closeEventKey,
+            });
+            void loadRoomDataRef.current(roomId);
+            void loadWorkspaceExtrasRef.current(roomId);
+            void onRoomsUpdatedRef.current();
+          }
+        },
+      )
+      .subscribe((status, error) => {
+        console.info("[study_room_collecting_sync] subscription_status", {
+          channel: channelName,
+          tracked_room_ids: trackedRoomIds,
+          status,
+          ...(error ? toRealtimeLogDetails(error) : {}),
+        });
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("[study_room_collecting_sync] subscription_failed", {
+            channel: channelName,
+            tracked_room_ids: trackedRoomIds,
+            status,
+            ...(error ? toRealtimeLogDetails(error) : {}),
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      console.info("[study_room_collecting_sync] subscription_cleanup", {
+        channel: channelName,
+        tracked_room_ids: trackedRoomIds,
+      });
+      void channel.unsubscribe();
+      if (supabaseClient) {
+        void supabaseClient.removeChannel(channel);
+      }
+    };
+  }, [trackedRoomIdsKey]);
 
   async function handleCreateRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

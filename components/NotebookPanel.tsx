@@ -16,7 +16,7 @@ type NotebookEntryRecord = {
   notebook_id: string;
   topic: string;
   content_md: string | null;
-  source_type: "manual" | "study_room_exit_save" | "study_room_manual_save";
+  source_type: "manual" | "study_room_selection";
   source_room_id: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -84,6 +84,7 @@ export default function NotebookPanel() {
   const [selectedEntryId, setSelectedEntryId] = useState("");
   const [selectedEntryTopicDraft, setSelectedEntryTopicDraft] = useState("");
   const [selectedEntryContentDraft, setSelectedEntryContentDraft] = useState("");
+  const [isEntryDetailOpen, setIsEntryDetailOpen] = useState(false);
 
   const [isLoadingNotebooks, setIsLoadingNotebooks] = useState(true);
   const [isLoadingEntries, setIsLoadingEntries] = useState(false);
@@ -351,10 +352,17 @@ export default function NotebookPanel() {
       setSelectedEntryId("");
       setSelectedEntryTopicDraft("");
       setSelectedEntryContentDraft("");
+      setIsEntryDetailOpen(false);
       return;
     }
     void loadNotebookEntries(selectedNotebookId);
   }, [selectedNotebookId]);
+
+  useEffect(() => {
+    if (!selectedEntry && isEntryDetailOpen) {
+      setIsEntryDetailOpen(false);
+    }
+  }, [isEntryDetailOpen, selectedEntry]);
 
   return (
     <section className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_8px_0_#1F2937,0_18px_28px_rgba(31,41,55,0.12)] sm:p-7">
@@ -471,122 +479,145 @@ export default function NotebookPanel() {
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-3 lg:grid-cols-[320px_minmax(0,1fr)]">
-                <div className="rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
-                  <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                    Add Entry
-                  </p>
-                  <input
-                    value={newEntryTopic}
-                    onChange={(event) => setNewEntryTopic(event.target.value)}
-                    placeholder="Entry topic"
-                    className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                  />
-                  <textarea
-                    value={newEntryContent}
-                    onChange={(event) => setNewEntryContent(event.target.value)}
-                    placeholder="Entry content"
-                    className="mt-2 min-h-[110px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void handleCreateEntry();
-                    }}
-                    disabled={isCreatingEntry}
-                    className="btn-3d btn-3d-green mt-2 inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    {isCreatingEntry ? "Creating..." : "Add Entry"}
-                  </button>
+              <div className="mt-4 rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3">
+                <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                  Add Entry
+                </p>
+                <input
+                  value={newEntryTopic}
+                  onChange={(event) => setNewEntryTopic(event.target.value)}
+                  placeholder="Entry topic"
+                  className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                />
+                <textarea
+                  value={newEntryContent}
+                  onChange={(event) => setNewEntryContent(event.target.value)}
+                  placeholder="Entry content"
+                  className="mt-2 min-h-[120px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleCreateEntry();
+                  }}
+                  disabled={isCreatingEntry}
+                  className="btn-3d btn-3d-green mt-2 inline-flex h-9 items-center justify-center px-4 !text-xs disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isCreatingEntry ? "Creating..." : "Add Entry"}
+                </button>
+              </div>
 
-                  <p className="mt-4 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                    Entry List
-                  </p>
-                  {isLoadingEntries ? (
-                    <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">Loading entries...</p>
-                  ) : sortedEntries.length === 0 ? (
-                    <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">No entries yet.</p>
-                  ) : (
-                    <ol className="mt-2 max-h-[280px] space-y-2 overflow-y-auto">
-                      {sortedEntries.map((entry) => {
-                        const isActive = entry.id === selectedEntryId;
-                        return (
-                          <li key={entry.id}>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedEntryId(entry.id);
-                                setSelectedEntryTopicDraft(entry.topic);
-                                setSelectedEntryContentDraft(entry.content_md ?? "");
-                                setMessage("");
-                              }}
-                              className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                                isActive
-                                  ? "border-[#1F2937] bg-[#E9FFD8]"
-                                  : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
-                              }`}
-                            >
-                              <p className="truncate text-sm font-extrabold text-[#1F2937]">{entry.topic}</p>
-                              <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/60">
-                                Updated: {formatTimestamp(entry.updated_at)}
-                              </p>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ol>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-[#1F2937]/12 bg-white p-3">
-                  {!selectedEntry ? (
-                    <p className="text-sm font-semibold text-[#1F2937]/70">
-                      Select an entry to view and edit.
-                    </p>
-                  ) : (
-                    <>
-                      <label className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                        Entry Topic
-                      </label>
-                      <input
-                        value={selectedEntryTopicDraft}
-                        onChange={(event) => setSelectedEntryTopicDraft(event.target.value)}
-                        className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                      />
-
-                      <label className="mt-3 block text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
-                        Entry Content (Markdown)
-                      </label>
-                      <textarea
-                        value={selectedEntryContentDraft}
-                        onChange={(event) => setSelectedEntryContentDraft(event.target.value)}
-                        className="mt-2 min-h-[330px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
-                      />
-                      <div className="mt-2 flex items-center justify-between text-xs font-semibold text-[#1F2937]/60">
-                        <p>Source: {selectedEntry.source_type}</p>
-                        <p>Updated: {formatTimestamp(selectedEntry.updated_at)}</p>
-                      </div>
-
-                      <div className="mt-3 flex justify-end">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleSaveEntry();
-                          }}
-                          disabled={isSavingEntry}
-                          className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                        >
-                          {isSavingEntry ? "Saving..." : "Save Entry"}
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
+              <div className="mt-4 rounded-xl border border-[#1F2937]/12 bg-white p-3">
+                <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                  Entry List
+                </p>
+                {isLoadingEntries ? (
+                  <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">Loading entries...</p>
+                ) : sortedEntries.length === 0 ? (
+                  <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">No entries yet.</p>
+                ) : (
+                  <ol className="mt-2 max-h-[420px] space-y-2 overflow-y-auto">
+                    {sortedEntries.map((entry) => {
+                      const isActive = entry.id === selectedEntryId;
+                      return (
+                        <li key={entry.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedEntryId(entry.id);
+                              setSelectedEntryTopicDraft(entry.topic);
+                              setSelectedEntryContentDraft(entry.content_md ?? "");
+                              setIsEntryDetailOpen(true);
+                              setMessage("");
+                            }}
+                            className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                              isActive
+                                ? "border-[#1F2937] bg-[#E9FFD8]"
+                                : "border-[#1F2937]/12 bg-white hover:border-[#58CC02]/40"
+                            }`}
+                          >
+                            <p className="truncate text-sm font-extrabold text-[#1F2937]">{entry.topic}</p>
+                            <p className="mt-1 text-[11px] font-semibold text-[#1F2937]/60">
+                              Updated: {formatTimestamp(entry.updated_at)}
+                            </p>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
               </div>
             </>
           )}
         </div>
       </div>
+
+      {isEntryDetailOpen && selectedEntry ? (
+        <div className="fixed inset-0 z-[82] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
+          <div className="w-full max-w-3xl rounded-[2rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-6 motion-modal-content">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+                  Entry Detail
+                </p>
+                <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
+                  Read and edit this entry in a full-size view.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEntryDetailOpen(false)}
+                className="btn-3d btn-3d-white inline-flex h-9 items-center justify-center px-3 !text-xs"
+              >
+                Close
+              </button>
+            </div>
+
+            <label className="mt-4 block text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+              Entry Topic
+            </label>
+            <input
+              value={selectedEntryTopicDraft}
+              onChange={(event) => setSelectedEntryTopicDraft(event.target.value)}
+              className="mt-2 w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+            />
+
+            <label className="mt-3 block text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
+              Entry Content (Markdown)
+            </label>
+            <textarea
+              value={selectedEntryContentDraft}
+              onChange={(event) => setSelectedEntryContentDraft(event.target.value)}
+              className="mt-2 min-h-[360px] w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-sm font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+            />
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-[#1F2937]/60">
+              <p>Source: {selectedEntry.source_type}</p>
+              <p>Updated: {formatTimestamp(selectedEntry.updated_at)}</p>
+              <p>Created: {formatTimestamp(selectedEntry.created_at)}</p>
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEntryDetailOpen(false)}
+                className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleSaveEntry();
+                }}
+                disabled={isSavingEntry}
+                className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isSavingEntry ? "Saving..." : "Save Entry"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
