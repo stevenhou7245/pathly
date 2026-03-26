@@ -60,6 +60,9 @@ function normalizeRoomStyle(value: unknown) {
 
 function normalizeRoomStatus(value: unknown) {
   const normalized = toStringValue(value).trim().toLowerCase();
+  if (normalized === "collecting") {
+    return "collecting";
+  }
   if (normalized === "closed") {
     return "closed";
   }
@@ -71,6 +74,8 @@ function normalizeRoomStatus(value: unknown) {
   }
   return "active";
 }
+
+const COLLECTION_WINDOW_MINUTES = 15;
 
 function toDateOrNull(value: string | null) {
   if (!value) {
@@ -132,7 +137,7 @@ async function loadRoomsByIds(roomIds: string[]) {
   }
 
   const withExpiresSelect =
-    "id, creator_id, name, style, max_participants, password, duration_minutes, status, created_at, expires_at, ended_at";
+    "id, creator_id, name, style, max_participants, password, duration_minutes, status, created_at, expires_at, closure_started_at, collection_deadline_at, ended_at";
   const fallbackSelect =
     "id, creator_id, name, style, max_participants, password, duration_minutes, status, created_at, ended_at";
 
@@ -210,34 +215,131 @@ function sanitizeRoomRow(row: GenericRecord) {
     status: normalizeRoomStatus(row.status),
     created_at: createdAt,
     expires_at: expiresAt,
+    closure_started_at: toNullableString(row.closure_started_at),
+    collection_deadline_at: toNullableString(row.collection_deadline_at),
     ended_at: toNullableString(row.ended_at),
   };
 }
 
-async function markRoomExpired(roomId: string) {
+async function beginRoomCollectingPhase(params: {
+  roomId: string;
+  trigger: "timer_expired" | "creator_closed";
+}) {
   const nowIso = new Date().toISOString();
-  const { error } = await supabaseAdmin
+  const deadlineIso = new Date(
+    new Date(nowIso).getTime() + COLLECTION_WINDOW_MINUTES * 60_000,
+  ).toISOString();
+
+  const collectingPayload = {
+    status: "collecting",
+    closure_started_at: nowIso,
+    collection_deadline_at: deadlineIso,
+    ended_at: null,
+  };
+
+  const collectingResult = await supabaseAdmin
+    .from("study_rooms")
+    .update(collectingPayload)
+    .eq("id", params.roomId)
+    .in("status", ["active", "collecting"]);
+
+  if (collectingResult.error && hasMissingColumnError(collectingResult.error, "closure_started_at")) {
+    console.warn("[study_room] collecting_phase_missing_column_fallback", {
+      table: "study_rooms",
+      query: "beginRoomCollectingPhase",
+      room_id: params.roomId,
+      trigger: params.trigger,
+      missing_column: "closure_started_at/collection_deadline_at",
+      ...toErrorDetails(collectingResult.error),
+    });
+    const fallbackResult = await supabaseAdmin
+      .from("study_rooms")
+      .update({
+        status: "collecting",
+        ended_at: null,
+      })
+      .eq("id", params.roomId)
+      .in("status", ["active", "collecting"]);
+    if (fallbackResult.error) {
+      console.warn("[study_room] collecting_phase_failed", {
+        table: "study_rooms",
+        query: "beginRoomCollectingPhase.fallback",
+        room_id: params.roomId,
+        trigger: params.trigger,
+        ...toErrorDetails(fallbackResult.error),
+      });
+      return {
+        ok: false as const,
+      };
+    }
+    console.info("[study_room] collecting_phase_started", {
+      room_id: params.roomId,
+      trigger: params.trigger,
+      closure_started_at: nowIso,
+      collection_deadline_at: null,
+      fallback_mode: true,
+    });
+    return {
+      ok: true as const,
+      closureStartedAt: nowIso,
+      collectionDeadlineAt: null as string | null,
+    };
+  }
+
+  if (collectingResult.error) {
+    console.warn("[study_room] collecting_phase_failed", {
+      table: "study_rooms",
+      query: "beginRoomCollectingPhase",
+      room_id: params.roomId,
+      trigger: params.trigger,
+      ...toErrorDetails(collectingResult.error),
+    });
+    return {
+      ok: false as const,
+    };
+  }
+
+  console.info("[study_room] collecting_phase_started", {
+    room_id: params.roomId,
+    trigger: params.trigger,
+    closure_started_at: nowIso,
+    collection_deadline_at: deadlineIso,
+  });
+  return {
+    ok: true as const,
+    closureStartedAt: nowIso,
+    collectionDeadlineAt: deadlineIso,
+  };
+}
+
+async function finalizeRoomClosed(params: {
+  roomId: string;
+  reason: "all_participants_collected" | "collection_deadline_reached" | "force_close";
+}) {
+  const nowIso = new Date().toISOString();
+
+  const closeRoomResult = await supabaseAdmin
     .from("study_rooms")
     .update({
       status: "closed",
       ended_at: nowIso,
     })
-    .eq("id", roomId)
-    .eq("status", "active");
-  if (error) {
-    console.warn("[study_room] mark_ended_failed", {
+    .eq("id", params.roomId)
+    .neq("status", "closed");
+  if (closeRoomResult.error) {
+    console.warn("[study_room] close_finalize_failed", {
       table: "study_rooms",
-      query: "markRoomExpired",
-      room_id: roomId,
-      at: nowIso,
-      ...toErrorDetails(error),
+      query: "finalizeRoomClosed.update_room",
+      room_id: params.roomId,
+      reason: params.reason,
+      ...toErrorDetails(closeRoomResult.error),
     });
-  }
-  if (error) {
-    return;
+    return {
+      ok: false as const,
+    };
   }
 
-  const participantsCloseResult = await supabaseAdmin
+  const participantFinalizeResult = await supabaseAdmin
     .from("study_room_participants")
     .update({
       left_at: nowIso,
@@ -246,24 +348,114 @@ async function markRoomExpired(roomId: string) {
       focus_started_at: null,
       current_streak_seconds: 0,
       last_active_at: nowIso,
+      collection_status: "skipped",
+      collection_completed_at: nowIso,
     })
-    .eq("room_id", roomId)
+    .eq("room_id", params.roomId)
     .is("left_at", null);
-  if (participantsCloseResult.error) {
-    console.warn("[study_room] duration_close_participants_update_failed", {
+
+  if (participantFinalizeResult.error && hasMissingColumnError(participantFinalizeResult.error, "collection_status")) {
+    const participantFallback = await supabaseAdmin
+      .from("study_room_participants")
+      .update({
+        left_at: nowIso,
+        presence_state: "offline",
+        focus_mode: false,
+        focus_started_at: null,
+        current_streak_seconds: 0,
+        last_active_at: nowIso,
+      })
+      .eq("room_id", params.roomId)
+      .is("left_at", null);
+    if (participantFallback.error) {
+      console.warn("[study_room] close_finalize_participants_failed", {
+        table: "study_room_participants",
+        query: "finalizeRoomClosed.update_participants.fallback",
+        room_id: params.roomId,
+        reason: params.reason,
+        ...toErrorDetails(participantFallback.error),
+      });
+    }
+  } else if (participantFinalizeResult.error) {
+    console.warn("[study_room] close_finalize_participants_failed", {
       table: "study_room_participants",
-      query: "markRoomExpired",
-      room_id: roomId,
-      at: nowIso,
-      ...toErrorDetails(participantsCloseResult.error),
+      query: "finalizeRoomClosed.update_participants",
+      room_id: params.roomId,
+      reason: params.reason,
+      ...toErrorDetails(participantFinalizeResult.error),
     });
   }
 
-  console.info("[study_room] duration_expired", {
-    room_id: roomId,
-    at: nowIso,
-    converted_to_status: "closed",
+  console.info("[study_room] closed_finalized", {
+    room_id: params.roomId,
+    reason: params.reason,
+    ended_at: nowIso,
   });
+
+  return {
+    ok: true as const,
+  };
+}
+
+async function maybeFinalizeRoomCollection(params: {
+  room: ReturnType<typeof sanitizeRoomRow>;
+  reason: "lifecycle_check" | "participant_leave";
+}) {
+  const status = normalizeRoomStatus(params.room.status);
+  if (status !== "collecting") {
+    return {
+      room: params.room,
+      closed: false,
+    };
+  }
+
+  const { count, error } = await supabaseAdmin
+    .from("study_room_participants")
+    .select("id", { count: "exact", head: true })
+    .eq("room_id", params.room.id)
+    .is("left_at", null);
+  if (error) {
+    console.warn("[study_room] collecting_active_participants_count_failed", {
+      table: "study_room_participants",
+      query: "maybeFinalizeRoomCollection.count_active",
+      room_id: params.room.id,
+      reason: params.reason,
+      ...toErrorDetails(error),
+    });
+    return {
+      room: params.room,
+      closed: false,
+    };
+  }
+
+  const activeCount = count ?? 0;
+  const nowMs = Date.now();
+  const deadlineMs = toDateOrNull(params.room.collection_deadline_at)?.getTime() ?? null;
+  const deadlineReached = deadlineMs !== null && nowMs >= deadlineMs;
+  const shouldFinalize = activeCount === 0 || deadlineReached;
+  if (!shouldFinalize) {
+    return {
+      room: params.room,
+      closed: false,
+    };
+  }
+
+  const finalize = await finalizeRoomClosed({
+    roomId: params.room.id,
+    reason: activeCount === 0 ? "all_participants_collected" : "collection_deadline_reached",
+  });
+  if (!finalize.ok) {
+    return {
+      room: params.room,
+      closed: false,
+    };
+  }
+
+  const refreshed = await loadRoomById(params.room.id);
+  return {
+    room: refreshed ?? { ...params.room, status: "closed", ended_at: new Date().toISOString() },
+    closed: true,
+  };
 }
 
 async function loadRoomById(roomId: string) {
@@ -280,18 +472,41 @@ async function ensureRoomLifecycle(room: ReturnType<typeof sanitizeRoomRow>) {
     } as const;
   }
 
+  if (room.status === "collecting") {
+    const finalized = await maybeFinalizeRoomCollection({
+      room,
+      reason: "lifecycle_check",
+    });
+    if (finalized.closed || finalized.room.status === "closed") {
+      return {
+        active: false,
+        room: finalized.room,
+        code: "ROOM_CLOSED" as const,
+      } as const;
+    }
+    return {
+      active: false,
+      room: finalized.room,
+      code: "ROOM_COLLECTING" as const,
+    } as const;
+  }
+
   const expiresAt = toDateOrNull(room.expires_at);
   const now = Date.now();
   if (room.status === "active" && expiresAt && now >= expiresAt.getTime()) {
-    await markRoomExpired(room.id);
+    const collecting = await beginRoomCollectingPhase({
+      roomId: room.id,
+      trigger: "timer_expired",
+    });
     return {
       active: false,
       room: {
         ...room,
-        status: "closed",
-        ended_at: new Date().toISOString(),
+        status: collecting.ok ? "collecting" : room.status,
+        closure_started_at: collecting.ok ? collecting.closureStartedAt : room.closure_started_at,
+        collection_deadline_at: collecting.ok ? collecting.collectionDeadlineAt : room.collection_deadline_at,
       },
-      code: "ROOM_CLOSED" as const,
+      code: "ROOM_COLLECTING" as const,
     } as const;
   }
 
@@ -299,7 +514,7 @@ async function ensureRoomLifecycle(room: ReturnType<typeof sanitizeRoomRow>) {
     return {
       active: false,
       room,
-      code: "ROOM_CLOSED" as const,
+      code: "ROOM_COLLECTING" as const,
     } as const;
   }
 
@@ -591,10 +806,15 @@ export async function joinStudyRoom(params: {
   };
 }
 
-export async function leaveStudyRoom(params: { userId: string; roomId: string }) {
+export async function leaveStudyRoom(params: {
+  userId: string;
+  roomId: string;
+  collectionStatus?: "completed" | "skipped" | null;
+}) {
   console.info("[study_room] leave_attempt", {
     room_id: params.roomId,
     user_id: params.userId,
+    collection_status: params.collectionStatus ?? null,
   });
 
   const room = await loadRoomById(params.roomId);
@@ -604,7 +824,7 @@ export async function leaveStudyRoom(params: { userId: string; roomId: string })
       code: "NOT_FOUND" as const,
     };
   }
-  if (room.creator_id === params.userId) {
+  if (room.creator_id === params.userId && room.status === "active") {
     return {
       ok: false as const,
       code: "CREATOR_CANNOT_LEAVE" as const,
@@ -612,23 +832,68 @@ export async function leaveStudyRoom(params: { userId: string; roomId: string })
   }
 
   const nowIso = new Date().toISOString();
+  const normalizedRoomStatus = normalizeRoomStatus(room.status);
+  const effectiveCollectionStatus =
+    normalizedRoomStatus === "collecting"
+      ? (params.collectionStatus ?? "skipped")
+      : params.collectionStatus ?? null;
+
+  const updatePayload: Record<string, unknown> = {
+    left_at: nowIso,
+    presence_state: "offline",
+    focus_mode: false,
+    focus_started_at: null,
+    current_streak_seconds: 0,
+    last_active_at: nowIso,
+  };
+  if (effectiveCollectionStatus) {
+    updatePayload.collection_status = effectiveCollectionStatus;
+    updatePayload.collection_completed_at = nowIso;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("study_room_participants")
-    .update({
-      left_at: nowIso,
-      presence_state: "offline",
-      focus_mode: false,
-      focus_started_at: null,
-      current_streak_seconds: 0,
-      last_active_at: nowIso,
-    })
+    .update(updatePayload)
     .eq("room_id", params.roomId)
     .eq("user_id", params.userId)
     .is("left_at", null)
     .select("id")
     .limit(1)
     .maybeSingle();
-  if (error) {
+
+  let updatedRow = data;
+  if (error && hasMissingColumnError(error, "collection_status")) {
+    const fallback = await supabaseAdmin
+      .from("study_room_participants")
+      .update({
+        left_at: nowIso,
+        presence_state: "offline",
+        focus_mode: false,
+        focus_started_at: null,
+        current_streak_seconds: 0,
+        last_active_at: nowIso,
+      })
+      .eq("room_id", params.roomId)
+      .eq("user_id", params.userId)
+      .is("left_at", null)
+      .select("id")
+      .limit(1)
+      .maybeSingle();
+    if (fallback.error) {
+      const details = toErrorDetails(fallback.error);
+      console.error("[study_room] leave_failed", {
+        table: "study_room_participants",
+        query: "leaveStudyRoom.fallback_no_collection_columns",
+        room_id: params.roomId,
+        user_id: params.userId,
+        ...details,
+      });
+      throw new Error(
+        `Failed to leave study room. table=study_room_participants room_id=${params.roomId} user_id=${params.userId} reason=${details.message}`,
+      );
+    }
+    updatedRow = fallback.data;
+  } else if (error) {
     const details = toErrorDetails(error);
     console.error("[study_room] leave_failed", {
       table: "study_room_participants",
@@ -641,14 +906,26 @@ export async function leaveStudyRoom(params: { userId: string; roomId: string })
       `Failed to leave study room. table=study_room_participants room_id=${params.roomId} user_id=${params.userId} reason=${details.message}`,
     );
   }
+
+  if (normalizedRoomStatus === "collecting") {
+    const refreshedRoom = await loadRoomById(params.roomId);
+    if (refreshedRoom) {
+      await maybeFinalizeRoomCollection({
+        room: refreshedRoom,
+        reason: "participant_leave",
+      });
+    }
+  }
+
   console.info("[study_room] left", {
     room_id: params.roomId,
     user_id: params.userId,
-    had_active_membership: Boolean(data),
+    had_active_membership: Boolean(updatedRow),
+    collection_status: effectiveCollectionStatus,
   });
   return {
-    ok: Boolean(data),
-    code: data ? "LEFT" as const : "NO_ACTIVE_MEMBERSHIP" as const,
+    ok: Boolean(updatedRow),
+    code: updatedRow ? "LEFT" as const : "NO_ACTIVE_MEMBERSHIP" as const,
   };
 }
 
@@ -813,9 +1090,10 @@ export async function getStudyRoomDetailsForUser(params: {
       expires_at: roomAfterCheck.expires_at,
       ended_at: roomAfterCheck.ended_at,
       password: roomAfterCheck.password,
-      can_close: roomAfterCheck.creator_id === params.userId,
-      can_extend: roomAfterCheck.creator_id === params.userId,
-      can_leave: roomAfterCheck.creator_id !== params.userId,
+      can_close: roomAfterCheck.creator_id === params.userId && roomAfterCheck.status === "active",
+      can_extend: roomAfterCheck.creator_id === params.userId && roomAfterCheck.status === "active",
+      can_leave:
+        roomAfterCheck.status === "collecting" || roomAfterCheck.creator_id !== params.userId,
       viewer_user_id: params.userId,
     },
     participants,
@@ -981,54 +1259,21 @@ export async function closeStudyRoom(params: { userId: string; roomId: string })
     };
   }
 
-  const nowIso = new Date().toISOString();
-  const { error } = await supabaseAdmin
-    .from("study_rooms")
-    .update({
-      status: "closed",
-      ended_at: nowIso,
-    })
-    .eq("id", params.roomId);
-  if (error) {
-    const details = toErrorDetails(error);
-    console.error("[study_room] close_failed", {
-      table: "study_rooms",
-      query: "closeStudyRoom",
-      room_id: params.roomId,
-      user_id: params.userId,
-      ...details,
-    });
+  const collecting = await beginRoomCollectingPhase({
+    roomId: params.roomId,
+    trigger: "creator_closed",
+  });
+  if (!collecting.ok) {
     throw new Error(
-      `Failed to close study room. table=study_rooms room_id=${params.roomId} user_id=${params.userId} reason=${details.message}`,
+      `Failed to start room collection phase. table=study_rooms room_id=${params.roomId} user_id=${params.userId}`,
     );
   }
 
-  const { error: participantsCloseError } = await supabaseAdmin
-    .from("study_room_participants")
-    .update({
-      left_at: nowIso,
-      presence_state: "offline",
-      focus_mode: false,
-      focus_started_at: null,
-      current_streak_seconds: 0,
-      last_active_at: nowIso,
-    })
-    .eq("room_id", params.roomId)
-    .is("left_at", null);
-  if (participantsCloseError) {
-    const details = toErrorDetails(participantsCloseError);
-    console.warn("[study_room] close_participants_update_failed", {
-      table: "study_room_participants",
-      query: "closeStudyRoom",
-      room_id: params.roomId,
-      user_id: params.userId,
-      ...details,
-    });
-  }
-
-  console.info("[study_room] closed", {
+  console.info("[study_room] collecting_started_by_creator", {
     room_id: params.roomId,
     user_id: params.userId,
+    closure_started_at: collecting.closureStartedAt,
+    collection_deadline_at: collecting.collectionDeadlineAt,
   });
   return {
     ok: true as const,

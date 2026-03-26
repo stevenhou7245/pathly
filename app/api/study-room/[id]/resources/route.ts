@@ -149,6 +149,12 @@ export async function POST(
           { status: 400 },
         );
       }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<ResourcesResponse>(
+          { success: false, message: "This study room is in collecting mode. New resources are disabled." },
+          { status: 400 },
+        );
+      }
       return NextResponse.json<ResourcesResponse>(
         { success: false, message: "You are not a participant of this room." },
         { status: 403 },

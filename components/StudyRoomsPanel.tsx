@@ -901,7 +901,7 @@ export default function StudyRoomsPanel({
   >("");
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
-  const [leaveSaveModalMode, setLeaveSaveModalMode] = useState<"before_leave" | "room_closed">(
+  const [leaveSaveModalMode, setLeaveSaveModalMode] = useState<"before_leave" | "room_collecting">(
     "before_leave",
   );
   const [leaveSaveContent, setLeaveSaveContent] = useState<StudyRoomLeaveSavableContent | null>(null);
@@ -930,6 +930,7 @@ export default function StudyRoomsPanel({
   const realtimeSubscriptionRunRef = useRef(0);
   const roomStatusRef = useRef("");
   const autoCloseSaveModalEventKeysRef = useRef<Set<string>>(new Set());
+  const expiryCollectingTriggerRef = useRef("");
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) ?? null,
@@ -998,6 +999,7 @@ export default function StudyRoomsPanel({
   const canSendMessages = roomDetail?.status === "active";
   const canModifyRoomContent = roomDetail?.status === "active";
   const isRoomClosed = roomDetail?.status === "closed";
+  const isRoomCollecting = roomDetail?.status === "collecting";
   const currentParticipant = useMemo(
     () =>
       roomDetail
@@ -1302,6 +1304,9 @@ export default function StudyRoomsPanel({
     if (!roomDetail || !isWorkspaceOpen) {
       return;
     }
+    if (roomDetail.status !== "active") {
+      return;
+    }
     const tick = window.setInterval(() => {
       const inactiveForMs = Date.now() - lastInteractionAtRef.current;
       const presenceState =
@@ -1387,14 +1392,20 @@ export default function StudyRoomsPanel({
       setShowExtendInput(false);
       return;
     }
-    if (timingInfo.hasExpired && roomDetail.status !== "closed") {
-      setShowExpireModal(true);
+    if (timingInfo.hasExpired && roomDetail.status === "active") {
+      const triggerKey = `${roomDetail.id}:${roomDetail.expires_at ?? "no-expire"}`;
+      if (expiryCollectingTriggerRef.current !== triggerKey) {
+        expiryCollectingTriggerRef.current = triggerKey;
+        void loadRoomData(roomDetail.id);
+        void loadWorkspaceExtras(roomDetail.id);
+      }
       console.info("[study_room] duration_expired_notice", {
         room_id: roomDetail.id,
         status: roomDetail.status,
         viewer_user_id: roomDetail.viewer_user_id,
         creator_id: roomDetail.creator_id,
       });
+      setShowExpireModal(false);
     } else {
       setShowExpireModal(false);
       setShowExtendInput(false);
@@ -1838,8 +1849,11 @@ export default function StudyRoomsPanel({
         const previousStatus =
           toSafeString(oldRow?.status).trim().toLowerCase() ||
           roomStatusRef.current.trim().toLowerCase();
-        const endedAt = toSafeNullableString(newRow?.ended_at) ?? "no-ended-at";
-        const closeEventKey = `${activeRoomId}:${endedAt}`;
+        const closureStartedAt =
+          toSafeNullableString(newRow?.closure_started_at) ??
+          toSafeNullableString(newRow?.ended_at) ??
+          "no-closure-start";
+        const closeEventKey = `${activeRoomId}:${closureStartedAt}`;
         console.info("[study_room_realtime] room_state_changed", {
           room_id: activeRoomId,
           previous_status: previousStatus || null,
@@ -1848,8 +1862,8 @@ export default function StudyRoomsPanel({
         if (nextStatus === "active") {
           clearAutoSaveModalCloseEventKeysForRoom(activeRoomId);
         }
-        if (nextStatus === "closed" && previousStatus !== "closed") {
-          void openAutoSaveModalForClosedRoom({
+        if (nextStatus === "collecting" && previousStatus !== "collecting") {
+          void openAutoSaveModalForCollecting({
             roomId: activeRoomId,
             eventKey: closeEventKey,
           });
@@ -1876,6 +1890,19 @@ export default function StudyRoomsPanel({
       });
     };
   }, [activeRoomId]);
+
+  useEffect(() => {
+    if (!activeRoomId || !roomDetail) {
+      return;
+    }
+    if (roomDetail.status !== "collecting") {
+      return;
+    }
+    void openAutoSaveModalForCollecting({
+      roomId: activeRoomId,
+      eventKey: `${activeRoomId}:collecting-status`,
+    });
+  }, [activeRoomId, roomDetail?.status]);
 
   async function handleCreateRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2141,13 +2168,14 @@ export default function StudyRoomsPanel({
     }
   }
 
-  async function executeLeaveRoom() {
+  async function executeLeaveRoom(collectionStatus?: "completed" | "skipped") {
     if (!activeRoomId) {
       return;
     }
     setIsLeavingRoom(true);
     setPanelError("");
     setPanelMessage("");
+    let shouldCloseModal = false;
     try {
       const response = await fetch("/api/study-room/leave", {
         method: "POST",
@@ -2156,6 +2184,7 @@ export default function StudyRoomsPanel({
         },
         body: JSON.stringify({
           room_id: activeRoomId,
+          collection_status: collectionStatus,
         }),
       });
       const payload = (await response.json()) as StudyRoomActionResponse;
@@ -2168,12 +2197,15 @@ export default function StudyRoomsPanel({
       const nextRoom = rooms.find((room) => room.id !== activeRoomId);
       onSelectRoom(nextRoom?.id ?? "");
       setIsWorkspaceOpen(Boolean(nextRoom?.id));
+      shouldCloseModal = true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to leave room.";
       setPanelError(message);
     } finally {
       setIsLeavingRoom(false);
-      setShowLeaveConfirm(false);
+      if (shouldCloseModal) {
+        setShowLeaveConfirm(false);
+      }
       setIsSavingLeaveSelections(false);
     }
   }
@@ -2269,7 +2301,7 @@ export default function StudyRoomsPanel({
     }
   }
 
-  async function openAutoSaveModalForClosedRoom(params: { roomId: string; eventKey: string }) {
+  async function openAutoSaveModalForCollecting(params: { roomId: string; eventKey: string }) {
     const { roomId, eventKey } = params;
     if (!roomId || !eventKey) {
       return;
@@ -2288,9 +2320,9 @@ export default function StudyRoomsPanel({
       room_id: roomId,
       event_key: eventKey,
     });
-    setLeaveSaveModalMode("room_closed");
+    setLeaveSaveModalMode("room_collecting");
     setShowLeaveConfirm(true);
-    setPanelMessage("Room closed. Save any content you want before leaving.");
+    setPanelMessage("Room is in collecting mode. Save any content you want before exiting.");
     await loadLeaveSaveContent(roomId);
   }
 
@@ -2316,7 +2348,11 @@ export default function StudyRoomsPanel({
     await loadLeaveSaveContent(activeRoomId);
   }
 
-  function closeLeaveSaveModalWithoutSaving() {
+  async function closeLeaveSaveModalWithoutSaving() {
+    if (leaveSaveModalMode === "room_collecting") {
+      await executeLeaveRoom("skipped");
+      return;
+    }
     setShowLeaveConfirm(false);
     setIsSavingLeaveSelections(false);
     setIsCreatingLeaveNotebook(false);
@@ -2375,12 +2411,7 @@ export default function StudyRoomsPanel({
       if (leaveSaveModalMode === "before_leave") {
         await executeLeaveRoom();
       } else {
-        setShowLeaveConfirm(false);
-        setPanelMessage(
-          payload.notebook && payload.entry
-            ? `Saved into "${payload.notebook.name}" as entry "${payload.entry.topic}".`
-            : "Room content saved to your notebook entry.",
-        );
+        await executeLeaveRoom("completed");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save selected room content.";
@@ -2406,9 +2437,9 @@ export default function StudyRoomsPanel({
         throw new Error(payload.message ?? "Unable to close room.");
       }
 
-      setPanelMessage("Study room closed.");
-      const closeEventKey = `${activeRoomId}:manual-close`;
-      await openAutoSaveModalForClosedRoom({
+      setPanelMessage("Study room entered collecting mode.");
+      const closeEventKey = `${activeRoomId}:manual-collecting`;
+      await openAutoSaveModalForCollecting({
         roomId: activeRoomId,
         eventKey: closeEventKey,
       });
@@ -2428,7 +2459,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     const nextFocus = !focusModeEnabled;
@@ -2462,7 +2493,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     setIsSavingGoal(true);
@@ -2497,7 +2528,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     setIsSavingNotes(true);
@@ -2535,7 +2566,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     setPanelError("");
@@ -2568,7 +2599,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     setIsAddingResource(true);
@@ -2609,7 +2640,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
 
@@ -2654,7 +2685,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     try {
@@ -2680,7 +2711,7 @@ export default function StudyRoomsPanel({
       return;
     }
     if (roomDetail.status !== "active") {
-      setPanelError("This study room is closed. You can view history but cannot create new content.");
+      setPanelError("This study room is not active. You can view history but cannot create new content.");
       return;
     }
     const question = aiQuestionDraft.trim();
@@ -3004,9 +3035,11 @@ export default function StudyRoomsPanel({
               </div>
             </div>
 
-            {isRoomClosed ? (
+            {isRoomCollecting || isRoomClosed ? (
               <div className="border-b border-[#1F2937]/10 bg-[#FFF4D6] px-4 py-2 text-xs font-extrabold text-[#1F2937]/80">
-                This study room is closed. History is available, but new content is disabled.
+                {isRoomCollecting
+                  ? "This study room is in collecting mode. Review and save shared content; new content is disabled."
+                  : "This study room is closed. History is available, but new content is disabled."}
               </div>
             ) : null}
 
@@ -3671,13 +3704,13 @@ export default function StudyRoomsPanel({
         <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/35 px-4">
           <div className="w-full max-w-3xl rounded-[1.5rem] border-2 border-[#1F2937] bg-white p-5 shadow-[0_8px_0_#1F2937,0_18px_26px_rgba(31,41,55,0.16)]">
             <p className="text-xl font-extrabold text-[#1F2937]">
-              {leaveSaveModalMode === "room_closed"
-                ? "Room closed: save room content?"
+              {leaveSaveModalMode === "room_collecting"
+                ? "Room collecting: save room content?"
                 : "Save room content before leaving?"}
             </p>
             <p className="mt-2 text-sm font-semibold text-[#1F2937]/72">
-              {leaveSaveModalMode === "room_closed"
-                ? "This room is now closed. Select shared notes, resources, and AI Tutor exchanges to save into your personal notebook."
+              {leaveSaveModalMode === "room_collecting"
+                ? "This room is in collecting mode. Select shared notes, resources, and AI Tutor exchanges to save into your personal notebook."
                 : "Select shared notes, resources, and AI Tutor exchanges you want to save into your personal notebook."}
             </p>
 
@@ -3908,10 +3941,12 @@ export default function StudyRoomsPanel({
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={closeLeaveSaveModalWithoutSaving}
+                onClick={() => {
+                  void closeLeaveSaveModalWithoutSaving();
+                }}
                 className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-4 !text-sm"
               >
-                Skip
+                {leaveSaveModalMode === "room_collecting" ? "Skip & Exit" : "Skip"}
               </button>
               {leaveSaveModalMode === "before_leave" ? (
                 <button
@@ -3939,7 +3974,11 @@ export default function StudyRoomsPanel({
                 }
                 className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-4 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {isSavingLeaveSelections ? "Saving..." : "Save Selected & Leave"}
+                {isSavingLeaveSelections
+                  ? "Saving..."
+                  : leaveSaveModalMode === "room_collecting"
+                    ? "Save Selected & Exit"
+                    : "Save Selected & Leave"}
               </button>
             </div>
           </div>

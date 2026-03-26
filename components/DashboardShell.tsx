@@ -597,6 +597,45 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
         },
         refreshUnreadBadges,
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "study_room_invitations",
+          filter: `receiver_id=eq.${currentUserId}`,
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const invitationId = typeof row?.id === "string" ? row.id : "";
+          const receiverId = typeof row?.receiver_id === "string" ? row.receiver_id : "";
+          const roomId = typeof row?.room_id === "string" ? row.room_id : "";
+          if (!invitationId || !receiverId) {
+            return;
+          }
+          if (receiverId !== currentUserId) {
+            console.info("[dashboard_badge_realtime] study_invitation_ignored_receiver_mismatch", {
+              current_user_id: currentUserId,
+              invitation_id: invitationId,
+              receiver_id: receiverId,
+              room_id: roomId || null,
+              event_type: payload.eventType,
+            });
+            return;
+          }
+          console.info("[dashboard_badge_realtime] study_invitation_event", {
+            current_user_id: currentUserId,
+            invitation_id: invitationId,
+            receiver_id: receiverId,
+            room_id: roomId || null,
+            event_type: payload.eventType,
+          });
+          refreshUnreadBadges();
+        },
+      )
       .subscribe((status, error) => {
         console.info("[dashboard_badge_realtime] subscription_status", {
           current_user_id: currentUserId,

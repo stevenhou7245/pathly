@@ -37,6 +37,18 @@ type MembershipContext = {
 };
 
 type RoomMembershipMode = "active_only" | "active_or_closed_historical";
+const WORKSPACE_COLLECTION_WINDOW_MINUTES = 15;
+
+function getRoomWriteBlockCode(roomStatus: string) {
+  const normalized = roomStatus.trim().toLowerCase();
+  if (normalized === "collecting") {
+    return "ROOM_COLLECTING" as const;
+  }
+  if (normalized === "closed") {
+    return "ROOM_CLOSED" as const;
+  }
+  return null;
+}
 
 export type StudyRoomParticipantWorkspaceState = {
   id: string;
@@ -202,6 +214,17 @@ function toErrorDetails(error: unknown) {
     details: toNullableString(record.details),
     hint: toNullableString(record.hint),
   };
+}
+
+function hasMissingColumnError(error: unknown, column: string) {
+  const details = toErrorDetails(error);
+  const message = `${details.message} ${details.details ?? ""} ${details.hint ?? ""}`.toLowerCase();
+  return (
+    details.code === "42703" ||
+    (message.includes("column") &&
+      message.includes(column.toLowerCase()) &&
+      message.includes("does not exist"))
+  );
 }
 
 function enrichAiMessagesSchemaMismatchMessage(baseMessage: string) {
@@ -424,12 +447,30 @@ async function requireRoomMembership(params: {
   userId: string;
   membershipMode?: RoomMembershipMode;
 }) {
-  const { data: roomRow, error: roomError } = await supabaseAdmin
+  let roomRow: GenericRecord | null = null;
+  let roomError: unknown = null;
+  const roomLookupWithCollectingColumns = await supabaseAdmin
     .from("study_rooms")
-    .select("id, creator_id, status")
+    .select("id, creator_id, status, expires_at, closure_started_at, collection_deadline_at")
     .eq("id", params.roomId)
     .limit(1)
     .maybeSingle();
+  roomRow = (roomLookupWithCollectingColumns.data as GenericRecord | null) ?? null;
+  roomError = roomLookupWithCollectingColumns.error;
+  if (
+    roomLookupWithCollectingColumns.error &&
+    (hasMissingColumnError(roomLookupWithCollectingColumns.error, "closure_started_at") ||
+      hasMissingColumnError(roomLookupWithCollectingColumns.error, "collection_deadline_at"))
+  ) {
+    const fallbackLookup = await supabaseAdmin
+      .from("study_rooms")
+      .select("id, creator_id, status, expires_at")
+      .eq("id", params.roomId)
+      .limit(1)
+      .maybeSingle();
+    roomRow = (fallbackLookup.data as GenericRecord | null) ?? null;
+    roomError = fallbackLookup.error;
+  }
   if (roomError) {
     const details = toErrorDetails(roomError);
     console.error("[study_room_workspace] room_lookup_failed", {
@@ -451,7 +492,62 @@ async function requireRoomMembership(params: {
   }
 
   const membershipMode = params.membershipMode ?? "active_only";
-  const roomStatus = toStringValue((roomRow as GenericRecord).status) || "active";
+  const roomRecord = roomRow as GenericRecord;
+  let roomStatus = toStringValue(roomRecord.status) || "active";
+  const normalizedCurrentStatus = roomStatus.trim().toLowerCase();
+  const expiresAtIso = toNullableString(roomRecord.expires_at);
+  const expiresAt = expiresAtIso ? new Date(expiresAtIso) : null;
+  const expiresAtMs = expiresAt && !Number.isNaN(expiresAt.getTime()) ? expiresAt.getTime() : null;
+  const nowMs = Date.now();
+  if (normalizedCurrentStatus === "active" && expiresAtMs !== null && nowMs >= expiresAtMs) {
+    const nowIso = new Date(nowMs).toISOString();
+    const deadlineIso = new Date(
+      nowMs + WORKSPACE_COLLECTION_WINDOW_MINUTES * 60_000,
+    ).toISOString();
+    const collectingResult = await supabaseAdmin
+      .from("study_rooms")
+      .update({
+        status: "collecting",
+        closure_started_at: nowIso,
+        collection_deadline_at: deadlineIso,
+        ended_at: null,
+      })
+      .eq("id", params.roomId)
+      .eq("status", "active");
+    if (collectingResult.error && hasMissingColumnError(collectingResult.error, "closure_started_at")) {
+      const fallbackResult = await supabaseAdmin
+        .from("study_rooms")
+        .update({
+          status: "collecting",
+          ended_at: null,
+        })
+        .eq("id", params.roomId)
+        .eq("status", "active");
+      if (fallbackResult.error) {
+        const details = toErrorDetails(fallbackResult.error);
+        console.warn("[study_room_workspace] collecting_transition_failed", {
+          table: "study_rooms",
+          query: "requireRoomMembership.transition_collecting.fallback",
+          room_id: params.roomId,
+          user_id: params.userId,
+          ...details,
+        });
+      } else {
+        roomStatus = "collecting";
+      }
+    } else if (collectingResult.error) {
+      const details = toErrorDetails(collectingResult.error);
+      console.warn("[study_room_workspace] collecting_transition_failed", {
+        table: "study_rooms",
+        query: "requireRoomMembership.transition_collecting",
+        room_id: params.roomId,
+        user_id: params.userId,
+        ...details,
+      });
+    } else {
+      roomStatus = "collecting";
+    }
+  }
   const normalizedRoomStatus = roomStatus.trim().toLowerCase();
   const allowsClosedHistoricalMembership =
     membershipMode === "active_or_closed_historical" &&
@@ -877,10 +973,11 @@ export async function saveStudyRoomNotes(params: {
   if (!membership.ok) {
     return membership;
   }
-  if (membership.context.roomStatus === "closed") {
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
     return {
       ok: false as const,
-      code: "ROOM_CLOSED" as const,
+      code: writeBlockCode,
     };
   }
 
@@ -1035,6 +1132,13 @@ export async function deleteStudyRoomNoteEntry(params: {
   if (!membership.ok) {
     return membership;
   }
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
+    return {
+      ok: false as const,
+      code: writeBlockCode,
+    };
+  }
 
   const entryId = params.entryId.trim();
   if (!entryId) {
@@ -1169,10 +1273,11 @@ export async function addStudyRoomLinkResource(params: {
   if (!membership.ok) {
     return membership;
   }
-  if (membership.context.roomStatus === "closed") {
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
     return {
       ok: false as const,
-      code: "ROOM_CLOSED" as const,
+      code: writeBlockCode,
     };
   }
 
@@ -1238,10 +1343,11 @@ export async function addStudyRoomFileResource(params: {
   if (!membership.ok) {
     return membership;
   }
-  if (membership.context.roomStatus === "closed") {
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
     return {
       ok: false as const,
-      code: "ROOM_CLOSED" as const,
+      code: writeBlockCode,
     };
   }
 
@@ -1346,6 +1452,13 @@ export async function removeStudyRoomResource(params: {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
+  }
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
+    return {
+      ok: false as const,
+      code: writeBlockCode,
+    };
   }
 
   const { data: row, error: rowError } = await supabaseAdmin
@@ -2125,10 +2238,11 @@ export async function askStudyRoomAiTutor(params: {
   if (!membership.ok) {
     return membership;
   }
-  if (membership.context.roomStatus === "closed") {
+  const writeBlockCode = getRoomWriteBlockCode(membership.context.roomStatus);
+  if (writeBlockCode) {
     return {
       ok: false as const,
-      code: "ROOM_CLOSED" as const,
+      code: writeBlockCode,
     };
   }
 

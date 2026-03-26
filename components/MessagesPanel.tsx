@@ -135,6 +135,21 @@ function upsertById<T extends { id: string }>(items: T[], item: T) {
   return next;
 }
 
+function toRealtimeLogDetails(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(error);
+  } catch {
+    serialized = "[unserializable]";
+  }
+  return {
+    error,
+    error_message: message,
+    error_serialized: serialized,
+  };
+}
+
 export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: MessagesPanelProps) {
   const [activeTab, setActiveTab] = useState<MessagesTab>("friend_requests");
   const [friendRequests, setFriendRequests] = useState<FriendRequestItem[]>([]);
@@ -159,6 +174,7 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
   const knownIncomingFriendshipIdsRef = useRef<Set<string>>(new Set());
   const currentUserIdRef = useRef("");
   const currentUserRoleRef = useRef<string | null>(null);
+  const onInboxUpdatedRef = useRef(onInboxUpdated);
 
   const loadInboxData = useCallback(async () => {
     setIsLoading(true);
@@ -275,6 +291,53 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
   }, [currentUserRole]);
 
   useEffect(() => {
+    onInboxUpdatedRef.current = onInboxUpdated;
+  }, [onInboxUpdated]);
+
+  const refreshStudyInvitationsFromServer = useCallback(
+    async (reason: string) => {
+      try {
+        const response = await fetch("/api/messages/study-invitations", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as StudyInvitationsApiResponse;
+        if (!response.ok || !payload.success) {
+          console.warn("[messages_realtime] study_invitations_refresh_failed", {
+            reason,
+            status: response.status,
+            message: payload.message ?? "Unable to refresh study invitations.",
+          });
+          return;
+        }
+
+        const nextStudyInvitations = sortByCreatedAtDesc(payload.study_invitations ?? []);
+        const nextUserId = payload.current_user_id?.trim() ?? "";
+        if (nextUserId && nextUserId !== currentUserIdRef.current) {
+          setCurrentUserId(nextUserId);
+        }
+        setStudyInvitations(nextStudyInvitations);
+        knownStudyInvitationIdsRef.current = new Set(
+          nextStudyInvitations.map((item) => item.id).filter(Boolean),
+        );
+
+        console.info("[messages_realtime] study_invitations_refreshed", {
+          reason,
+          current_user_id: currentUserIdRef.current,
+          count: nextStudyInvitations.length,
+        });
+        onInboxUpdatedRef.current?.();
+      } catch (error) {
+        console.warn("[messages_realtime] study_invitations_refresh_failed", {
+          reason,
+          ...toRealtimeLogDetails(error),
+        });
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
     if (!currentUserId) {
       return;
     }
@@ -284,7 +347,8 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       supabaseClient = getSupabaseBrowserClient();
     } catch (error) {
       console.warn("[messages_realtime] client_init_failed", {
-        reason: error instanceof Error ? error.message : String(error),
+        current_user_id: currentUserId,
+        ...toRealtimeLogDetails(error),
       });
       return;
     }
@@ -379,16 +443,43 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       const newRow = (payload.new ?? null) as Record<string, unknown> | null;
       const oldRow = (payload.old ?? null) as Record<string, unknown> | null;
       const rowId = toStringValue(newRow?.id ?? oldRow?.id);
+      const receiverId = toStringValue(newRow?.receiver_id ?? oldRow?.receiver_id);
+      const roomId = toStringValue(newRow?.room_id ?? oldRow?.room_id);
       if (!rowId) {
         return;
       }
+      if (receiverId && receiverId !== currentUserIdRef.current) {
+        console.info("[messages_realtime] study_invitation_ignored_receiver_mismatch", {
+          invitation_id: rowId,
+          receiver_id: receiverId,
+          viewer_id: currentUserIdRef.current,
+          room_id: roomId || null,
+          event_type: eventType,
+        });
+        return;
+      }
+
+      console.info("[messages_realtime] study_invitation_event", {
+        invitation_id: rowId,
+        receiver_id: receiverId || null,
+        viewer_id: currentUserIdRef.current,
+        room_id: roomId || null,
+        event_type: eventType,
+      });
 
       if (eventType === "DELETE") {
-        setStudyInvitations((previous) =>
-          sortByCreatedAtDesc(previous.filter((item) => item.id !== rowId)),
-        );
+        setStudyInvitations((previous) => {
+          const next = sortByCreatedAtDesc(previous.filter((item) => item.id !== rowId));
+          console.info("[messages_realtime] study_invitation_state_updated", {
+            event_type: eventType,
+            invitation_id: rowId,
+            count_before: previous.length,
+            count_after: next.length,
+          });
+          return next;
+        });
         knownStudyInvitationIdsRef.current.delete(rowId);
-        onInboxUpdated?.();
+        onInboxUpdatedRef.current?.();
         return;
       }
 
@@ -417,7 +508,15 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
           room_status: toStringValue(newRow.room_status) || existing?.room_status || "active",
           room_expires_at: toNullableString(newRow.room_expires_at) ?? existing?.room_expires_at ?? null,
         };
-        return sortByCreatedAtDesc(upsertById(previous, mapped));
+        const next = sortByCreatedAtDesc(upsertById(previous, mapped));
+        console.info("[messages_realtime] study_invitation_state_updated", {
+          event_type: eventType,
+          invitation_id: rowId,
+          count_before: previous.length,
+          count_after: next.length,
+          accepted: true,
+        });
+        return next;
       });
 
       const wasKnown = knownStudyInvitationIdsRef.current.has(rowId);
@@ -425,7 +524,10 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       if (eventType === "INSERT" && !wasKnown && shouldNotify()) {
         playSound("notification");
       }
-      onInboxUpdated?.();
+      onInboxUpdatedRef.current?.();
+      if (eventType === "INSERT" || eventType === "UPDATE") {
+        void refreshStudyInvitationsFromServer(`realtime_${eventType.toLowerCase()}`);
+      }
     };
 
     const handleFriendshipChange = (payload: {
@@ -457,7 +559,7 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
         return;
       }
       if (!isIncoming) {
-        onInboxUpdated?.();
+        onInboxUpdatedRef.current?.();
         return;
       }
 
@@ -466,7 +568,7 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
           sortByCreatedAtDesc(previous.filter((item) => item.friendship_id !== friendshipId)),
         );
         knownIncomingFriendshipIdsRef.current.delete(friendshipId);
-        onInboxUpdated?.();
+        onInboxUpdatedRef.current?.();
         return;
       }
 
@@ -499,8 +601,15 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       if (!wasKnown && shouldNotify()) {
         playSound("notification");
       }
-      onInboxUpdated?.();
+      onInboxUpdatedRef.current?.();
     };
+
+    console.info("[messages_realtime] subscription_start", {
+      current_user_id: currentUserId,
+      current_user_role: currentUserRole ?? null,
+      channel: `messages-panel:${currentUserId}`,
+      study_invitation_filter: `receiver_id=eq.${currentUserId}`,
+    });
 
     const channel = supabaseClient
       .channel(`messages-panel:${currentUserId}`)
@@ -564,23 +673,33 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
         },
         handleFriendshipChange,
       )
-      .subscribe((status) => {
+      .subscribe((status, error) => {
+        console.info("[messages_realtime] subscription_status", {
+          current_user_id: currentUserId,
+          status,
+          ...(error ? toRealtimeLogDetails(error) : {}),
+        });
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           console.error("[messages_realtime] subscription_failed", {
             current_user_id: currentUserId,
             status,
+            ...(error ? toRealtimeLogDetails(error) : {}),
           });
         }
       });
 
     return () => {
       active = false;
+      console.info("[messages_realtime] subscription_cleanup", {
+        current_user_id: currentUserId,
+        channel: `messages-panel:${currentUserId}`,
+      });
       void channel.unsubscribe();
       if (supabaseClient) {
         void supabaseClient.removeChannel(channel);
       }
     };
-  }, [currentUserId, currentUserRole, onInboxUpdated]);
+  }, [currentUserId, currentUserRole, refreshStudyInvitationsFromServer]);
 
   const unreadSystemMessagesCount = useMemo(
     () => systemMessages.filter((message) => !message.is_read).length,

@@ -48,6 +48,18 @@ export async function DELETE(
           { status: 403 },
         );
       }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<DeleteResourceResponse>(
+          { success: false, message: "This study room is in collecting mode. Resource edits are disabled." },
+          { status: 400 },
+        );
+      }
+      if (result.code === "ROOM_CLOSED") {
+        return NextResponse.json<DeleteResourceResponse>(
+          { success: false, message: "This study room has been closed." },
+          { status: 400 },
+        );
+      }
       return NextResponse.json<DeleteResourceResponse>(
         { success: false, message: "You are not a participant of this room." },
         { status: 403 },

@@ -164,6 +164,12 @@ export async function POST(
           { status: 404 },
         );
       }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<StudyRoomMessagesResponse>(
+          { success: false, message: "This study room is in collecting mode. New messages are disabled." },
+          { status: 400 },
+        );
+      }
       if (result.code === "ROOM_CLOSED") {
         return NextResponse.json<StudyRoomMessagesResponse>(
           { success: false, message: "This study room has been closed." },

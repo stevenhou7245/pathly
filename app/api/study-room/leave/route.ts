@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 
 const leaveRoomSchema = z.object({
   room_id: z.string().trim().min(1, "room_id is required"),
+  collection_status: z.enum(["completed", "skipped"]).optional(),
 });
 
 type LeaveRoomResponse = {
@@ -46,6 +47,7 @@ export async function POST(request: Request) {
     const result = await leaveStudyRoom({
       userId: sessionUser.id,
       roomId: parsed.data.room_id,
+      collectionStatus: parsed.data.collection_status ?? null,
     });
 
     if (!result.ok) {

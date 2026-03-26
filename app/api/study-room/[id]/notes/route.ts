@@ -150,6 +150,12 @@ export async function PUT(
           { status: 400 },
         );
       }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<NotesResponse>(
+          { success: false, message: "This study room is in collecting mode. New notes are disabled." },
+          { status: 400 },
+        );
+      }
       return NextResponse.json<NotesResponse>(
         { success: false, message: "You are not a participant of this room." },
         { status: 403 },
@@ -236,6 +242,18 @@ export async function DELETE(
         return NextResponse.json<NotesResponse>(
           { success: false, message: "You can only delete your own note entries." },
           { status: 403 },
+        );
+      }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<NotesResponse>(
+          { success: false, message: "This study room is in collecting mode. Note edits are disabled." },
+          { status: 400 },
+        );
+      }
+      if (result.code === "ROOM_CLOSED") {
+        return NextResponse.json<NotesResponse>(
+          { success: false, message: "This study room has been closed." },
+          { status: 400 },
         );
       }
       return NextResponse.json<NotesResponse>(

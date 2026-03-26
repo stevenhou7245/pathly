@@ -81,6 +81,12 @@ export async function POST(request: Request) {
           { status: 409 },
         );
       }
+      if (result.code === "ROOM_COLLECTING") {
+        return NextResponse.json<RespondInvitationResponse>(
+          { success: false, message: "This study room is in collecting mode and no longer accepts new joins." },
+          { status: 400 },
+        );
+      }
       if (result.code === "ROOM_CLOSED") {
         return NextResponse.json<RespondInvitationResponse>(
           { success: false, message: "This study room has been closed." },

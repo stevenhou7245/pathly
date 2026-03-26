@@ -50,7 +50,7 @@ export async function POST(
 
     return NextResponse.json<CloseRoomResponse>({
       success: true,
-      message: "Study room closed.",
+      message: "Study room entered collecting mode.",
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -64,4 +64,3 @@ export async function POST(
     );
   }
 }
-
