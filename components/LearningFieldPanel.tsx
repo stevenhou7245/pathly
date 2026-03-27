@@ -6,7 +6,7 @@ import {
   formatCourseDifficultyLabel,
   type CourseDifficultyLevel,
 } from "@/lib/courseDifficulty";
-import { playSound } from "@/lib/sound";
+import { playSound, type SoundKey } from "@/lib/sound";
 
 type LearningFieldPanelProps = {
   folder: LearningFolder;
@@ -298,6 +298,12 @@ type JourneyInitStatus = "not_started" | "initializing" | "ready" | "failed";
 const AI_TEST_PASSING_SCORE = 80;
 const JOURNEY_NODES_INITIAL_VISIBLE = 12;
 const JOURNEY_NODES_VISIBLE_STEP = 8;
+type PendingAiTestResultSound = {
+  primary: Extract<SoundKey, "complete" | "failure">;
+  playUnlock: boolean;
+  score: number;
+  passed: boolean;
+};
 
 type RatingApiResponse = {
   success: boolean;
@@ -471,6 +477,7 @@ export default function LearningFieldPanel({
     emoji: string;
     message: string;
   } | null>(null);
+  const [pendingAiTestResultSound, setPendingAiTestResultSound] = useState<PendingAiTestResultSound | null>(null);
   const [hasAnyPreviousTestAttempts, setHasAnyPreviousTestAttempts] = useState(false);
   const [ratingDraft, setRatingDraft] = useState<Record<string, number>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
@@ -580,6 +587,31 @@ export default function LearningFieldPanel({
   useEffect(() => {
     setVisibleJourneyNodeCount(JOURNEY_NODES_INITIAL_VISIBLE);
   }, [folder.id, journey?.journey_path_id]);
+
+  useEffect(() => {
+    if (!showResultPopup || !resultPopupPayload || !pendingAiTestResultSound) {
+      return;
+    }
+    playSound(pendingAiTestResultSound.primary);
+    console.info("[audio] ai_test_result_sound:played", {
+      sound: pendingAiTestResultSound.primary,
+      score: pendingAiTestResultSound.score,
+      passed: pendingAiTestResultSound.passed,
+      popup_open: showResultPopup,
+      trigger: "result_popup_visible",
+    });
+    if (pendingAiTestResultSound.playUnlock) {
+      playSound("unlock");
+      console.info("[audio] ai_test_result_sound:played", {
+        sound: "unlock",
+        score: pendingAiTestResultSound.score,
+        passed: pendingAiTestResultSound.passed,
+        popup_open: showResultPopup,
+        trigger: "result_popup_visible",
+      });
+    }
+    setPendingAiTestResultSound(null);
+  }, [pendingAiTestResultSound, resultPopupPayload, showResultPopup]);
 
   const triggerNodePop = useCallback((courseIds: string[]) => {
     const uniqueIds = Array.from(new Set(courseIds.filter(Boolean)));
@@ -937,6 +969,7 @@ export default function LearningFieldPanel({
     setAttemptHistory([]);
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
     setHasAnyPreviousTestAttempts(false);
     setRatingDraft({});
     setCommentDraft({});
@@ -1029,6 +1062,7 @@ export default function LearningFieldPanel({
           setAttemptHistory([]);
           setShowResultPopup(false);
           setResultPopupPayload(null);
+          setPendingAiTestResultSound(null);
         }
       } catch (error) {
         if (courseRequestIdRef.current !== requestId) {
@@ -1223,6 +1257,7 @@ export default function LearningFieldPanel({
     setAttemptHistory([]);
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
     setHasAnyPreviousTestAttempts(false);
     resetTransitionReviewState();
   }
@@ -1234,12 +1269,14 @@ export default function LearningFieldPanel({
     setAiTestError("");
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
     setIsAiTestModalOpen(false);
   }
 
   function dismissResultPopup() {
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
   }
 
   async function handleNodeClick(node: JourneyNode) {
@@ -1251,7 +1288,6 @@ export default function LearningFieldPanel({
       return;
     }
 
-    playSound("click");
     if (shouldInterceptTransitionReview(node)) {
       await openTransitionReviewForNode(node);
       return;
@@ -1349,6 +1385,7 @@ export default function LearningFieldPanel({
     setAttemptHistory([]);
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
 
     try {
       const response = await fetch("/api/course/test/start", {
@@ -1497,6 +1534,7 @@ export default function LearningFieldPanel({
       setAiTestMode("history");
       setShowResultPopup(false);
       setResultPopupPayload(null);
+      setPendingAiTestResultSound(null);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to load test attempt detail right now.";
@@ -1535,6 +1573,7 @@ export default function LearningFieldPanel({
     setTestResult(null);
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
 
     try {
       const response = await fetch("/api/course/test/submit", {
@@ -1610,10 +1649,6 @@ export default function LearningFieldPanel({
       if (reviewResult.passed) {
         setActionMessage(`Great work. You passed with ${reviewResult.score}/100.`);
         setTestFeedback(reviewResult.feedback_summary);
-        playSound("complete");
-        if (newlyUnlockedIds.length > 0) {
-          playSound("unlock");
-        }
       } else {
         setActionMessage(
           `You scored ${reviewResult.score}/100. You need ${reviewResult.required_score} to pass this course.`,
@@ -1621,7 +1656,6 @@ export default function LearningFieldPanel({
         setTestFeedback(
           "Review current resource. Try another resource. Retake test later.",
         );
-        playSound("failure");
       }
 
       await loadCourseDetails(courseDetails.id, {
@@ -1642,6 +1676,19 @@ export default function LearningFieldPanel({
         message: popupMessage,
       });
       setShowResultPopup(true);
+      setPendingAiTestResultSound({
+        primary: reviewResult.passed ? "complete" : "failure",
+        playUnlock: reviewResult.passed && newlyUnlockedIds.length > 0,
+        score: reviewResult.score,
+        passed: reviewResult.passed,
+      });
+      console.info("[audio] ai_test_result_sound:queued", {
+        primary: reviewResult.passed ? "complete" : "failure",
+        play_unlock: reviewResult.passed && newlyUnlockedIds.length > 0,
+        score: reviewResult.score,
+        passed: reviewResult.passed,
+        trigger: "result_received",
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to submit AI test right now.";
       setAiTestError(message);
@@ -1654,6 +1701,7 @@ export default function LearningFieldPanel({
     setAiTestError("");
     setShowResultPopup(false);
     setResultPopupPayload(null);
+    setPendingAiTestResultSound(null);
     await handlePrepareTest({ forceNewAttempt: true });
   }
 
@@ -1834,6 +1882,14 @@ export default function LearningFieldPanel({
                           clearNodeFlip(node.course_id);
                         }}
                         onClick={() => {
+                          if (node.status !== "locked") {
+                            playSound("click");
+                            console.info("[audio] course_click_sound:played", {
+                              course_id: node.course_id,
+                              status: node.status,
+                              trigger: "journey_node_click_handler_start",
+                            });
+                          }
                           void handleNodeClick(node);
                         }}
                         className={`${getNodeClassName(node.status, { pop: shouldPop })} journey-node-coin${

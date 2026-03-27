@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const AUTH_SESSION_COOKIE_NAME = "pathly-auth-token";
-const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
 export type SessionUser = {
   id: string;
@@ -58,7 +58,7 @@ function hashSessionToken(token: string) {
 export async function createUserSession(userId: string) {
   const token = generateSessionToken();
   const tokenHash = hashSessionToken(token);
-  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+  const expiresAt = new Date(Date.now() + SESSION_IDLE_TIMEOUT_MS);
 
   const { error } = await supabaseAdmin.from("sessions").insert({
     user_id: userId,
@@ -92,7 +92,7 @@ export async function resolveSessionUserByToken(token: string): Promise<SessionL
 
   const { data: session, error: sessionError } = await supabaseAdmin
     .from("sessions")
-    .select("id, user_id, expires_at")
+    .select("id, user_id, created_at, expires_at")
     .eq("token_hash", tokenHash)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -115,9 +115,21 @@ export async function resolveSessionUserByToken(token: string): Promise<SessionL
     };
   }
 
+  const createdAtRaw = typeof session.created_at === "string" ? session.created_at : "";
+  const createdAtMs = Date.parse(createdAtRaw);
   const expiresAtRaw = typeof session.expires_at === "string" ? session.expires_at : "";
   const expiresAtMs = Date.parse(expiresAtRaw);
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) {
+  const derivedIdleExpiryMs = Number.isFinite(createdAtMs)
+    ? createdAtMs + SESSION_IDLE_TIMEOUT_MS
+    : Number.NaN;
+  const effectiveExpiryMs =
+    Number.isFinite(expiresAtMs) && Number.isFinite(derivedIdleExpiryMs)
+      ? Math.min(expiresAtMs, derivedIdleExpiryMs)
+      : Number.isFinite(expiresAtMs)
+      ? expiresAtMs
+      : derivedIdleExpiryMs;
+
+  if (!Number.isFinite(effectiveExpiryMs) || effectiveExpiryMs <= now) {
     return {
       status: "session_expired",
       user: null,
@@ -168,7 +180,7 @@ export async function resolveSessionUserByToken(token: string): Promise<SessionL
     session_id: session.id,
     user_id: session.user_id,
     token_hash: tokenHash,
-    expires_at: expiresAtRaw,
+    expires_at: new Date(effectiveExpiryMs).toISOString(),
   };
 }
 

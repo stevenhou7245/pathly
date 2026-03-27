@@ -9,6 +9,10 @@ export function setAuthSessionCookie(params: {
   expiresAt: Date;
 }) {
   const { response, token, expiresAt } = params;
+  const maxAgeSeconds = Math.max(
+    0,
+    Math.floor((expiresAt.getTime() - Date.now()) / 1000),
+  );
 
   response.cookies.set({
     name: AUTH_SESSION_COOKIE_NAME,
@@ -17,6 +21,7 @@ export function setAuthSessionCookie(params: {
     sameSite: "lax",
     secure: isProduction,
     path: "/",
+    maxAge: maxAgeSeconds,
     expires: expiresAt,
   });
 }
@@ -29,6 +34,7 @@ export function clearAuthSessionCookie(response: NextResponse) {
     sameSite: "lax",
     secure: isProduction,
     path: "/",
+    maxAge: 0,
     expires: new Date(0),
   });
 }

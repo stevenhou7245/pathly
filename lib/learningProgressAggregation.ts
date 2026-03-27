@@ -412,9 +412,18 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
   days?: number;
   limit?: number;
 }) {
+  const logContext = {
+    user_id: params.userId,
+    days: Math.max(1, Math.floor(params.days ?? 7)),
+    limit: Math.max(1, Math.floor(params.limit ?? 3)),
+  };
   const days = Math.max(1, Math.floor(params.days ?? 7));
   const limit = Math.max(1, Math.floor(params.limit ?? 3));
   const threshold = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  console.info("[journey_summary] start", {
+    ...logContext,
+    completed_at_threshold: threshold,
+  });
 
   const progressResult = await supabaseAdmin
     .from("user_course_progress")
@@ -426,8 +435,21 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
     .limit(Math.max(limit * 8, 30));
 
   if (progressResult.error) {
-    throw new Error("Failed to load recent completed courses.");
+    console.error("[journey_summary] step_failed:user_course_progress", {
+      ...logContext,
+      error_message: progressResult.error.message,
+      error_code: progressResult.error.code ?? null,
+      error_details: progressResult.error.details ?? null,
+      error_hint: progressResult.error.hint ?? null,
+    });
+    throw new Error(
+      `Journey summary failed at user_course_progress query: ${progressResult.error.message}`,
+    );
   }
+  console.info("[journey_summary] step_result:user_course_progress", {
+    ...logContext,
+    row_count: (progressResult.data ?? []).length,
+  });
 
   const completionRows = ((progressResult.data ?? []) as GenericRow[])
     .map((row) => ({
@@ -442,6 +464,11 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
     completionRows,
     Math.max(limit * 8, 30),
   );
+  console.info("[journey_summary] step_result:filtered_completions", {
+    ...logContext,
+    completion_row_count: completionRows.length,
+    filtered_row_count: filteredCompletionRows.length,
+  });
 
   if (filteredCompletionRows.length === 0) {
     return [] as RecentCompletedCourse[];
@@ -465,12 +492,23 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
       .in("journey_path_id", journeyPathIds)
       .in("course_id", courseIds),
   ]);
+  console.info("[journey_summary] step_result:journey_paths", {
+    ...logContext,
+    row_count: (journeyResult.data ?? []).length,
+    error_message: journeyResult.error?.message ?? null,
+  });
+  console.info("[journey_summary] step_result:courses", {
+    ...logContext,
+    row_count: (coursesResult.data ?? []).length,
+    error_message: coursesResult.error?.message ?? null,
+  });
+  console.info("[journey_summary] step_result:journey_path_courses", {
+    ...logContext,
+    row_count: (journeyCoursesResult.data ?? []).length,
+    error_message: journeyCoursesResult.error?.message ?? null,
+  });
 
-  if (journeyResult.error || coursesResult.error || journeyCoursesResult.error) {
-    throw new Error("Failed to map completed courses.");
-  }
-
-  const journeyRows = (journeyResult.data ?? []).map((row) => ({
+  const journeyRows = ((journeyResult.error ? [] : (journeyResult.data ?? [])) as GenericRow[]).map((row) => ({
     id: toStringValue((row as GenericRow).id),
     learning_field_id: toStringValue((row as GenericRow).learning_field_id),
     created_at: toNullableString((row as GenericRow).created_at),
@@ -479,28 +517,50 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
     new Set(journeyRows.map((row) => row.learning_field_id).filter(Boolean)),
   );
 
-  const learningFieldMap = new Map<string, LearningFieldRow>();
-  if (learningFieldIds.length > 0) {
-    const learningFieldsResult = await supabaseAdmin
-      .from("learning_fields")
-      .select("id, title, name")
-      .in("id", learningFieldIds);
-    if (learningFieldsResult.error) {
-      throw new Error("Failed to load learning field titles.");
+  const learningFieldContextMap = new Map<
+    string,
+    {
+      current_level: string | null;
+      target_level: string | null;
+      updated_at: string | null;
+      created_at: string | null;
     }
-
-    (learningFieldsResult.data ?? []).forEach((row) => {
-      const record = row as GenericRow;
-      const id = toStringValue(record.id);
-      if (!id) {
-        return;
-      }
-      learningFieldMap.set(id, {
-        id,
-        title: toNullableString(record.title),
-        name: toNullableString(record.name),
-      });
+  >();
+  if (learningFieldIds.length > 0) {
+    const learningFieldContextResult = await supabaseAdmin
+      .from("user_learning_fields")
+      .select("field_id, current_level, target_level, updated_at, created_at")
+      .eq("user_id", params.userId)
+      .in("field_id", learningFieldIds);
+    console.info("[journey_summary] step_result:user_learning_fields", {
+      ...logContext,
+      row_count: (learningFieldContextResult.data ?? []).length,
+      error_message: learningFieldContextResult.error?.message ?? null,
     });
+    if (!learningFieldContextResult.error) {
+      ((learningFieldContextResult.data ?? []) as GenericRow[]).forEach((row) => {
+        const fieldId = toStringValue(row.field_id);
+        if (!fieldId) {
+          return;
+        }
+        const nextRecord = {
+          current_level: toNullableString(row.current_level),
+          target_level: toNullableString(row.target_level),
+          updated_at: toNullableString(row.updated_at),
+          created_at: toNullableString(row.created_at),
+        };
+        const existing = learningFieldContextMap.get(fieldId);
+        if (!existing) {
+          learningFieldContextMap.set(fieldId, nextRecord);
+          return;
+        }
+        const existingTimestamp = toStringValue(existing.updated_at ?? existing.created_at ?? "");
+        const nextTimestamp = toStringValue(nextRecord.updated_at ?? nextRecord.created_at ?? "");
+        if (nextTimestamp > existingTimestamp) {
+          learningFieldContextMap.set(fieldId, nextRecord);
+        }
+      });
+    }
   }
 
   const journeyFieldMap = new Map<string, string>();
@@ -511,7 +571,7 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
   });
 
   const courseMap = new Map<string, CourseRow>();
-  ((coursesResult.data ?? []) as GenericRow[]).forEach((row) => {
+  ((coursesResult.error ? [] : (coursesResult.data ?? [])) as GenericRow[]).forEach((row) => {
     const id = toStringValue(row.id);
     if (!id) {
       return;
@@ -523,7 +583,7 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
   });
 
   const stepMap = new Map<string, JourneyPathCourseRow>();
-  ((journeyCoursesResult.data ?? []) as GenericRow[]).forEach((row) => {
+  ((journeyCoursesResult.error ? [] : (journeyCoursesResult.data ?? [])) as GenericRow[]).forEach((row) => {
     const journeyPathId = toStringValue(row.journey_path_id);
     const courseId = toStringValue(row.course_id);
     if (!journeyPathId || !courseId) {
@@ -536,14 +596,26 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
     });
   });
 
+  const formatLearningFieldName = (fieldId: string) => {
+    const context = learningFieldContextMap.get(fieldId);
+    const currentLevel = toStringValue(context?.current_level).trim();
+    const targetLevel = toStringValue(context?.target_level).trim();
+    if (currentLevel && targetLevel) {
+      return `${currentLevel} -> ${targetLevel}`;
+    }
+    if (targetLevel) {
+      return `Target ${targetLevel}`;
+    }
+    if (currentLevel) {
+      return `Current ${currentLevel}`;
+    }
+    return "Learning Journey";
+  };
+
   const items = filteredCompletionRows
     .map((row) => {
       const fieldId = journeyFieldMap.get(row.journey_path_id) ?? "";
-      const fieldTitleRecord = learningFieldMap.get(fieldId);
-      const learningFieldName =
-        toStringValue(fieldTitleRecord?.title).trim() ||
-        toStringValue(fieldTitleRecord?.name).trim() ||
-        "Untitled Field";
+      const learningFieldName = formatLearningFieldName(fieldId);
 
       const stepRecord = stepMap.get(`${row.journey_path_id}:${row.course_id}`);
       const stepNumber = Math.max(1, stepRecord?.step_number ?? 1);
@@ -561,6 +633,13 @@ export async function getRecentCompletedCoursesFromRealProgress(params: {
     .filter((item) => Boolean(item.completedAt))
     .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
     .slice(0, limit);
+
+  console.info("[journey_summary] complete", {
+    ...logContext,
+    journey_path_ids_count: journeyPathIds.length,
+    course_ids_count: courseIds.length,
+    items_count: items.length,
+  });
 
   return items;
 }

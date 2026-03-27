@@ -520,7 +520,7 @@ async function generateTransitionReviewQuestions(params: {
     promptVersion: TRANSITION_REVIEW_PROMPT_VERSION,
     systemInstruction: [
       "You generate lightweight transition-review questions between two adjacent lessons.",
-      "This is NOT a formal exam. This is a short, simple review before the next lesson.",
+      "This is NOT a formal exam. This is a short review before the next lesson.",
 
       "----------------------------------------",
       "CORE GOAL",
