@@ -175,6 +175,20 @@ export async function GET(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const loweredMessage = message.toLowerCase();
+    const clientErrorMessages = new Set([
+      "selected lessons are not part of this journey.",
+      "transition review is only available for adjacent lessons.",
+      "please complete the previous lesson first.",
+      "please complete previous lessons before opening this lesson.",
+      "previous lesson not found.",
+      "next lesson not found.",
+    ]);
+    const status = loweredMessage.includes("not found")
+      ? 404
+      : loweredMessage.includes("bad request") || clientErrorMessages.has(loweredMessage)
+      ? 400
+      : 500;
     console.error("[api/course/transition-review/popup][GET] failed", {
       user_id: currentUserId,
       journey_path_id: normalizedJourneyPathId,
@@ -183,8 +197,8 @@ export async function GET(request: Request) {
       reason: message,
     });
     return NextResponse.json<TransitionReviewPopupResponse>(
-      { success: false, message: "Unable to load transition review right now." },
-      { status: 500 },
+      { success: false, message },
+      { status },
     );
   }
 }
