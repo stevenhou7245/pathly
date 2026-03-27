@@ -12,6 +12,33 @@ function toStringValue(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
+function toNumberValue(value: unknown) {
+  const normalized = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function normalizeUuid(value: unknown) {
+  return toStringValue(value).trim().toLowerCase();
+}
+
+function normalizeTitle(value: unknown) {
+  return toStringValue(value).trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function resolveProgressStepNumber(row: GenericRecord | null) {
+  if (!row) {
+    return null;
+  }
+  const candidateKeys = ["step_number", "course_step_number", "assigned_step_number"] as const;
+  for (const key of candidateKeys) {
+    const parsed = Math.floor(toNumberValue(row[key]));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 const uuidQueryParamSchema = (fieldName: string) =>
   z.preprocess(
     (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
@@ -93,75 +120,68 @@ export async function GET(request: Request) {
     normalizedFromCourseId = parsed.data.from_course_id;
     normalizedToCourseId = parsed.data.to_course_id;
 
-    const { data: journeyRow, error: journeyError } = await supabaseAdmin
-      .from("user_learning_journey_paths")
-      .select("id, user_id")
-      .eq("id", normalizedJourneyPathId)
+    const { data: learningFieldRow, error: learningFieldError } = await supabaseAdmin
+      .from("user_learning_fields")
+      .select("id, user_id, current_step_index")
       .eq("user_id", sessionUser.id)
+      .eq("id", normalizedJourneyPathId)
       .limit(1)
       .maybeSingle();
 
-    console.info("[api/course/transition-review/popup][GET] journey_path_query_result", {
+    console.info("[api/course/transition-review/popup][GET] user_learning_fields_query_result", {
       user_id: sessionUser.id,
       journey_path_id: normalizedJourneyPathId,
-      found: Boolean(journeyRow),
-      error_message: journeyError?.message ?? null,
+      found: Boolean(learningFieldRow),
+      error_message: learningFieldError?.message ?? null,
     });
 
-    if (journeyError) {
-      throw journeyError;
+    if (learningFieldError) {
+      throw learningFieldError;
     }
 
-    if (!journeyRow) {
+    if (!learningFieldRow) {
       const payload: TransitionReviewPopupResponse = {
         success: false,
-        message:
-          `Journey path or courses not found: missing journey_path_id=${normalizedJourneyPathId} ` +
-          "for current user.",
+        message: "Journey path not found for this user.",
       };
       return NextResponse.json(payload, { status: 404 });
     }
 
-    const { data: pathCourseRows, error: pathCourseError } = await supabaseAdmin
-      .from("journey_path_courses")
-      .select("course_id, step_number")
-      .eq("journey_path_id", normalizedJourneyPathId)
-      .order("step_number", { ascending: true });
+    const effectiveJourneyPathId = normalizeUuid((learningFieldRow as GenericRecord).id);
 
-    const typedPathCourseRows = (pathCourseRows ?? []) as GenericRecord[];
+    const { data: progressRows, error: progressError } = await supabaseAdmin
+      .from("user_course_progress")
+      .select("*")
+      .eq("user_id", sessionUser.id)
+      .in("course_id", [normalizedFromCourseId, normalizedToCourseId]);
 
-    console.info("[api/course/transition-review/popup][GET] journey_path_courses_query_result", {
+    const typedProgressRows = (progressRows ?? []) as GenericRecord[];
+
+    console.info("[api/course/transition-review/popup][GET] user_course_progress_query_result", {
       user_id: sessionUser.id,
-      journey_path_id: normalizedJourneyPathId,
-      row_count: typedPathCourseRows.length,
-      sample_course_ids: typedPathCourseRows
+      journey_path_id: effectiveJourneyPathId,
+      row_count: typedProgressRows.length,
+      sample_rows: typedProgressRows
         .slice(0, 5)
-        .map((row) => toStringValue(row.course_id).trim().toLowerCase()),
-      error_message: pathCourseError?.message ?? null,
+        .map((row) => ({
+          course_id: normalizeUuid(row.course_id),
+          status: toStringValue(row.status).toLowerCase(),
+          journey_path_id: normalizeUuid(row.journey_path_id),
+        })),
+      error_message: progressError?.message ?? null,
     });
 
-    if (pathCourseError) {
-      throw pathCourseError;
-    }
-
-    if (typedPathCourseRows.length === 0) {
-      const payload: TransitionReviewPopupResponse = {
-        success: false,
-        pending_generation: true,
-        message:
-          `Journey path or courses not found: journey_path_courses rows are not ready yet ` +
-          `for journey_path_id=${normalizedJourneyPathId} (pending generation).`,
-      };
-      return NextResponse.json(payload, { status: 404 });
+    if (progressError) {
+      throw progressError;
     }
 
     const fromCourseRow =
-      typedPathCourseRows.find(
-        (row) => toStringValue(row.course_id).trim().toLowerCase() === normalizedFromCourseId,
+      typedProgressRows.find(
+        (row) => normalizeUuid(row.course_id) === normalizedFromCourseId,
       ) ?? null;
     const toCourseRow =
-      typedPathCourseRows.find(
-        (row) => toStringValue(row.course_id).trim().toLowerCase() === normalizedToCourseId,
+      typedProgressRows.find(
+        (row) => normalizeUuid(row.course_id) === normalizedToCourseId,
       ) ?? null;
 
     if (!fromCourseRow || !toCourseRow) {
@@ -176,23 +196,83 @@ export async function GET(request: Request) {
         success: false,
         message:
           `Journey path or courses not found: ${missingParts.join(", ")} ` +
-          `not found in journey_path_courses for journey_path_id=${normalizedJourneyPathId}.`,
+          `not found in user_course_progress for user_id=${sessionUser.id}.`,
       };
       return NextResponse.json(payload, { status: 404 });
     }
 
-    const fromStepNumber = Math.max(
+    const { data: coursesRows, error: coursesError } = await supabaseAdmin
+      .from("courses")
+      .select("id, title")
+      .in("id", [normalizedFromCourseId, normalizedToCourseId]);
+    if (coursesError) {
+      throw coursesError;
+    }
+    const typedCoursesRows = (coursesRows ?? []) as GenericRecord[];
+    const fromCourseTitle =
+      toStringValue(
+        typedCoursesRows.find((row) => normalizeUuid(row.id) === normalizedFromCourseId)?.title,
+      ).trim() || "";
+    const toCourseTitle =
+      toStringValue(
+        typedCoursesRows.find((row) => normalizeUuid(row.id) === normalizedToCourseId)?.title,
+      ).trim() || "";
+
+    let completionRows: GenericRecord[] = [];
+    const completionTitles = [fromCourseTitle, toCourseTitle].filter(Boolean);
+    if (completionTitles.length > 0) {
+      const { data: completions, error: completionError } = await supabaseAdmin
+        .from("user_learning_step_completions")
+        .select("step_number, step_title")
+        .eq("user_id", sessionUser.id)
+        .eq("user_learning_field_id", effectiveJourneyPathId)
+        .in("step_title", completionTitles);
+      if (completionError) {
+        throw completionError;
+      }
+      completionRows = (completions ?? []) as GenericRecord[];
+    }
+
+    console.info("[api/course/transition-review/popup][GET] user_learning_step_completions_query_result", {
+      user_id: sessionUser.id,
+      user_learning_field_id: effectiveJourneyPathId,
+      row_count: completionRows.length,
+    });
+
+    const fromCompletionRow =
+      completionRows.find(
+        (row) => normalizeTitle(row.step_title) === normalizeTitle(fromCourseTitle),
+      ) ?? null;
+    const toCompletionRow =
+      completionRows.find(
+        (row) => normalizeTitle(row.step_title) === normalizeTitle(toCourseTitle),
+      ) ?? null;
+
+    let fromStepNumber =
+      Math.max(0, Math.floor(toNumberValue(fromCompletionRow?.step_number ?? 0))) ||
+      resolveProgressStepNumber(fromCourseRow) ||
+      null;
+    let toStepNumber =
+      Math.max(0, Math.floor(toNumberValue(toCompletionRow?.step_number ?? 0))) ||
+      resolveProgressStepNumber(toCourseRow) ||
+      null;
+
+    const currentStepIndex = Math.max(
       1,
-      Math.floor(Number(fromCourseRow.step_number) || 1),
+      Math.floor(toNumberValue((learningFieldRow as GenericRecord).current_step_index) || 1),
     );
-    const toStepNumber = Math.max(
-      1,
-      Math.floor(Number(toCourseRow.step_number) || 1),
-    );
+    if (fromStepNumber == null && toStepNumber == null) {
+      fromStepNumber = Math.max(1, currentStepIndex - 1);
+      toStepNumber = fromStepNumber + 1;
+    } else if (fromStepNumber == null && toStepNumber != null) {
+      fromStepNumber = Math.max(1, toStepNumber - 1);
+    } else if (fromStepNumber != null && toStepNumber == null) {
+      toStepNumber = fromStepNumber + 1;
+    }
 
     const popup = await getOrCreateTransitionReviewPopup({
       userId: sessionUser.id,
-      journeyPathId: normalizedJourneyPathId,
+      journeyPathId: effectiveJourneyPathId,
       fromCourseId: normalizedFromCourseId,
       toCourseId: normalizedToCourseId,
     });
@@ -201,11 +281,11 @@ export async function GET(request: Request) {
       success: true,
       message: "Journey path ready for review",
       data: {
-        journey_path_id: normalizedJourneyPathId,
+        journey_path_id: effectiveJourneyPathId,
         from_course_id: normalizedFromCourseId,
         to_course_id: normalizedToCourseId,
-        from_step_number: fromStepNumber,
-        to_step_number: toStepNumber,
+        from_step_number: Math.max(1, fromStepNumber ?? 1),
+        to_step_number: Math.max(1, toStepNumber ?? 2),
       },
       popup,
     };
@@ -223,6 +303,7 @@ export async function GET(request: Request) {
       "Please complete the previous lesson first.",
       "Please complete previous lessons before opening this lesson.",
       "Previous lesson not found.",
+      "Next lesson not found.",
     ]);
     const status = message.includes("not found")
       ? 404
