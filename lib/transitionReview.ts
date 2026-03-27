@@ -424,6 +424,12 @@ async function resolveTransitionReviewContext(params: {
     .eq("course_id", params.fromCourseId)
     .order("weakness_score", { ascending: false })
     .limit(3);
+  const weaknessRowCount = weaknessError ? 0 : (weaknessRows ?? []).length;
+  console.info("[transitionReview] weakness_profiles:query_result", {
+    ...logContext,
+    row_count: weaknessRowCount,
+    error: weaknessError?.message ?? null,
+  });
   if (weaknessError) {
     console.warn("[transitionReview] resolve_context:weakness_query_failed", {
       ...logContext,
@@ -438,6 +444,12 @@ async function resolveTransitionReviewContext(params: {
   const weakConcepts = (weaknessError ? [] : ((weaknessRows ?? []) as GenericRecord[]))
     .map((row) => toStringValue(row.concept_tag).trim())
     .filter(Boolean);
+  if (weakConcepts.length === 0) {
+    console.info("[transitionReview] weakness_profiles:empty_using_fallback", {
+      ...logContext,
+      reason: weaknessError ? "query_error" : "no_rows",
+    });
+  }
 
   const { data: latestTestRow, error: latestTestError } = await supabaseAdmin
     .from("ai_user_tests")
