@@ -69,6 +69,10 @@ function normalizeForCompare(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function normalizeUuidForCompare(value: unknown) {
+  return toStringValue(value).trim().toLowerCase();
+}
+
 function parseQuestionArray(value: unknown): TransitionReviewQuestion[] {
   if (!Array.isArray(value)) {
     return [];
@@ -237,11 +241,13 @@ async function resolveTransitionReviewContext(params: {
   }
 
   const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const normalizedFromCourseId = normalizeUuidForCompare(params.fromCourseId);
+  const normalizedToCourseId = normalizeUuidForCompare(params.toCourseId);
   const fromStep = pathCourses.find(
-    (row) => toStringValue(row.course_id) === params.fromCourseId,
+    (row) => normalizeUuidForCompare(row.course_id) === normalizedFromCourseId,
   );
   const toStep = pathCourses.find(
-    (row) => toStringValue(row.course_id) === params.toCourseId,
+    (row) => normalizeUuidForCompare(row.course_id) === normalizedToCourseId,
   );
   if (!fromStep || !toStep) {
     throw new Error("Selected lessons are not part of this journey.");
@@ -263,12 +269,12 @@ async function resolveTransitionReviewContext(params: {
   }
   const progressByCourseId = new Map(
     ((progressRows ?? []) as GenericRecord[]).map((row) => [
-      toStringValue(row.course_id),
+      normalizeUuidForCompare(row.course_id),
       toStringValue(row.status).toLowerCase(),
     ]),
   );
-  const fromStatus = progressByCourseId.get(params.fromCourseId) ?? "locked";
-  const toStatus = progressByCourseId.get(params.toCourseId) ?? "locked";
+  const fromStatus = progressByCourseId.get(normalizedFromCourseId) ?? "locked";
+  const toStatus = progressByCourseId.get(normalizedToCourseId) ?? "locked";
   if (fromStatus !== "passed") {
     throw new Error("Please complete the previous lesson first.");
   }
@@ -285,7 +291,7 @@ async function resolveTransitionReviewContext(params: {
   }
   const fromCourseRow =
     ((courseRows ?? []) as GenericRecord[]).find(
-      (row) => toStringValue(row.id) === params.fromCourseId,
+      (row) => normalizeUuidForCompare(row.id) === normalizedFromCourseId,
     ) ?? null;
   if (!fromCourseRow) {
     throw new Error("Previous lesson not found.");
