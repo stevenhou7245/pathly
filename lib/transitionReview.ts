@@ -22,6 +22,7 @@ type TransitionReviewPayload = {
     from_course_title: string;
     from_course_description: string | null;
     resource_titles: string[];
+    resource_summaries: string[];
     weak_concepts: string[];
     latest_test_score: number | null;
   };
@@ -126,6 +127,9 @@ function parseReviewPayload(value: unknown): TransitionReviewPayload | null {
       resource_titles: Array.isArray(contextSummary.resource_titles)
         ? contextSummary.resource_titles.map((item) => toStringValue(item).trim()).filter(Boolean)
         : [],
+      resource_summaries: Array.isArray(contextSummary.resource_summaries)
+        ? contextSummary.resource_summaries.map((item) => toStringValue(item).trim()).filter(Boolean)
+        : [],
       weak_concepts: Array.isArray(contextSummary.weak_concepts)
         ? contextSummary.weak_concepts.map((item) => toStringValue(item).trim()).filter(Boolean)
         : [],
@@ -137,34 +141,48 @@ function parseReviewPayload(value: unknown): TransitionReviewPayload | null {
   };
 }
 
-function buildFallbackQuestions(params: {
+function buildContentBasedQuestions(params: {
   fromCourseTitle: string;
   fromCourseDescription: string | null;
   resourceTitles: string[];
+  resourceSummaries: string[];
   weakConcepts: string[];
 }): TransitionReviewQuestion[] {
-  const weakConcept = params.weakConcepts[0] ?? `${params.fromCourseTitle} fundamentals`;
+  const normalizedDescription = params.fromCourseDescription?.trim() || "";
+  const resourceTitle = params.resourceTitles[0]?.trim() || "";
+  const resourceSummary = params.resourceSummaries[0]?.trim() || "";
+  const weakConcept = params.weakConcepts[0]?.trim() || "";
+  const primaryConcept =
+    weakConcept ||
+    resourceTitle ||
+    normalizedDescription ||
+    params.fromCourseTitle;
+  const secondaryContext =
+    resourceSummary ||
+    params.resourceTitles[1]?.trim() ||
+    normalizedDescription ||
+    params.fromCourseTitle;
   const firstResource = params.resourceTitles[0] ?? "the key resource from the previous lesson";
-  const coreDescription = params.fromCourseDescription?.trim() || params.fromCourseTitle;
+  const coreDescription = normalizedDescription || params.fromCourseTitle;
 
   const questions: TransitionReviewQuestion[] = [
     {
       question_index: 1,
       question_type: "single_choice",
-      question_text: `Which option best reviews the weak concept "${weakConcept}" from ${params.fromCourseTitle}?`,
+      question_text: `Which option best reviews "${primaryConcept}" from ${params.fromCourseTitle}?`,
       options: [
-        `Explain ${weakConcept} in one sentence and give one practical usage example.`,
-        `Skip ${weakConcept} and focus on unrelated advanced topics.`,
-        `Memorize random keywords without applying ${weakConcept}.`,
-        `Only read titles without checking how ${weakConcept} is used.`,
+        `Explain ${primaryConcept} in one sentence and give one practical usage example.`,
+        `Skip ${primaryConcept} and focus on unrelated advanced topics.`,
+        `Memorize random keywords without applying ${primaryConcept}.`,
+        `Only read titles without checking how ${primaryConcept} is used.`,
       ],
-      correct_answer: `Explain ${weakConcept} in one sentence and give one practical usage example.`,
-      explanation: `Reinforcing ${weakConcept} with a concrete example improves retention for the next lesson.`,
+      correct_answer: `Explain ${primaryConcept} in one sentence and give one practical usage example.`,
+      explanation: `Reinforcing ${primaryConcept} with a concrete example improves retention for the next lesson.`,
     },
     {
       question_index: 2,
       question_type: "fill_blank",
-      question_text: `Fill in the blank: A key review resource from the previous lesson is "____".`,
+      question_text: `Fill in the blank: A key lesson resource or topic to review before the next step is "____".`,
       options: [],
       correct_answer: firstResource,
       explanation: `Reviewing "${firstResource}" before the next lesson helps bridge concepts smoothly.`,
@@ -172,7 +190,7 @@ function buildFallbackQuestions(params: {
     {
       question_index: 3,
       question_type: "short_answer",
-      question_text: `In one practical sentence, what should you carry from ${params.fromCourseTitle} into the next lesson?`,
+      question_text: `In one practical sentence, what should you carry from ${params.fromCourseTitle} into the next lesson based on "${secondaryContext}"?`,
       options: [],
       correct_answer: coreDescription,
       explanation:
@@ -181,6 +199,43 @@ function buildFallbackQuestions(params: {
   ];
 
   return questions.slice(0, TRANSITION_REVIEW_QUESTION_COUNT);
+}
+
+function buildTrueFallbackQuestions(params: {
+  fromCourseTitle: string;
+}): TransitionReviewQuestion[] {
+  const normalizedTitle = params.fromCourseTitle.trim() || "the previous lesson";
+  return [
+    {
+      question_index: 1,
+      question_type: "single_choice",
+      question_text: `Which option best prepares you to continue after ${normalizedTitle}?`,
+      options: [
+        `Explain one main idea from ${normalizedTitle} and apply it in a simple example.`,
+        "Skip review and move directly to unrelated topics.",
+        "Memorize random terms without context.",
+        "Avoid connecting previous and next lesson concepts.",
+      ],
+      correct_answer: `Explain one main idea from ${normalizedTitle} and apply it in a simple example.`,
+      explanation: "A short concept + application review creates a smoother transition.",
+    },
+    {
+      question_index: 2,
+      question_type: "fill_blank",
+      question_text: "Fill in the blank: Before moving on, I should review ____ from the previous lesson.",
+      options: [],
+      correct_answer: "one key concept",
+      explanation: "Naming one key concept helps consolidate retention before progressing.",
+    },
+    {
+      question_index: 3,
+      question_type: "short_answer",
+      question_text: "What is one practical action you will take to apply the previous lesson?",
+      options: [],
+      correct_answer: "apply one key concept in a small example",
+      explanation: "Practical application reinforces understanding better than passive review.",
+    },
+  ];
 }
 
 function gradeTransitionAnswer(params: {
@@ -401,10 +456,10 @@ async function resolveTransitionReviewContext(params: {
 
   const { data: resourceRows, error: resourceError } = await supabaseAdmin
     .from("course_resource_options")
-    .select("title")
+    .select("title, summary")
     .eq("course_id", params.fromCourseId)
     .order("created_at", { ascending: false })
-    .limit(3);
+    .limit(5);
   if (resourceError) {
     throw new Error(`Course resource query failed: ${resourceError.message}`);
   }
@@ -413,9 +468,57 @@ async function resolveTransitionReviewContext(params: {
     rowCount: (resourceRows ?? []).length,
     error: null,
   });
-  const resourceTitles = ((resourceRows ?? []) as GenericRecord[])
+  const optionResourceRows = (resourceRows ?? []) as GenericRecord[];
+  const resourceTitles = optionResourceRows
     .map((row) => toStringValue(row.title).trim())
     .filter(Boolean);
+  const optionResourceSummaries = optionResourceRows
+    .map((row) => toStringValue(row.summary).trim())
+    .filter(Boolean);
+
+  let summaryTableResourceSummaries: string[] = [];
+  try {
+    const { data: courseResourcesRows, error: courseResourcesError } = await supabaseAdmin
+      .from("course_resources")
+      .select("id")
+      .eq("course_id", params.fromCourseId)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    if (courseResourcesError) {
+      throw courseResourcesError;
+    }
+    const resourceIds = ((courseResourcesRows ?? []) as GenericRecord[])
+      .map((row) => toStringValue(row.id).trim())
+      .filter(Boolean);
+    if (resourceIds.length > 0) {
+      const { data: summaryRows, error: summaryError } = await supabaseAdmin
+        .from("resource_content_summaries")
+        .select("summary")
+        .in("resource_id", resourceIds)
+        .order("generated_at", { ascending: false })
+        .limit(5);
+      if (summaryError) {
+        throw summaryError;
+      }
+      summaryTableResourceSummaries = ((summaryRows ?? []) as GenericRecord[])
+        .map((row) => toStringValue(row.summary).trim())
+        .filter(Boolean);
+    }
+  } catch (error) {
+    console.warn("[transitionReview] resolve_context:resource_summary_lookup_failed", {
+      ...logContext,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const resourceSummaries = Array.from(
+    new Set([...optionResourceSummaries, ...summaryTableResourceSummaries].filter(Boolean)),
+  ).slice(0, 5);
+  console.info("[transitionReview] resolve_context:resource_summary_result", {
+    ...logContext,
+    option_summary_count: optionResourceSummaries.length,
+    summary_table_count: summaryTableResourceSummaries.length,
+    combined_summary_count: resourceSummaries.length,
+  });
 
   const { data: weaknessRows, error: weaknessError } = await supabaseAdmin
     .from("weakness_profiles")
@@ -474,6 +577,7 @@ async function resolveTransitionReviewContext(params: {
     fromCourseTitle: fromCourseTitle || "Previous lesson",
     fromCourseDescription: toNullableString(fromCourseRow.description),
     resourceTitles,
+    resourceSummaries,
     weakConcepts,
     generatedFromTestAttemptId: toNullableString((latestTestRow as GenericRecord | null)?.id),
     latestTestScore: Number.isFinite(
@@ -555,12 +659,79 @@ export async function getOrCreateTransitionReviewPopup(params: {
     }
   }
 
-  const questions = buildFallbackQuestions({
-    fromCourseTitle: context.fromCourseTitle,
-    fromCourseDescription: context.fromCourseDescription,
-    resourceTitles: context.resourceTitles,
-    weakConcepts: context.weakConcepts,
+  const hasWeaknessData = context.weakConcepts.length > 0;
+  const hasLessonContent =
+    Boolean(context.fromCourseDescription?.trim()) ||
+    context.resourceTitles.length > 0 ||
+    context.resourceSummaries.length > 0;
+  console.info("[transitionReview] context:loaded", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    has_course_description: Boolean(context.fromCourseDescription?.trim()),
+    resource_title_count: context.resourceTitles.length,
+    resource_summary_count: context.resourceSummaries.length,
+    weakness_count: context.weakConcepts.length,
+    latest_test_score: context.latestTestScore,
   });
+  if (hasWeaknessData) {
+    console.info("[transitionReview] weakness_profiles:found", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+      weakness_count: context.weakConcepts.length,
+    });
+  } else {
+    console.info("[transitionReview] weakness_profiles:empty", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+    });
+  }
+
+  let questions: TransitionReviewQuestion[];
+  if (hasLessonContent && hasWeaknessData) {
+    console.info("[transitionReview] generation_mode:weakness_enhanced", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+    });
+    questions = buildContentBasedQuestions({
+      fromCourseTitle: context.fromCourseTitle,
+      fromCourseDescription: context.fromCourseDescription,
+      resourceTitles: context.resourceTitles,
+      resourceSummaries: context.resourceSummaries,
+      weakConcepts: context.weakConcepts,
+    });
+  } else if (hasLessonContent) {
+    console.info("[transitionReview] generation_mode:content_based", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+    });
+    questions = buildContentBasedQuestions({
+      fromCourseTitle: context.fromCourseTitle,
+      fromCourseDescription: context.fromCourseDescription,
+      resourceTitles: context.resourceTitles,
+      resourceSummaries: context.resourceSummaries,
+      weakConcepts: [],
+    });
+  } else {
+    console.info("[transitionReview] generation_mode:true_fallback", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+    });
+    questions = buildTrueFallbackQuestions({
+      fromCourseTitle: context.fromCourseTitle,
+    });
+  }
 
   const payload: TransitionReviewPayload = {
     version: "course_transition_review_v1",
@@ -569,6 +740,7 @@ export async function getOrCreateTransitionReviewPopup(params: {
       from_course_title: context.fromCourseTitle,
       from_course_description: context.fromCourseDescription,
       resource_titles: context.resourceTitles,
+      resource_summaries: context.resourceSummaries,
       weak_concepts: context.weakConcepts,
       latest_test_score: context.latestTestScore,
     },
