@@ -506,6 +506,12 @@ export async function getOrCreateTransitionReviewPopup(params: {
 }): Promise<TransitionReviewPopup> {
   const context = await resolveTransitionReviewContext(params);
 
+  console.info("[transitionReview] latest_review_query:start", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+  });
   const { data: latestRow, error: latestError } = await supabaseAdmin
     .from("course_transition_reviews")
     .select("*")
@@ -516,8 +522,16 @@ export async function getOrCreateTransitionReviewPopup(params: {
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  console.info("[transitionReview] latest_review_query:result", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    found: Boolean(latestRow),
+    error: latestError?.message ?? null,
+  });
   if (latestError) {
-    throw new Error("Unable to load transition review state.");
+    throw new Error(`Unable to load transition review state: ${latestError.message}`);
   }
 
   const latest = (latestRow ?? null) as GenericRecord | null;
@@ -561,6 +575,13 @@ export async function getOrCreateTransitionReviewPopup(params: {
     questions,
   };
 
+  console.info("[transitionReview] create_review:insert", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    questionCount: payload.questions.length,
+  });
   const { data: insertedRow, error: insertError } = await supabaseAdmin
     .from("course_transition_reviews")
     .insert({
@@ -577,8 +598,24 @@ export async function getOrCreateTransitionReviewPopup(params: {
     .limit(1)
     .maybeSingle();
   if (insertError || !insertedRow) {
-    throw new Error("Unable to create transition review.");
+    console.error("[transitionReview] create_review:failed", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+      error: insertError?.message ?? null,
+    });
+    throw new Error(
+      `Unable to create transition review: ${insertError?.message ?? "insert returned no row."}`,
+    );
   }
+  console.info("[transitionReview] create_review:result", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    reviewId: toStringValue((insertedRow as GenericRecord).id) || null,
+  });
 
   return toPopupFromRow(insertedRow as GenericRecord);
 }
@@ -599,7 +636,10 @@ export async function submitTransitionReview(params: {
     .eq("user_id", params.userId)
     .limit(1)
     .maybeSingle();
-  if (reviewError || !reviewRow) {
+  if (reviewError) {
+    throw new Error(`Transition review lookup failed: ${reviewError.message}`);
+  }
+  if (!reviewRow) {
     throw new Error("Transition review not found.");
   }
 
@@ -633,7 +673,7 @@ export async function submitTransitionReview(params: {
       .eq("id", params.reviewId)
       .eq("user_id", params.userId);
     if (updateError) {
-      throw new Error("Unable to update transition review action.");
+      throw new Error(`Unable to update transition review action: ${updateError.message}`);
     }
 
     return {
@@ -686,7 +726,9 @@ export async function submitTransitionReview(params: {
     .delete()
     .eq("review_id", params.reviewId);
   if (deleteAnswersError) {
-    throw new Error("Unable to reset transition review answers.");
+    throw new Error(
+      `Unable to reset transition review answers: ${deleteAnswersError.message}`,
+    );
   }
 
   if (evaluations.length > 0) {
@@ -702,7 +744,9 @@ export async function submitTransitionReview(params: {
       .from("course_transition_review_answers")
       .insert(insertRows);
     if (insertAnswersError) {
-      throw new Error("Unable to store transition review answers.");
+      throw new Error(
+        `Unable to store transition review answers: ${insertAnswersError.message}`,
+      );
     }
   }
 
@@ -717,7 +761,7 @@ export async function submitTransitionReview(params: {
     .eq("id", params.reviewId)
     .eq("user_id", params.userId);
   if (updateError) {
-    throw new Error("Unable to finalize transition review.");
+    throw new Error(`Unable to finalize transition review: ${updateError.message}`);
   }
 
   const fromCourseId = toStringValue(review.from_course_id).trim();
