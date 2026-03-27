@@ -220,8 +220,16 @@ async function resolveTransitionReviewContext(params: {
   fromCourseId: string;
   toCourseId: string;
 }) {
+  const logContext = {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+  };
   const normalizedFromCourseId = normalizeUuidForCompare(params.fromCourseId);
   const normalizedToCourseId = normalizeUuidForCompare(params.toCourseId);
+  console.info("[transitionReview] resolve_context:start", logContext);
+
   const { data: journeyPathRow, error: journeyPathError } = await supabaseAdmin
     .from("journey_paths")
     .select("id, user_id, learning_field_id")
@@ -229,8 +237,18 @@ async function resolveTransitionReviewContext(params: {
     .eq("user_id", params.userId)
     .limit(1)
     .maybeSingle();
-  if (journeyPathError || !journeyPathRow) {
-    throw new Error("Journey path not found.");
+  console.info("[transitionReview] resolve_context:journey_path_result", {
+    ...logContext,
+    found: Boolean(journeyPathRow),
+    error: journeyPathError?.message ?? null,
+  });
+  if (journeyPathError) {
+    throw new Error(`Journey path query failed: ${journeyPathError.message}`);
+  }
+  if (!journeyPathRow) {
+    throw new Error(
+      `Journey path not found for user_id=${params.userId} journey_path_id=${params.journeyPathId}`,
+    );
   }
 
   const { data: pathCoursesRows, error: pathCoursesError } = await supabaseAdmin
@@ -238,8 +256,13 @@ async function resolveTransitionReviewContext(params: {
     .select("course_id, step_number")
     .eq("journey_path_id", params.journeyPathId)
     .order("step_number", { ascending: true });
+  console.info("[transitionReview] resolve_context:path_courses_result", {
+    ...logContext,
+    rowCount: (pathCoursesRows ?? []).length,
+    error: pathCoursesError?.message ?? null,
+  });
   if (pathCoursesError) {
-    throw new Error("Unable to load journey courses.");
+    throw new Error(`Journey path courses query failed: ${pathCoursesError.message}`);
   }
 
   const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
@@ -247,45 +270,99 @@ async function resolveTransitionReviewContext(params: {
     pathCourses.find((row) => normalizeUuidForCompare(row.course_id) === normalizedFromCourseId) ?? null;
   const toPathCourse =
     pathCourses.find((row) => normalizeUuidForCompare(row.course_id) === normalizedToCourseId) ?? null;
-  if (!fromPathCourse || !toPathCourse) {
-    throw new Error("Selected lessons are not part of this journey.");
+  console.info("[transitionReview] resolve_context:path_courses_resolved", {
+    ...logContext,
+    fromFound: Boolean(fromPathCourse),
+    toFound: Boolean(toPathCourse),
+  });
+  if (!fromPathCourse) {
+    throw new Error(
+      `from_course_id=${params.fromCourseId} not found in journey_path_courses for journey_path_id=${params.journeyPathId}`,
+    );
+  }
+  if (!toPathCourse) {
+    throw new Error(
+      `to_course_id=${params.toCourseId} not found in journey_path_courses for journey_path_id=${params.journeyPathId}`,
+    );
   }
 
   const fromStepNumberFromPath = Math.max(1, Math.floor(toNumberValue(fromPathCourse.step_number) || 1));
   const toStepNumberFromPath = Math.max(1, Math.floor(toNumberValue(toPathCourse.step_number) || 1));
   if (toStepNumberFromPath !== fromStepNumberFromPath + 1) {
-    throw new Error("Transition review is only available for adjacent lessons.");
+    throw new Error(
+      `Transition review is only available for adjacent lessons. from_step_number=${fromStepNumberFromPath} to_step_number=${toStepNumberFromPath}`,
+    );
   }
 
   const { data: progressRows, error: progressError } = await supabaseAdmin
     .from("user_course_progress")
     .select("*")
     .eq("user_id", params.userId)
-    .eq("journey_path_id", params.journeyPathId)
     .in("course_id", [params.fromCourseId, params.toCourseId]);
   if (progressError) {
-    throw new Error("Unable to load user course progress.");
+    throw new Error(`User course progress query failed: ${progressError.message}`);
   }
+  console.info("[transitionReview] resolve_context:user_progress_result", {
+    ...logContext,
+    rowCount: (progressRows ?? []).length,
+    error: null,
+  });
 
-  const progressByCourseId = new Map(
-    ((progressRows ?? []) as GenericRecord[]).map((row) => [
-      normalizeUuidForCompare(row.course_id),
-      row,
-    ]),
-  );
-  const fromProgressRow = progressByCourseId.get(normalizedFromCourseId) ?? null;
-  const toProgressRow = progressByCourseId.get(normalizedToCourseId) ?? null;
-  if (!fromProgressRow || !toProgressRow) {
-    throw new Error("Selected lessons are not part of this journey.");
+  const allProgressRows = (progressRows ?? []) as GenericRecord[];
+  const resolveProgressRowByCourseId = (courseId: string) => {
+    const normalizedCourseId = normalizeUuidForCompare(courseId);
+    const candidates = allProgressRows.filter(
+      (row) => normalizeUuidForCompare(row.course_id) === normalizedCourseId,
+    );
+    if (candidates.length === 0) {
+      return null;
+    }
+    const preferredByPath = candidates.find(
+      (row) => normalizeUuidForCompare(row.journey_path_id) === normalizeUuidForCompare(params.journeyPathId),
+    );
+    if (preferredByPath) {
+      return preferredByPath;
+    }
+    return candidates[0] ?? null;
+  };
+
+  const fromProgressRow = resolveProgressRowByCourseId(params.fromCourseId);
+  const toProgressRow = resolveProgressRowByCourseId(params.toCourseId);
+  console.info("[transitionReview] resolve_context:user_progress_resolved", {
+    ...logContext,
+    fromFound: Boolean(fromProgressRow),
+    toFound: Boolean(toProgressRow),
+    fromJourneyPathId: normalizeUuidForCompare(fromProgressRow?.journey_path_id),
+    toJourneyPathId: normalizeUuidForCompare(toProgressRow?.journey_path_id),
+  });
+  if (!fromProgressRow) {
+    throw new Error(
+      `from_course_id=${params.fromCourseId} not found in user_course_progress for user_id=${params.userId}`,
+    );
+  }
+  if (!toProgressRow) {
+    throw new Error(
+      `to_course_id=${params.toCourseId} not found in user_course_progress for user_id=${params.userId}`,
+    );
   }
 
   const fromStatus = toStringValue(fromProgressRow.status).toLowerCase() || "locked";
   const toStatus = toStringValue(toProgressRow.status).toLowerCase() || "locked";
-  if (fromStatus !== "passed") {
-    throw new Error("Please complete the previous lesson first.");
+  console.info("[transitionReview] resolve_context:user_progress_statuses", {
+    ...logContext,
+    fromStatus,
+    toStatus,
+  });
+  const previousLessonPassStatuses = new Set(["passed", "completed"]);
+  if (!previousLessonPassStatuses.has(fromStatus)) {
+    throw new Error(
+      `Previous lesson status is "${fromStatus}", expected passed/completed for course_id=${params.fromCourseId}`,
+    );
   }
   if (toStatus === "locked") {
-    throw new Error("Please complete previous lessons before opening this lesson.");
+    throw new Error(
+      `Next lesson status is "${toStatus}", cannot open transition review for course_id=${params.toCourseId}`,
+    );
   }
 
   const { data: courseRows, error: courseError } = await supabaseAdmin
@@ -293,8 +370,13 @@ async function resolveTransitionReviewContext(params: {
     .select("id, title, description")
     .in("id", [params.fromCourseId, params.toCourseId]);
   if (courseError) {
-    throw new Error("Unable to load lesson details.");
+    throw new Error(`Course details query failed: ${courseError.message}`);
   }
+  console.info("[transitionReview] resolve_context:course_details_result", {
+    ...logContext,
+    rowCount: (courseRows ?? []).length,
+    error: null,
+  });
   const normalizedCourseRows = (courseRows ?? []) as GenericRecord[];
   const fromCourseRow =
     normalizedCourseRows.find(
@@ -305,35 +387,55 @@ async function resolveTransitionReviewContext(params: {
       (row) => normalizeUuidForCompare(row.id) === normalizedToCourseId,
     ) ?? null;
   if (!fromCourseRow) {
-    throw new Error("Previous lesson not found.");
+    throw new Error(
+      `Previous lesson not found in courses table for course_id=${params.fromCourseId}`,
+    );
   }
   if (!toCourseRow) {
-    throw new Error("Next lesson not found.");
+    throw new Error(
+      `Next lesson not found in courses table for course_id=${params.toCourseId}`,
+    );
   }
   const fromCourseTitle = toStringValue(fromCourseRow.title).trim();
 
-  const { data: resourceRows } = await supabaseAdmin
+  const { data: resourceRows, error: resourceError } = await supabaseAdmin
     .from("course_resource_options")
     .select("title")
     .eq("course_id", params.fromCourseId)
     .order("created_at", { ascending: false })
     .limit(3);
+  if (resourceError) {
+    throw new Error(`Course resource query failed: ${resourceError.message}`);
+  }
+  console.info("[transitionReview] resolve_context:resource_result", {
+    ...logContext,
+    rowCount: (resourceRows ?? []).length,
+    error: null,
+  });
   const resourceTitles = ((resourceRows ?? []) as GenericRecord[])
     .map((row) => toStringValue(row.title).trim())
     .filter(Boolean);
 
-  const { data: weaknessRows } = await supabaseAdmin
+  const { data: weaknessRows, error: weaknessError } = await supabaseAdmin
     .from("weakness_profiles")
     .select("concept_tag, weakness_score")
     .eq("user_id", params.userId)
     .eq("course_id", params.fromCourseId)
     .order("weakness_score", { ascending: false })
     .limit(3);
+  if (weaknessError) {
+    throw new Error(`Weakness profile query failed: ${weaknessError.message}`);
+  }
+  console.info("[transitionReview] resolve_context:weakness_result", {
+    ...logContext,
+    rowCount: (weaknessRows ?? []).length,
+    error: null,
+  });
   const weakConcepts = ((weaknessRows ?? []) as GenericRecord[])
     .map((row) => toStringValue(row.concept_tag).trim())
     .filter(Boolean);
 
-  const { data: latestTestRow } = await supabaseAdmin
+  const { data: latestTestRow, error: latestTestError } = await supabaseAdmin
     .from("ai_user_tests")
     .select("id, earned_score")
     .eq("user_id", params.userId)
@@ -342,6 +444,14 @@ async function resolveTransitionReviewContext(params: {
     .order("graded_at", { ascending: false, nullsFirst: false })
     .limit(1)
     .maybeSingle();
+  if (latestTestError) {
+    throw new Error(`Latest AI test query failed: ${latestTestError.message}`);
+  }
+  console.info("[transitionReview] resolve_context:latest_test_result", {
+    ...logContext,
+    found: Boolean(latestTestRow),
+    error: null,
+  });
 
   return {
     learningFieldId: toStringValue((journeyPathRow as GenericRecord).learning_field_id),
