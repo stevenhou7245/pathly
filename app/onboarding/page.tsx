@@ -1,3 +1,4 @@
+import Image from "next/image";
 import AuthHeader from "@/components/AuthHeader";
 import OnboardingForm from "@/components/OnboardingForm";
 
@@ -27,26 +28,15 @@ export default function OnboardingPage() {
           </p>
 
           <div className="mx-auto mt-8 max-w-2xl rounded-3xl border-2 border-[#1F2937]/15 bg-white/70 p-5">
-            <svg
-              viewBox="0 0 460 120"
+            <Image
+              src="/images/path-selection-illustration.jpg"
+              alt="Learning Path Illustration"
+              width={1200}
+              height={360}
               className="h-auto w-full"
-              role="img"
-              aria-label="Learning path and milestone decoration"
-            >
-              <rect x="6" y="10" width="448" height="100" rx="24" fill="#F5FCFF" />
-              <path d="M44 96 C132 44 330 44 416 96" stroke="#FFF2A8" strokeWidth="34" strokeLinecap="round" fill="none" />
-              <path d="M54 96 C142 52 322 52 406 96" stroke="#F3CF22" strokeWidth="4" strokeLinecap="round" strokeDasharray="9 11" fill="none" />
-              <rect x="94" y="48" width="12" height="28" rx="4" fill="#58CC02" />
-              <polygon points="106,48 126,54 106,60" fill="#FFD84D" />
-              <rect x="334" y="46" width="12" height="30" rx="4" fill="#58CC02" />
-              <polygon points="346,46 366,53 346,60" fill="#FFD84D" />
-              <ellipse cx="230" cy="38" rx="42" ry="17" fill="#FFD84D" />
-              <g fill="#B46D0F">
-                <rect x="206" y="34" width="10" height="12" rx="4" />
-                <rect x="220" y="32" width="10" height="14" rx="4" />
-                <rect x="234" y="34" width="10" height="12" rx="4" />
-              </g>
-            </svg>
+              sizes="(min-width: 1024px) 48rem, 100vw"
+              priority
+            />
           </div>
 
           <div className="mx-auto mt-8 max-w-2xl">
