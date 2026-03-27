@@ -23,6 +23,7 @@ import { loadUserResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { resolveAiTestTemplateForAttempt } from "@/lib/ai/tests";
 import { analyzeWeaknessAndPrepareReview, getPendingReviewPopup } from "@/lib/ai/review";
 import type { DifficultyBand } from "@/lib/ai/common";
+import { trackWeaknessProfilesForIncorrectAnswers } from "@/lib/weaknessProfiles";
 
 export type CourseNodeStatus =
   | "locked"
@@ -3821,6 +3822,19 @@ export async function submitCourseTest(params: {
     selectedLegacyResourceId,
     userTestId: params.testAttemptId,
     passed,
+  });
+
+  await trackWeaknessProfilesForIncorrectAnswers({
+    userId: params.userId,
+    courseId,
+    source: "ai_test_submission",
+    evaluations: questionResults.map((item) => ({
+      isCorrect: item.is_correct,
+      questionIndex: item.question_order,
+      conceptTags: item.concept_tags,
+      questionText: item.question_text,
+      explanation: item.explanation,
+    })),
   });
 
   const reviewResult = await analyzeWeaknessAndPrepareReview({

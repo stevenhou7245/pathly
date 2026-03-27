@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { trackWeaknessProfilesForIncorrectAnswers } from "@/lib/weaknessProfiles";
 
 type GenericRecord = Record<string, unknown>;
 
@@ -424,14 +425,17 @@ async function resolveTransitionReviewContext(params: {
     .order("weakness_score", { ascending: false })
     .limit(3);
   if (weaknessError) {
-    throw new Error(`Weakness profile query failed: ${weaknessError.message}`);
+    console.warn("[transitionReview] resolve_context:weakness_query_failed", {
+      ...logContext,
+      reason: weaknessError.message,
+    });
   }
   console.info("[transitionReview] resolve_context:weakness_result", {
     ...logContext,
-    rowCount: (weaknessRows ?? []).length,
-    error: null,
+    rowCount: weaknessError ? 0 : (weaknessRows ?? []).length,
+    error: weaknessError?.message ?? null,
   });
-  const weakConcepts = ((weaknessRows ?? []) as GenericRecord[])
+  const weakConcepts = (weaknessError ? [] : ((weaknessRows ?? []) as GenericRecord[]))
     .map((row) => toStringValue(row.concept_tag).trim())
     .filter(Boolean);
 
@@ -702,6 +706,31 @@ export async function submitTransitionReview(params: {
     .eq("user_id", params.userId);
   if (updateError) {
     throw new Error("Unable to finalize transition review.");
+  }
+
+  const fromCourseId = toStringValue(review.from_course_id).trim();
+  if (fromCourseId) {
+    await trackWeaknessProfilesForIncorrectAnswers({
+      userId: params.userId,
+      courseId: fromCourseId,
+      source: "transition_review_submission",
+      evaluations: evaluations.map((item) => {
+        const question = questions.find((entry) => entry.question_index === item.question_index);
+        return {
+          isCorrect: item.is_correct,
+          questionIndex: item.question_index,
+          questionText: question?.question_text ?? "",
+          explanation: item.explanation,
+        };
+      }),
+    });
+  } else {
+    console.warn("[weakness_profiles] failed", {
+      source: "transition_review_submission",
+      user_id: params.userId,
+      review_id: params.reviewId,
+      reason: "Missing from_course_id on transition review row.",
+    });
   }
 
   return {

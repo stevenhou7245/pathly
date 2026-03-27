@@ -8,6 +8,10 @@ import {
 } from "@/lib/ai/common";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import {
+  incrementWeaknessProfile,
+  normalizeConceptTag,
+} from "@/lib/weaknessProfiles";
 
 type GenericRecord = Record<string, unknown>;
 
@@ -112,69 +116,23 @@ function computeWeaknessSignals(
 async function upsertWeaknessProfiles(params: {
   userId: string;
   courseId: string;
-  journeyPathId: string;
-  userTestId: string;
   signals: WeaknessSignal[];
 }) {
   for (const signal of params.signals) {
-    const { data: existing, error: existingError } = await supabaseAdmin
-      .from("weakness_profiles")
-      .select("*")
-      .eq("user_id", params.userId)
-      .eq("course_id", params.courseId)
-      .eq("concept_tag", signal.concept_tag)
-      .limit(1)
-      .maybeSingle();
-
-    if (existingError) {
-      throw existingError;
+    const normalizedConceptTag = normalizeConceptTag(signal.concept_tag);
+    if (!normalizedConceptTag) {
+      continue;
     }
 
-    const row = (existing as GenericRecord | null) ?? null;
-    const incorrectCount = Math.max(0, Math.floor(toNumberValue(row?.incorrect_count))) + signal.incorrect_count;
-    const partialCount = Math.max(0, Math.floor(toNumberValue(row?.partial_count))) + signal.partial_count;
-    const totalObservations =
-      Math.max(0, Math.floor(toNumberValue(row?.total_observations))) + signal.total_observations;
-    const weaknessScore = Number(
-      ((incorrectCount * 1 + partialCount * 0.5) / Math.max(1, totalObservations)).toFixed(4),
-    );
-
-    const payload = {
-      user_id: params.userId,
-      course_id: params.courseId,
-      journey_path_id: params.journeyPathId,
-      concept_tag: signal.concept_tag,
-      skill_tag: signal.skill_tag || null,
-      incorrect_count: incorrectCount,
-      partial_count: partialCount,
-      total_observations: totalObservations,
-      weakness_score: weaknessScore,
-      last_test_id: params.userTestId,
-      source_hash: sha256Hash({
-        user_id: params.userId,
-        course_id: params.courseId,
-        concept_tag: signal.concept_tag,
-        skill_tag: signal.skill_tag || null,
-        incorrect_count: incorrectCount,
-        partial_count: partialCount,
-        total_observations: totalObservations,
-        weakness_score: weaknessScore,
-      }),
-      profile_version: Math.max(1, Math.floor(toNumberValue(row?.profile_version))) + 1,
-      metadata_json: {
-        updated_by: "ai_test_submission",
-      },
-      updated_at: new Date().toISOString(),
-    };
-
-    const { error: upsertError } = await supabaseAdmin
-      .from("weakness_profiles")
-      .upsert(payload, {
-        onConflict: "user_id,course_id,concept_tag,skill_tag",
-      });
-    if (upsertError) {
-      throw upsertError;
-    }
+    const incrementBy = Math.max(1, signal.incorrect_count + signal.partial_count);
+    await incrementWeaknessProfile({
+      userId: params.userId,
+      courseId: params.courseId,
+      conceptTag: normalizedConceptTag,
+      incrementBy,
+      source: "ai_review_pipeline",
+      questionIndex: null,
+    });
   }
 }
 
@@ -434,8 +392,6 @@ export async function analyzeWeaknessAndPrepareReview(params: {
     await upsertWeaknessProfiles({
       userId: params.userId,
       courseId: params.courseId,
-      journeyPathId: params.journeyPathId,
-      userTestId: params.userTestId,
       signals: weaknesses,
     });
 
