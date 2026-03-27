@@ -3,7 +3,7 @@
 import AvatarPreviewModal from "@/components/AvatarPreviewModal";
 import FriendChatPanel from "@/components/FriendChatPanel";
 import { mapDirectRealtimeMessage } from "@/lib/chatRealtime";
-import { playSound } from "@/lib/sound";
+import { playIncomingNotificationSound } from "@/lib/incomingNotificationSound";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -628,7 +628,14 @@ export default function FriendsPanel({ onMessagesUpdated }: FriendsPanelProps) {
             return;
           }
 
-          playSound("notification");
+          playIncomingNotificationSound({
+            type: "direct_message",
+            eventId: mapped.id,
+            isIncoming,
+            currentUserId,
+            receiverId: currentUserId,
+            source: "friends_panel:direct_messages_realtime",
+          });
           if (isActiveConversation) {
             void markMessagesAsRead(mapped.friendship_id);
             return;

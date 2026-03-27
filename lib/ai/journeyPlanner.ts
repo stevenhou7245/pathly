@@ -9,7 +9,7 @@ import {
   type DifficultyBand,
 } from "@/lib/ai/common";
 import { calculateTotalSteps, LESSONS_PER_LEVEL_GAP } from "@/lib/learningPath";
-import { loadUserResourcePreferenceProfile, type ResourcePreferenceProfile } from "@/lib/ai/preferences";
+import type { ResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
 import { installAiPipelineDebugLogFilter } from "@/lib/aiPipelineDebugLogging";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -376,8 +376,6 @@ export async function resolveOrCreateJourneyTemplate(params: {
     }
   }
 
-  const preferenceProfile =
-    params.userPreferenceProfile ?? (await loadUserResourcePreferenceProfile(params.userId));
   const promptFieldTitle = toStringValue(params.fieldTitle).trim();
   const promptStartLevel = toStringValue(params.startLevel).trim();
   const promptTargetLevel = toStringValue(params.targetLevel).trim();
@@ -478,7 +476,6 @@ export async function resolveOrCreateJourneyTemplate(params: {
         level_distance: levelDistance,
         total_steps: fixedTotalSteps,
         requested_desired_total_steps: params.desiredTotalSteps ?? null,
-        user_preference_profile: preferenceProfile,
       },
       outputSchema: journeyTemplateLooseOutputSchema,
       fallback: () =>
@@ -659,7 +656,6 @@ export async function resolveOrCreateJourneyTemplate(params: {
             level_distance: levelDistance,
             total_steps: fixedTotalSteps,
             requested_desired_total_steps: params.desiredTotalSteps ?? null,
-            user_preference_profile: preferenceProfile,
           }),
         ),
         template_json: JSON.parse(

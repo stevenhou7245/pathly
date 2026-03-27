@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+const NOTEBOOKS_INITIAL_VISIBLE_COUNT = 24;
+const NOTEBOOKS_VISIBLE_STEP = 24;
+
 type NotebookRecord = {
   id: string;
   user_id: string;
@@ -103,12 +106,22 @@ export default function NotebookPanel() {
   const [message, setMessage] = useState("");
   const [notebookToDelete, setNotebookToDelete] = useState<NotebookRecord | null>(null);
   const [entryToDelete, setEntryToDelete] = useState<NotebookEntryRecord | null>(null);
+  const [visibleNotebookCount, setVisibleNotebookCount] = useState(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
+  const [visibleEntryCount, setVisibleEntryCount] = useState(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
 
   const sortedNotebooks = useMemo(() => sortNotebooks(notebooks), [notebooks]);
   const sortedEntries = useMemo(() => sortEntries(entries), [entries]);
   const selectedNotebook = useMemo(
     () => sortedNotebooks.find((item) => item.id === selectedNotebookId) ?? null,
     [selectedNotebookId, sortedNotebooks],
+  );
+  const visibleNotebooks = useMemo(
+    () => sortedNotebooks.slice(0, visibleNotebookCount),
+    [sortedNotebooks, visibleNotebookCount],
+  );
+  const visibleEntries = useMemo(
+    () => sortedEntries.slice(0, visibleEntryCount),
+    [sortedEntries, visibleEntryCount],
   );
   const selectedEntry = useMemo(
     () => sortedEntries.find((item) => item.id === selectedEntryId) ?? null,
@@ -119,7 +132,7 @@ export default function NotebookPanel() {
     setIsLoadingNotebooks(true);
     setError("");
     try {
-      const response = await fetch("/api/notebooks", {
+      const response = await fetch("/api/notebooks?limit=120", {
         method: "GET",
         cache: "no-store",
       });
@@ -129,6 +142,7 @@ export default function NotebookPanel() {
       }
       const rows = sortNotebooks(payload.notebooks ?? []);
       setNotebooks(rows);
+      setVisibleNotebookCount(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
 
       const nextNotebook = rows.find((row) => row.id === selectedNotebookId) ?? rows[0] ?? null;
       setSelectedNotebookId(nextNotebook?.id ?? "");
@@ -138,6 +152,7 @@ export default function NotebookPanel() {
       setNotebooks([]);
       setSelectedNotebookId("");
       setSelectedNotebookNameDraft("");
+      setVisibleNotebookCount(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
     } finally {
       setIsLoadingNotebooks(false);
     }
@@ -154,16 +169,20 @@ export default function NotebookPanel() {
     setIsLoadingEntries(true);
     setError("");
     try {
-      const response = await fetch(`/api/notebooks/${encodeURIComponent(notebookId)}/entries`, {
-        method: "GET",
-        cache: "no-store",
-      });
+      const response = await fetch(
+        `/api/notebooks/${encodeURIComponent(notebookId)}/entries?limit=180`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
       const payload = (await response.json()) as NotebookEntriesResponse;
       if (!response.ok || !payload.success) {
         throw new Error(payload.message ?? "Unable to load notebook entries.");
       }
       const rows = sortEntries(payload.entries ?? []);
       setEntries(rows);
+      setVisibleEntryCount(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
 
       const nextEntry = rows.find((row) => row.id === selectedEntryId) ?? rows[0] ?? null;
       setSelectedEntryId(nextEntry?.id ?? "");
@@ -175,6 +194,7 @@ export default function NotebookPanel() {
       setSelectedEntryId("");
       setSelectedEntryTopicDraft("");
       setSelectedEntryContentDraft("");
+      setVisibleEntryCount(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
     } finally {
       setIsLoadingEntries(false);
     }
@@ -451,6 +471,7 @@ export default function NotebookPanel() {
       setIsEntryDetailOpen(false);
       return;
     }
+    setVisibleEntryCount(NOTEBOOKS_INITIAL_VISIBLE_COUNT);
     void loadNotebookEntries(selectedNotebookId);
   }, [selectedNotebookId]);
 
@@ -511,12 +532,16 @@ export default function NotebookPanel() {
           </div>
 
           {isLoadingNotebooks ? (
-            <p className="mt-3 text-sm font-semibold text-[#1F2937]/70">Loading notebooks...</p>
+            <div className="mt-3 space-y-2">
+              <div className="skeleton-block h-14 rounded-xl" />
+              <div className="skeleton-block h-14 rounded-xl" />
+              <div className="skeleton-block h-14 rounded-xl" />
+            </div>
           ) : sortedNotebooks.length === 0 ? (
             <p className="mt-3 text-sm font-semibold text-[#1F2937]/70">No notebooks yet.</p>
           ) : (
             <ol className="mt-3 max-h-[420px] space-y-2 overflow-y-auto">
-              {sortedNotebooks.map((notebook) => {
+              {visibleNotebooks.map((notebook) => {
                 const isActive = notebook.id === selectedNotebookId;
                 const isDeletingThisNotebook =
                   isDeletingNotebook && notebookToDelete?.id === notebook.id;
@@ -559,6 +584,19 @@ export default function NotebookPanel() {
               })}
             </ol>
           )}
+          {!isLoadingNotebooks && sortedNotebooks.length > visibleNotebooks.length ? (
+            <div className="mt-2 flex justify-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setVisibleNotebookCount((previous) => previous + NOTEBOOKS_VISIBLE_STEP);
+                }}
+                className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1 text-xs font-extrabold text-[#1F2937]"
+              >
+                Load more notebooks ({sortedNotebooks.length - visibleNotebooks.length} hidden)
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4">
@@ -624,12 +662,16 @@ export default function NotebookPanel() {
                   Entry List
                 </p>
                 {isLoadingEntries ? (
-                  <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">Loading entries...</p>
+                  <div className="mt-2 space-y-2">
+                    <div className="skeleton-block h-14 rounded-xl" />
+                    <div className="skeleton-block h-14 rounded-xl" />
+                    <div className="skeleton-block h-14 rounded-xl" />
+                  </div>
                 ) : sortedEntries.length === 0 ? (
                   <p className="mt-2 text-sm font-semibold text-[#1F2937]/70">No entries yet.</p>
                 ) : (
                   <ol className="mt-2 max-h-[420px] space-y-2 overflow-y-auto">
-                    {sortedEntries.map((entry) => {
+                    {visibleEntries.map((entry) => {
                       const isActive = entry.id === selectedEntryId;
                       const isDeletingThisEntry = isDeletingEntry && entryToDelete?.id === entry.id;
                       return (
@@ -673,6 +715,19 @@ export default function NotebookPanel() {
                     })}
                   </ol>
                 )}
+                {!isLoadingEntries && sortedEntries.length > visibleEntries.length ? (
+                  <div className="mt-2 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVisibleEntryCount((previous) => previous + NOTEBOOKS_VISIBLE_STEP);
+                      }}
+                      className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1 text-xs font-extrabold text-[#1F2937]"
+                    >
+                      Load more entries ({sortedEntries.length - visibleEntries.length} hidden)
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </>
           )}

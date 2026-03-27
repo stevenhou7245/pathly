@@ -37,10 +37,7 @@ export default function RegisterPage() {
           </p>
 
           <div className="mt-10 grid items-start gap-8 lg:grid-cols-2">
-            <AuthIllustration
-              imageSrc="/images/register-illustration.png"
-              imageAlt="Pathly register illustration"
-            />
+            <AuthIllustration />
             <RegisterForm />
           </div>
         </div>

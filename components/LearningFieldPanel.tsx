@@ -89,6 +89,9 @@ type CourseDetails = {
   current_test_attempt_id: string | null;
   required_test_score: number;
   can_take_test: boolean;
+  resource_generation_status: "pending" | "generating" | "ready" | "failed";
+  is_resource_generated: boolean;
+  resources_generated_at: string | null;
   resources: CourseResource[];
 };
 
@@ -214,6 +217,48 @@ type CourseTestAttemptDetailApiResponse = {
   };
 };
 
+type TransitionReviewQuestion = {
+  question_index: number;
+  question_type: "single_choice" | "fill_blank" | "short_answer";
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+};
+
+type TransitionReviewPopupApiResponse = {
+  success: boolean;
+  message?: string;
+  popup?: {
+    should_show: boolean;
+    review_id: string | null;
+    from_course_id: string | null;
+    to_course_id: string | null;
+    instructions: string;
+    questions: TransitionReviewQuestion[];
+  };
+};
+
+type TransitionReviewSubmitApiResponse = {
+  success: boolean;
+  message?: string;
+  result?: {
+    review_id: string;
+    selected_action: "continue" | "go_back";
+    score: number | null;
+    total_questions: number;
+    correct_count: number;
+    performance: "good" | "weak";
+    evaluations: Array<{
+      question_index: number;
+      user_answer: string;
+      is_correct: boolean;
+      correct_answer: string;
+      explanation: string;
+    }>;
+  };
+};
+
 type AiTestReviewResult = {
   user_test_id: string;
   attempt_number: number;
@@ -250,6 +295,9 @@ type AiTestReviewResult = {
 
 type AiTestMode = "taking" | "graded" | "history";
 type JourneyInitStatus = "not_started" | "initializing" | "ready" | "failed";
+const AI_TEST_PASSING_SCORE = 80;
+const JOURNEY_NODES_INITIAL_VISIBLE = 12;
+const JOURNEY_NODES_VISIBLE_STEP = 8;
 
 type RatingApiResponse = {
   success: boolean;
@@ -288,15 +336,12 @@ function getScoreBandFeedback(score: number) {
     return "Excellent!";
   }
   if (score >= 90) {
-    return "Great Work!";
+    return "Great job!";
   }
   if (score >= 80) {
-    return "Good Job!";
+    return "Good!";
   }
-  if (score >= 60) {
-    return "Passed!";
-  }
-  return "Continue Learning~";
+  return "Keep learning~";
 }
 
 function getScoreBandMessage(score: number) {
@@ -312,9 +357,6 @@ function getScoreBandEmoji(score: number) {
   }
   if (score >= 80) {
     return "⭐";
-  }
-  if (score >= 60) {
-    return "🙂";
   }
   return "💪";
 }
@@ -414,7 +456,7 @@ export default function LearningFieldPanel({
   const [testResponses, setTestResponses] = useState<
     Record<string, { selectedOptionIndex: number | null; answerText: string }>
   >({});
-  const [requiredTestScore, setRequiredTestScore] = useState(60);
+  const [requiredTestScore, setRequiredTestScore] = useState(AI_TEST_PASSING_SCORE);
   const [testFeedback, setTestFeedback] = useState("");
   const [testResult, setTestResult] = useState<AiTestReviewResult | null>(null);
   const [aiTestMode, setAiTestMode] = useState<AiTestMode>("taking");
@@ -433,7 +475,34 @@ export default function LearningFieldPanel({
   const [ratingDraft, setRatingDraft] = useState<Record<string, number>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
   const [isSubmittingResourceAction, setIsSubmittingResourceAction] = useState(false);
+  const [isTransitionReviewModalOpen, setIsTransitionReviewModalOpen] = useState(false);
+  const [isLoadingTransitionReview, setIsLoadingTransitionReview] = useState(false);
+  const [isSubmittingTransitionReview, setIsSubmittingTransitionReview] = useState(false);
+  const [transitionReviewError, setTransitionReviewError] = useState("");
+  const [transitionReviewPopup, setTransitionReviewPopup] = useState<{
+    review_id: string;
+    from_course_id: string;
+    to_course_id: string;
+    instructions: string;
+    questions: TransitionReviewQuestion[];
+  } | null>(null);
+  const [transitionReviewAnswers, setTransitionReviewAnswers] = useState<Record<number, string>>({});
+  const [transitionReviewResult, setTransitionReviewResult] = useState<{
+    score: number | null;
+    total_questions: number;
+    correct_count: number;
+    performance: "good" | "weak";
+    evaluations: Array<{
+      question_index: number;
+      user_answer: string;
+      is_correct: boolean;
+      correct_answer: string;
+      explanation: string;
+    }>;
+  } | null>(null);
   const [poppingNodeIds, setPoppingNodeIds] = useState<string[]>([]);
+  const [flippingNodeIds, setFlippingNodeIds] = useState<string[]>([]);
+  const [visibleJourneyNodeCount, setVisibleJourneyNodeCount] = useState(JOURNEY_NODES_INITIAL_VISIBLE);
   const journeyRequestIdRef = useRef(0);
   const courseRequestIdRef = useRef(0);
   const journeyRef = useRef<JourneyData | null>(null);
@@ -451,6 +520,10 @@ export default function LearningFieldPanel({
     }
     return Math.floor((completedCount / journey.total_steps) * 100);
   }, [completedCount, journey]);
+  const visibleJourneyNodes = useMemo(
+    () => journey?.nodes.slice(0, visibleJourneyNodeCount) ?? [],
+    [journey?.nodes, visibleJourneyNodeCount],
+  );
 
   const transitionPanelState = useCallback(
     (next: RightPanelState, reason: string, detail?: Record<string, unknown>) => {
@@ -504,6 +577,10 @@ export default function LearningFieldPanel({
     journeyRef.current = journey;
   }, [journey]);
 
+  useEffect(() => {
+    setVisibleJourneyNodeCount(JOURNEY_NODES_INITIAL_VISIBLE);
+  }, [folder.id, journey?.journey_path_id]);
+
   const triggerNodePop = useCallback((courseIds: string[]) => {
     const uniqueIds = Array.from(new Set(courseIds.filter(Boolean)));
     if (uniqueIds.length === 0) {
@@ -518,6 +595,79 @@ export default function LearningFieldPanel({
       nodePopTimeoutRef.current = null;
     }, 260);
   }, []);
+
+  const triggerNodeFlip = useCallback((courseId: string) => {
+    const normalizedId = courseId.trim();
+    if (!normalizedId) {
+      return;
+    }
+    setFlippingNodeIds((previous) => {
+      if (previous.includes(normalizedId)) {
+        return previous;
+      }
+      return [...previous, normalizedId];
+    });
+  }, []);
+
+  const clearNodeFlip = useCallback((courseId: string) => {
+    const normalizedId = courseId.trim();
+    if (!normalizedId) {
+      return;
+    }
+    setFlippingNodeIds((previous) => previous.filter((id) => id !== normalizedId));
+  }, []);
+
+  const resetTransitionReviewState = useCallback(() => {
+    setIsTransitionReviewModalOpen(false);
+    setIsLoadingTransitionReview(false);
+    setIsSubmittingTransitionReview(false);
+    setTransitionReviewError("");
+    setTransitionReviewPopup(null);
+    setTransitionReviewAnswers({});
+    setTransitionReviewResult(null);
+  }, []);
+
+  const resolveTransitionReviewPair = useCallback(
+    (toCourseId: string) => {
+      if (!journey) {
+        return null;
+      }
+      const index = journey.nodes.findIndex((node) => node.course_id === toCourseId);
+      if (index <= 0) {
+        return null;
+      }
+      const toNode = journey.nodes[index] ?? null;
+      const fromNode = journey.nodes[index - 1] ?? null;
+      if (!toNode || !fromNode) {
+        return null;
+      }
+      return {
+        toNode,
+        fromNode,
+      };
+    },
+    [journey],
+  );
+
+  const shouldInterceptTransitionReview = useCallback(
+    (node: JourneyNode) => {
+      if (!journey) {
+        return false;
+      }
+      if (node.status !== "unlocked") {
+        return false;
+      }
+      if (node.step_number !== journey.current_step) {
+        return false;
+      }
+      const pair = resolveTransitionReviewPair(node.course_id);
+      if (!pair) {
+        return false;
+      }
+      return pair.fromNode.status === "passed";
+    },
+    [journey, resolveTransitionReviewPair],
+  );
 
   useEffect(
     () => () => {
@@ -780,7 +930,7 @@ export default function LearningFieldPanel({
     setTestQuestions([]);
     setActiveUserTestId("");
     setTestResponses({});
-    setRequiredTestScore(60);
+    setRequiredTestScore(AI_TEST_PASSING_SCORE);
     setTestFeedback("");
     setTestResult(null);
     setAiTestMode("taking");
@@ -790,7 +940,8 @@ export default function LearningFieldPanel({
     setHasAnyPreviousTestAttempts(false);
     setRatingDraft({});
     setCommentDraft({});
-  }, [folder.id]);
+    resetTransitionReviewState();
+  }, [folder.id, resetTransitionReviewState]);
 
   const isCourseModalOpen = selectedCourseId.length > 0;
 
@@ -871,7 +1022,7 @@ export default function LearningFieldPanel({
           setTestQuestions([]);
           setActiveUserTestId("");
           setTestResponses({});
-          setRequiredTestScore(60);
+          setRequiredTestScore(AI_TEST_PASSING_SCORE);
           setTestFeedback("");
           setTestResult(null);
           setAiTestMode("taking");
@@ -898,6 +1049,158 @@ export default function LearningFieldPanel({
     [journey],
   );
 
+  const openCourseFromTransitionReview = useCallback(
+    async (courseId: string) => {
+      resetTransitionReviewState();
+      await loadCourseDetails(courseId);
+    },
+    [loadCourseDetails, resetTransitionReviewState],
+  );
+
+  const openTransitionReviewForNode = useCallback(
+    async (node: JourneyNode) => {
+      if (!journey) {
+        await loadCourseDetails(node.course_id);
+        return;
+      }
+
+      const pair = resolveTransitionReviewPair(node.course_id);
+      if (!pair) {
+        await loadCourseDetails(node.course_id);
+        return;
+      }
+
+      setIsTransitionReviewModalOpen(true);
+      setIsLoadingTransitionReview(true);
+      setTransitionReviewError("");
+      setTransitionReviewPopup(null);
+      setTransitionReviewAnswers({});
+      setTransitionReviewResult(null);
+
+      try {
+        const response = await fetch(
+          `/api/course/transition-review/popup?journey_path_id=${encodeURIComponent(
+            journey.journey_path_id,
+          )}&from_course_id=${encodeURIComponent(
+            pair.fromNode.course_id,
+          )}&to_course_id=${encodeURIComponent(pair.toNode.course_id)}`,
+          {
+            method: "GET",
+            cache: "no-store",
+          },
+        );
+        const payload = (await response.json()) as TransitionReviewPopupApiResponse;
+        if (!response.ok || !payload.success || !payload.popup) {
+          throw new Error(payload.message ?? "Unable to load transition review.");
+        }
+
+        if (!payload.popup.should_show || !payload.popup.review_id) {
+          await openCourseFromTransitionReview(pair.toNode.course_id);
+          return;
+        }
+
+        setTransitionReviewPopup({
+          review_id: payload.popup.review_id,
+          from_course_id: payload.popup.from_course_id ?? pair.fromNode.course_id,
+          to_course_id: payload.popup.to_course_id ?? pair.toNode.course_id,
+          instructions: payload.popup.instructions,
+          questions: payload.popup.questions ?? [],
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to load transition review.";
+        setTransitionReviewError(message);
+      } finally {
+        setIsLoadingTransitionReview(false);
+      }
+    },
+    [journey, loadCourseDetails, openCourseFromTransitionReview, resolveTransitionReviewPair],
+  );
+
+  const handleTransitionReviewGoBack = useCallback(async () => {
+    if (!transitionReviewPopup) {
+      resetTransitionReviewState();
+      return;
+    }
+
+    setIsSubmittingTransitionReview(true);
+    setTransitionReviewError("");
+    try {
+      await fetch("/api/course/transition-review/submit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          review_id: transitionReviewPopup.review_id,
+          selected_action: "go_back",
+        }),
+      });
+    } catch {
+      // Ignore go-back tracking failures; user should still be able to return.
+    } finally {
+      setIsSubmittingTransitionReview(false);
+    }
+
+    const fromCourseId = transitionReviewPopup.from_course_id;
+    await openCourseFromTransitionReview(fromCourseId);
+  }, [openCourseFromTransitionReview, resetTransitionReviewState, transitionReviewPopup]);
+
+  const handleTransitionReviewSubmitAndContinue = useCallback(async () => {
+    if (!transitionReviewPopup) {
+      return;
+    }
+
+    setIsSubmittingTransitionReview(true);
+    setTransitionReviewError("");
+
+    try {
+      const response = await fetch("/api/course/transition-review/submit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          review_id: transitionReviewPopup.review_id,
+          selected_action: "continue",
+          answers: transitionReviewPopup.questions.map((question) => ({
+            question_index: question.question_index,
+            user_answer: transitionReviewAnswers[question.question_index] ?? "",
+          })),
+        }),
+      });
+      const payload = (await response.json()) as TransitionReviewSubmitApiResponse;
+      if (!response.ok || !payload.success || !payload.result) {
+        throw new Error(payload.message ?? "Unable to submit transition review.");
+      }
+
+      const result = payload.result;
+      setTransitionReviewResult({
+        score: result.score,
+        total_questions: result.total_questions,
+        correct_count: result.correct_count,
+        performance: result.performance,
+        evaluations: result.evaluations ?? [],
+      });
+
+      if (result.performance === "good") {
+        setActionMessage("Nice review check-in. Moving to the next lesson.");
+        await openCourseFromTransitionReview(transitionReviewPopup.to_course_id);
+        return;
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to submit transition review.";
+      setTransitionReviewError(message);
+    } finally {
+      setIsSubmittingTransitionReview(false);
+    }
+  }, [
+    openCourseFromTransitionReview,
+    transitionReviewAnswers,
+    transitionReviewPopup,
+  ]);
+
   function closeModal() {
     if (isStartingCourse || isPreparingTest || isSubmittingTest || isSubmittingResourceAction) {
       return;
@@ -913,7 +1216,7 @@ export default function LearningFieldPanel({
     setTestQuestions([]);
     setActiveUserTestId("");
     setTestResponses({});
-    setRequiredTestScore(60);
+    setRequiredTestScore(AI_TEST_PASSING_SCORE);
     setTestFeedback("");
     setTestResult(null);
     setAiTestMode("taking");
@@ -921,6 +1224,7 @@ export default function LearningFieldPanel({
     setShowResultPopup(false);
     setResultPopupPayload(null);
     setHasAnyPreviousTestAttempts(false);
+    resetTransitionReviewState();
   }
 
   function closeAiTestModal() {
@@ -948,6 +1252,10 @@ export default function LearningFieldPanel({
     }
 
     playSound("click");
+    if (shouldInterceptTransitionReview(node)) {
+      await openTransitionReviewForNode(node);
+      return;
+    }
     await loadCourseDetails(node.course_id);
   }
 
@@ -1469,10 +1777,17 @@ export default function LearningFieldPanel({
       ) : null}
 
       {isLoadingJourney ? (
-        <div className="mt-6 rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-5 text-sm font-semibold text-[#1F2937]/70">
-          {panelState === "generating_journey"
-            ? "Generating your journey..."
-            : "Loading your learning journey..."}
+        <div className="mt-6 rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-5">
+          <p className="text-sm font-semibold text-[#1F2937]/70">
+            {panelState === "generating_journey"
+              ? "Generating your journey..."
+              : "Loading your learning journey..."}
+          </p>
+          <div className="mt-3 space-y-2">
+            <div className="skeleton-block h-14 rounded-xl" />
+            <div className="skeleton-block h-14 rounded-xl" />
+            <div className="skeleton-block h-14 rounded-xl" />
+          </div>
         </div>
       ) : null}
 
@@ -1495,20 +1810,35 @@ export default function LearningFieldPanel({
 
           <div className="mt-7 max-h-[620px] overflow-y-auto pr-1 sm:mt-8">
             <div className="flex flex-col items-center pt-2 sm:pt-3">
-              {journey.nodes.map((node, index) => {
-                const nextNode = journey.nodes[index + 1];
+              {visibleJourneyNodes.map((node, index) => {
+                const nextNode = visibleJourneyNodes[index + 1];
                 const isLocked = node.status === "locked";
                 const shouldPop = poppingNodeIds.includes(node.course_id);
+                const isFlipping = flippingNodeIds.includes(node.course_id);
 
                 return (
                   <div key={node.course_id} className="flex flex-col items-center">
                     <div className="journey-node-coin-wrap">
                       <button
                         type="button"
+                        onMouseEnter={() => {
+                          if (isLocked) {
+                            return;
+                          }
+                          triggerNodeFlip(node.course_id);
+                        }}
+                        onAnimationEnd={(event) => {
+                          if (event.animationName !== "journey-node-coin-flip") {
+                            return;
+                          }
+                          clearNodeFlip(node.course_id);
+                        }}
                         onClick={() => {
                           void handleNodeClick(node);
                         }}
-                        className={`${getNodeClassName(node.status, { pop: shouldPop })} journey-node-coin`}
+                        className={`${getNodeClassName(node.status, { pop: shouldPop })} journey-node-coin${
+                          isFlipping ? " is-flipping" : ""
+                        }`}
                         aria-label={`${node.title} ${node.status}`}
                       >
                         {node.status === "passed" ? "✓" : node.step_number}
@@ -1520,7 +1850,7 @@ export default function LearningFieldPanel({
                         {node.passed_score ? (
                           <span
                             className={`absolute -right-2 -top-2 rounded-full border-2 border-[#1F2937] px-1.5 py-0.5 text-[10px] font-extrabold text-white ${
-                              node.passed_score >= 60 ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
+                              node.passed_score >= AI_TEST_PASSING_SCORE ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
                             }`}
                           >
                             {node.passed_score}
@@ -1541,9 +1871,195 @@ export default function LearningFieldPanel({
                   </div>
                 );
               })}
+              {journey.nodes.length > visibleJourneyNodes.length ? (
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVisibleJourneyNodeCount(
+                        (previous) => previous + JOURNEY_NODES_VISIBLE_STEP,
+                      );
+                    }}
+                    className="rounded-full border-2 border-[#1F2937]/15 bg-white px-4 py-2 text-xs font-extrabold text-[#1F2937]"
+                  >
+                    Load more lessons ({journey.nodes.length - visibleJourneyNodes.length} hidden)
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </>
+      ) : null}
+
+      {isTransitionReviewModalOpen ? (
+        <div className="fixed inset-0 z-[79] flex items-center justify-center bg-black/35 px-4 motion-modal-overlay">
+          <div className="w-full max-w-3xl rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-7 motion-modal-content">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-2xl font-extrabold text-[#1F2937]">
+                  Quick Review Checkpoint
+                </h3>
+                <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
+                  {transitionReviewPopup?.instructions ??
+                    "Before the next lesson, answer a few lightweight review questions."}
+                </p>
+              </div>
+              <span className="rounded-full bg-[#FFF7CF] px-3 py-1 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/70">
+                Transition Review
+              </span>
+            </div>
+
+            {transitionReviewError ? (
+              <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
+                {transitionReviewError}
+              </p>
+            ) : null}
+
+            {isLoadingTransitionReview ? (
+              <p className="mt-4 rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-3 text-sm font-semibold text-[#1F2937]/70">
+                Preparing review questions...
+              </p>
+            ) : null}
+
+            {!isLoadingTransitionReview && transitionReviewPopup ? (
+              <div className="mt-4 space-y-3">
+                {transitionReviewPopup.questions.map((question) => (
+                  <article
+                    key={question.question_index}
+                    className="rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4"
+                  >
+                    <p className="text-sm font-extrabold text-[#1F2937]">
+                      Q{question.question_index}. {question.question_text}
+                    </p>
+
+                    {question.question_type === "single_choice" && question.options.length > 0 ? (
+                      <div className="mt-3 space-y-1.5">
+                        {question.options.map((option) => (
+                          <label
+                            key={`${question.question_index}-${option}`}
+                            className="flex items-center gap-2 text-xs font-semibold text-[#1F2937]/80"
+                          >
+                            <input
+                              type="radio"
+                              name={`transition-review-${question.question_index}`}
+                              checked={
+                                (transitionReviewAnswers[question.question_index] ?? "") === option
+                              }
+                              onChange={() =>
+                                setTransitionReviewAnswers((previous) => ({
+                                  ...previous,
+                                  [question.question_index]: option,
+                                }))
+                              }
+                              disabled={Boolean(transitionReviewResult)}
+                              className="h-4 w-4 accent-[#58CC02]"
+                            />
+                            <span>{option}</span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <textarea
+                        value={transitionReviewAnswers[question.question_index] ?? ""}
+                        onChange={(event) =>
+                          setTransitionReviewAnswers((previous) => ({
+                            ...previous,
+                            [question.question_index]: event.target.value,
+                          }))
+                        }
+                        disabled={Boolean(transitionReviewResult)}
+                        rows={question.question_type === "short_answer" ? 3 : 2}
+                        className="mt-3 w-full resize-y rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-xs font-semibold text-[#1F2937] outline-none focus:border-[#58CC02]"
+                        placeholder="Type your answer"
+                      />
+                    )}
+                  </article>
+                ))}
+              </div>
+            ) : null}
+
+            {transitionReviewResult ? (
+              <div className="mt-4 rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4">
+                <p className="text-base font-extrabold text-[#1F2937]">
+                  Score: {transitionReviewResult.correct_count}/
+                  {transitionReviewResult.total_questions}
+                  {transitionReviewResult.score !== null
+                    ? ` (${transitionReviewResult.score}%)`
+                    : ""}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-[#1F2937]/75">
+                  {transitionReviewResult.performance === "good"
+                    ? "Great recall. You are ready for the next lesson."
+                    : "No worries. Review the correct answers below, then continue when ready."}
+                </p>
+
+                {transitionReviewResult.performance === "weak" ? (
+                  <div className="mt-3 space-y-2">
+                    {transitionReviewResult.evaluations.map((item) => (
+                      <article
+                        key={`transition-review-eval-${item.question_index}`}
+                        className="rounded-xl border border-[#1F2937]/12 bg-[#F8FCFF] p-3"
+                      >
+                        <p className="text-xs font-bold text-[#1F2937]">
+                          Q{item.question_index} · {item.is_correct ? "Correct" : "Needs review"}
+                        </p>
+                        <p className="mt-1 text-xs font-semibold text-[#1F2937]/75">
+                          Your answer: {item.user_answer || "(empty)"}
+                        </p>
+                        <p className="mt-1 text-xs font-semibold text-[#1F2937]/75">
+                          Correct answer: {item.correct_answer}
+                        </p>
+                        <p className="mt-1 text-xs font-semibold text-[#1F2937]/75">
+                          {item.explanation}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleTransitionReviewGoBack();
+                }}
+                disabled={isSubmittingTransitionReview || isLoadingTransitionReview}
+                className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-6 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                Go Back
+              </button>
+
+              {transitionReviewResult?.performance === "weak" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!transitionReviewPopup) {
+                      return;
+                    }
+                    void openCourseFromTransitionReview(transitionReviewPopup.to_course_id);
+                  }}
+                  disabled={isSubmittingTransitionReview || isLoadingTransitionReview}
+                  className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  Continue to Next Lesson
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleTransitionReviewSubmitAndContinue();
+                  }}
+                  disabled={isSubmittingTransitionReview || isLoadingTransitionReview}
+                  className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isSubmittingTransitionReview ? "Checking..." : "Submit and Continue"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {isCourseModalOpen ? (
@@ -1674,6 +2190,14 @@ export default function LearningFieldPanel({
                 </div>
 
                 <div className="mt-5 grid gap-4">
+                  {courseDetails.resources.length === 0 ? (
+                    <p className="rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-3 text-sm font-semibold text-[#1F2937]/70">
+                      {courseDetails.resource_generation_status === "generating" ||
+                      courseDetails.resource_generation_status === "pending"
+                        ? "Preparing course resources..."
+                        : "No resources available yet. Please try again."}
+                    </p>
+                  ) : null}
                   {courseDetails.resources.slice(0, 3).map((resource, index) => (
                     <article
                       key={resource.id}

@@ -2,21 +2,52 @@
 
 import DashboardSidebar from "@/components/DashboardSidebar";
 import DashboardSummaryCards from "@/components/DashboardSummaryCards";
-import FriendsPanel from "@/components/FriendsPanel";
-import LearningFieldPanel from "@/components/LearningFieldPanel";
-import MessagesPanel from "@/components/MessagesPanel";
-import NotebookPanel from "@/components/NotebookPanel";
-import MorePanel from "@/components/MorePanel";
-import ProfilePanel from "@/components/ProfilePanel";
-import StudyRoomsPanel, { type StudyRoomListItem } from "@/components/StudyRoomsPanel";
+import type { StudyRoomListItem } from "@/components/StudyRoomsPanel";
 import {
   type DashboardView,
   type LearningFolder,
 } from "@/components/dashboardData";
+import { playIncomingNotificationSound } from "@/lib/incomingNotificationSound";
 import { playSound, setSoundEffectsEnabled as syncSoundEffectsEnabled } from "@/lib/sound";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+function DashboardPanelSkeleton({ label }: { label: string }) {
+  return (
+    <section className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_8px_0_#1F2937,0_18px_28px_rgba(31,41,55,0.12)] sm:p-7">
+      <p className="text-sm font-semibold text-[#1F2937]/70">{label}</p>
+      <div className="mt-4 space-y-3">
+        <div className="skeleton-block h-10 w-1/2 rounded-xl" />
+        <div className="skeleton-block h-28 w-full rounded-2xl" />
+        <div className="skeleton-block h-28 w-full rounded-2xl" />
+      </div>
+    </section>
+  );
+}
+
+const FriendsPanel = dynamic(() => import("@/components/FriendsPanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading friends..." />,
+});
+const LearningFieldPanel = dynamic(() => import("@/components/LearningFieldPanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading learning journey..." />,
+});
+const MessagesPanel = dynamic(() => import("@/components/MessagesPanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading messages..." />,
+});
+const NotebookPanel = dynamic(() => import("@/components/NotebookPanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading notebooks..." />,
+});
+const MorePanel = dynamic(() => import("@/components/MorePanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading settings..." />,
+});
+const ProfilePanel = dynamic(() => import("@/components/ProfilePanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading profile..." />,
+});
+const StudyRoomsPanel = dynamic(() => import("@/components/StudyRoomsPanel"), {
+  loading: () => <DashboardPanelSkeleton label="Loading study rooms..." />,
+});
 
 type DashboardShellProps = {
   initialSelectedField?: string;
@@ -85,6 +116,7 @@ type MessagesSummaryApiResponse = {
   success?: boolean;
   message?: string;
   current_user_id?: string;
+  current_user_role?: string | null;
   accepted_friendship_ids?: string[];
   unread_friend_messages?: number;
   pending_friend_requests?: number;
@@ -387,6 +419,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const [messagesUnreadCount, setMessagesUnreadCount] = useState(0);
   const [friendsUnreadCount, setFriendsUnreadCount] = useState(0);
   const [badgeRealtimeUserId, setBadgeRealtimeUserId] = useState("");
+  const [badgeRealtimeUserRole, setBadgeRealtimeUserRole] = useState<string | null>(null);
   const [isLoadingActiveSummary, setIsLoadingActiveSummary] = useState(false);
   const [activeSummaryError, setActiveSummaryError] = useState("");
   const [summaryReadyByField, setSummaryReadyByField] = useState<Record<string, boolean>>({});
@@ -404,8 +437,6 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   const inFlightSummaryFieldIdsRef = useRef<Set<string>>(new Set());
   const summaryReadyByFieldRef = useRef<Record<string, boolean>>({});
   const initialLoadRequestedRef = useRef(false);
-  const hasInitializedUnreadRef = useRef(false);
-  const previousUnreadCountRef = useRef(0);
   const acceptedFriendshipIdsRef = useRef<Set<string>>(new Set());
 
   const loadLearningFields = useCallback(
@@ -499,17 +530,14 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           ? Math.max(0, Math.floor(payload.unread_friend_messages))
           : 0;
       const nextCurrentUserId = payload.current_user_id?.trim() ?? "";
+      const nextCurrentUserRole = payload.current_user_role?.trim() || null;
       const nextAcceptedFriendshipIds = Array.from(
         new Set((payload.accepted_friendship_ids ?? []).map((value) => value.trim()).filter(Boolean)),
       );
-      if (hasInitializedUnreadRef.current && nextUnread > previousUnreadCountRef.current) {
-        playSound("notification");
-      }
-      previousUnreadCountRef.current = nextUnread;
-      hasInitializedUnreadRef.current = true;
       setMessagesUnreadCount(nextUnread);
       setFriendsUnreadCount(nextFriendUnread);
       setBadgeRealtimeUserId(nextCurrentUserId);
+      setBadgeRealtimeUserRole(nextCurrentUserRole);
       acceptedFriendshipIdsRef.current = new Set(nextAcceptedFriendshipIds);
     } catch {
       // Keep existing badge state on network errors.
@@ -522,6 +550,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
 
   useEffect(() => {
     const currentUserId = badgeRealtimeUserId.trim();
+    const currentUserRole = badgeRealtimeUserRole?.trim().toLowerCase() ?? "";
     if (!currentUserId) {
       return;
     }
@@ -547,8 +576,13 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       void loadMessagesUnreadCount();
     };
 
+    const toStringValue = (value: unknown) => (typeof value === "string" ? value : "");
+    const toBooleanValue = (value: unknown, fallback = false) =>
+      typeof value === "boolean" ? value : fallback;
+
     console.info("[dashboard_badge_realtime] subscription_start", {
       current_user_id: currentUserId,
+      current_user_role: currentUserRole || null,
       subscription_run: subscriptionRun,
       channel: `dashboard-badges-${currentUserId}`,
     });
@@ -574,6 +608,17 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           if (!acceptedFriendshipIdsRef.current.has(friendshipId)) {
             return;
           }
+          if (payload.eventType === "INSERT") {
+            const senderId = typeof row?.sender_id === "string" ? row.sender_id : "";
+            playIncomingNotificationSound({
+              type: "direct_message",
+              eventId: typeof row?.id === "string" ? row.id : null,
+              isIncoming: Boolean(senderId) && senderId !== currentUserId,
+              currentUserId,
+              receiverId: currentUserId,
+              source: "dashboard_badge_realtime:direct_messages",
+            });
+          }
           refreshUnreadBadges();
         },
       )
@@ -595,7 +640,30 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           table: "friendships",
           filter: `addressee_id=eq.${currentUserId}`,
         },
-        refreshUnreadBadges,
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const newRow = (payload.new ?? null) as Record<string, unknown> | null;
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const friendshipId = toStringValue(row?.id);
+          const requesterId = toStringValue(row?.requester_id);
+          const addresseeId = toStringValue(row?.addressee_id);
+          const status = toStringValue(newRow?.status ?? row?.status).toLowerCase();
+          playIncomingNotificationSound({
+            type: "friend_request",
+            eventId: friendshipId || null,
+            isIncoming:
+              (payload.eventType === "INSERT" || payload.eventType === "UPDATE") &&
+              addresseeId === currentUserId &&
+              requesterId !== currentUserId &&
+              status === "pending",
+            currentUserId,
+            receiverId: addresseeId || currentUserId,
+            source: "dashboard_badge_realtime:friendships_addressee",
+          });
+          refreshUnreadBadges();
+        },
       )
       .on(
         "postgres_changes",
@@ -626,6 +694,14 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
             });
             return;
           }
+          playIncomingNotificationSound({
+            type: "study_room_invitation",
+            eventId: invitationId,
+            isIncoming: payload.eventType === "INSERT",
+            currentUserId,
+            receiverId,
+            source: "dashboard_badge_realtime:study_room_invitations",
+          });
           console.info("[dashboard_badge_realtime] study_invitation_event", {
             current_user_id: currentUserId,
             invitation_id: invitationId,
@@ -636,9 +712,106 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           refreshUnreadBadges();
         },
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: `target_user_id=eq.${currentUserId}`,
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const messageId = toStringValue(row?.id);
+          const targetUserId = toStringValue(row?.target_user_id);
+          const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
+          const isActiveMessage = toBooleanValue(row?.is_active, true);
+          const appliesToUser =
+            (targetUserId && targetUserId === currentUserId) ||
+            (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
+            (!targetUserId && !roleTarget);
+          playIncomingNotificationSound({
+            type: "official_message",
+            eventId: messageId || null,
+            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
+            currentUserId,
+            receiverId: currentUserId,
+            source: "dashboard_badge_realtime:official_messages_targeted",
+          });
+          refreshUnreadBadges();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: "target_user_id=is.null",
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const messageId = toStringValue(row?.id);
+          const targetUserId = toStringValue(row?.target_user_id);
+          const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
+          const isActiveMessage = toBooleanValue(row?.is_active, true);
+          const appliesToUser =
+            (targetUserId && targetUserId === currentUserId) ||
+            (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
+            (!targetUserId && !roleTarget);
+          playIncomingNotificationSound({
+            type: "official_message",
+            eventId: messageId || null,
+            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
+            currentUserId,
+            receiverId: currentUserId,
+            source: "dashboard_badge_realtime:official_messages_global",
+          });
+          refreshUnreadBadges();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "official_messages",
+          filter: `role_target=eq.${currentUserRole || "__pathly_none_role__"}`,
+        },
+        (payload) => {
+          if (!active) {
+            return;
+          }
+          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
+          const messageId = toStringValue(row?.id);
+          const targetUserId = toStringValue(row?.target_user_id);
+          const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
+          const isActiveMessage = toBooleanValue(row?.is_active, true);
+          const appliesToUser =
+            (targetUserId && targetUserId === currentUserId) ||
+            (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
+            (!targetUserId && !roleTarget);
+          playIncomingNotificationSound({
+            type: "official_message",
+            eventId: messageId || null,
+            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
+            currentUserId,
+            receiverId: currentUserId,
+            source: "dashboard_badge_realtime:official_messages_role",
+          });
+          refreshUnreadBadges();
+        },
+      )
       .subscribe((status, error) => {
         console.info("[dashboard_badge_realtime] subscription_status", {
           current_user_id: currentUserId,
+          current_user_role: currentUserRole || null,
           subscription_run: subscriptionRun,
           status,
           ...(error ? toRealtimeLogDetails(error) : {}),
@@ -646,6 +819,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           console.error("[dashboard_badge_realtime] subscription_failed", {
             current_user_id: currentUserId,
+            current_user_role: currentUserRole || null,
             subscription_run: subscriptionRun,
             status,
             ...(error ? toRealtimeLogDetails(error) : {}),
@@ -657,6 +831,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
       active = false;
       console.info("[dashboard_badge_realtime] subscription_cleanup", {
         current_user_id: currentUserId,
+        current_user_role: currentUserRole || null,
         subscription_run: subscriptionRun,
       });
       void channel.unsubscribe();
@@ -664,7 +839,7 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
         void supabaseClient.removeChannel(channel);
       }
     };
-  }, [badgeRealtimeUserId, loadMessagesUnreadCount]);
+  }, [badgeRealtimeUserId, badgeRealtimeUserRole, loadMessagesUnreadCount]);
 
   const loadStudyRooms = useCallback(async () => {
     setStudyRoomsError("");

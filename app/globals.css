@@ -197,6 +197,45 @@ button:hover {
   cursor: pointer;
 }
 
+.skeleton-block {
+  position: relative;
+  overflow: hidden;
+  background: rgba(31, 41, 55, 0.1);
+}
+
+.skeleton-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.72) 45%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: skeleton-shimmer 1.05s ease-in-out infinite;
+}
+
+:root[data-theme="dark"] .skeleton-block {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+:root[data-theme="dark"] .skeleton-block::after {
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0) 0%,
+    rgba(226, 232, 240, 0.32) 45%,
+    rgba(148, 163, 184, 0) 100%
+  );
+}
+
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 @keyframes modal-overlay-fade-in {
   from {
     opacity: 0;
@@ -323,7 +362,7 @@ button:hover {
 }
 
 @media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
-  :root[data-animations="on"] .journey-node-coin.is-clickable:hover {
-    animation: journey-node-coin-flip 1.2s cubic-bezier(0.18, 0.78, 0.22, 1) 1 both;
+  :root[data-animations="on"] .journey-node-coin.is-clickable.is-flipping {
+    animation: journey-node-coin-flip 1.45s cubic-bezier(0.18, 0.78, 0.22, 1) 1 both;
   }
 }

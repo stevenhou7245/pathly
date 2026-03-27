@@ -1,14 +1,4 @@
-import Image from "next/image";
-
-type AuthIllustrationProps = {
-  imageSrc?: string;
-  imageAlt?: string;
-};
-
-export default function AuthIllustration({
-  imageSrc = "/images/register-illustration.png",
-  imageAlt = "Register illustration",
-}: AuthIllustrationProps) {
+export default function AuthIllustration() {
   return (
     <div className="relative overflow-hidden rounded-[2rem] border-2 border-[#1F2937] bg-[#FFF9DD] p-7 shadow-[0_10px_0_#1F2937,0_20px_30px_rgba(31,41,55,0.12)]">
       <div className="absolute -right-10 -top-10 h-32 w-32 rounded-full bg-[#FFD84D]/40" />
@@ -28,15 +18,49 @@ export default function AuthIllustration({
         </p>
 
         <div className="mt-7 overflow-hidden rounded-3xl border-2 border-[#1F2937]/12 bg-[#F5FCFF] p-2">
-          <Image
-            src={imageSrc}
-            alt={imageAlt}
-            width={1200}
-            height={900}
-            className="block h-auto w-full rounded-2xl object-contain"
-            sizes="(min-width: 1024px) 38vw, (min-width: 640px) 80vw, 92vw"
-            priority
-          />
+          <svg
+            viewBox="0 0 460 260"
+            className="block h-auto w-full rounded-2xl"
+            role="img"
+            aria-label="Learning path illustration"
+          >
+            <rect x="0" y="0" width="460" height="260" fill="#EAF7FF" />
+            <ellipse cx="108" cy="62" rx="56" ry="18" fill="white" />
+            <ellipse cx="344" cy="54" rx="62" ry="20" fill="white" />
+
+            <path
+              d="M34 92 C122 156 338 156 426 92"
+              stroke="#FFF2A8"
+              strokeWidth="32"
+              strokeLinecap="round"
+              fill="none"
+            />
+            <path
+              d="M40 92 C128 152 332 152 420 92"
+              stroke="#F3CF22"
+              strokeWidth="4"
+              strokeLinecap="round"
+              strokeDasharray="9 11"
+              fill="none"
+            />
+
+            <circle cx="82" cy="106" r="18" fill="#58CC02" />
+            <circle cx="82" cy="106" r="8" fill="#9FE870" />
+
+            <circle cx="164" cy="134" r="16" fill="#58CC02" />
+            <circle cx="164" cy="134" r="7" fill="#9FE870" />
+
+            <circle cx="230" cy="144" r="17" fill="#58CC02" />
+            <circle cx="230" cy="144" r="7.5" fill="#9FE870" />
+
+            <circle cx="296" cy="134" r="16" fill="#58CC02" />
+            <circle cx="296" cy="134" r="7" fill="#9FE870" />
+
+            <circle cx="378" cy="106" r="18" fill="#58CC02" />
+            <circle cx="378" cy="106" r="8" fill="#9FE870" />
+
+            <ellipse cx="230" cy="196" rx="88" ry="14" fill="#58CC02" opacity="0.18" />
+          </svg>
         </div>
       </div>
     </div>

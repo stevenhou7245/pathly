@@ -1399,6 +1399,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
       "Use field name score for per-question points. Do not use points.",
       "Scoring must be exact: the 7 objective questions must each have score 10, and the 2 short_answer questions must each have score 15.",
       "Total score must be 100.",
+      "Passing score in this product is 80 out of 100. Do not mention 60 as a passing score.",
       "options must always be an array, never null.",
       "acceptable_answers must always be an array, never null.",
       "skill_tags must always be an array, never null.",

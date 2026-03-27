@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { generateLearningStepsPlan, type LearningStepResource } from "@/lib/ai/learningSteps";
 import { calculateTotalSteps, normalizeLearningLevel } from "@/lib/learningPath";
-import { enrichLearningStepResourcesWithSearch } from "@/lib/learningStepResourcePipeline";
 import { installAiPipelineDebugLogFilter } from "@/lib/aiPipelineDebugLogging";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { isMissingRelationOrColumnError, sha256Hash, toSlug } from "@/lib/ai/common";
@@ -298,138 +297,6 @@ async function storeGenerationDebugOnUserField(params: {
   }
 }
 
-async function syncCourseResourceOptionsFromStepResources(params: {
-  courseId: string;
-  resources: LearningStepResource[];
-}) {
-  const validResources = params.resources.filter((resource) => isDirectResourceUrl(resource.url)).slice(0, 3);
-  if (validResources.length === 0) {
-    return;
-  }
-
-  const STRICT_INSERT_KEYS = [
-    "course_id",
-    "option_no",
-    "resource_type",
-    "title",
-    "provider",
-    "url",
-    "summary",
-    "difficulty",
-    "estimated_minutes",
-    "ai_selected",
-    "created_at",
-    "ai_generated_at",
-  ] as const;
-
-  const isValidResourceType = (value: string) =>
-    value === "video" ||
-    value === "article" ||
-    value === "tutorial" ||
-    value === "interactive" ||
-    value === "document";
-
-  const ensureStrictKeys = (row: Record<string, unknown>) => {
-    const actual = Object.keys(row).sort();
-    const expected = [...STRICT_INSERT_KEYS].sort();
-    if (actual.length !== expected.length) {
-      return false;
-    }
-    for (let i = 0; i < expected.length; i += 1) {
-      if (actual[i] !== expected[i]) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const nowIso = new Date().toISOString();
-  const rows: Array<Record<string, unknown>> = [];
-
-  for (let index = 0; index < validResources.length; index += 1) {
-    const resource = validResources[index];
-    const optionNo = index + 1;
-    const resourceType = toStringValue(resource.type).trim().toLowerCase();
-    const difficultyRaw = toStringValue(resource.difficulty).trim().toLowerCase();
-    const difficulty =
-      difficultyRaw === "beginner" || difficultyRaw === "intermediate" || difficultyRaw === "advanced"
-        ? difficultyRaw
-        : "intermediate";
-    const strictPayload = {
-      course_id: params.courseId,
-      option_no: optionNo,
-      resource_type: resourceType,
-      title: toStringValue(resource.title).trim(),
-      provider: toStringValue(resource.provider).trim() || "Unknown",
-      url: toStringValue(resource.url).trim(),
-      summary: toStringValue(resource.reason).trim() || "",
-      difficulty,
-      estimated_minutes:
-        resource.estimated_minutes && resource.estimated_minutes > 0
-          ? Math.floor(resource.estimated_minutes)
-          : 30,
-      ai_selected: resource.ai_selected ?? true,
-      created_at: nowIso,
-      ai_generated_at: resource.ai_generated_at ?? nowIso,
-    };
-
-    if (
-      !strictPayload.course_id ||
-      !Number.isInteger(strictPayload.option_no) ||
-      !isValidResourceType(resourceType) ||
-      !strictPayload.title ||
-      !strictPayload.provider ||
-      !strictPayload.url.startsWith("http") ||
-      !Number.isInteger(strictPayload.estimated_minutes) ||
-      !ensureStrictKeys(strictPayload)
-    ) {
-      console.error("[resource_options] db_insert_failed", {
-        course_id: params.courseId,
-        option_no: optionNo,
-        reason: "Row validation failed before insert.",
-        row_sample: strictPayload,
-      });
-      continue;
-    }
-
-    rows.push(strictPayload);
-  }
-
-  console.info("[resource_options] db_insert_payload_keys", {
-    course_id: params.courseId,
-    keys: rows.length > 0 ? Object.keys(rows[0]) : [],
-  });
-  console.info("[resource_options] db_insert_row_count", {
-    course_id: params.courseId,
-    row_count: rows.length,
-  });
-
-  if (rows.length === 0) {
-    console.error("[resource_options] db_insert_failed", {
-      course_id: params.courseId,
-      reason: "No valid rows available after normalization.",
-    });
-    return;
-  }
-
-  const upsertResponse = await supabaseAdmin.from("course_resource_options").upsert(rows, {
-    onConflict: "course_id,option_no",
-  });
-  if (upsertResponse.error) {
-    console.error("[resource_options] db_insert_failed", {
-      course_id: params.courseId,
-      reason: upsertResponse.error.message ?? "Unknown upsert error.",
-      row_sample: rows[0] ?? null,
-    });
-    return;
-  }
-
-  console.info("[resource_options] db_insert_succeeded", {
-    course_id: params.courseId,
-    row_count: rows.length,
-  });
-}
-
 function normalizeResourceTypeFromCourse(value: unknown): LearningStepResource["type"] {
   const normalized = toStringValue(value).trim().toLowerCase();
   if (
@@ -681,20 +548,42 @@ async function syncCoursesFromSteps(params: {
       }
       courseId = toStringValue(course.id);
     } else {
-      const { data: inserted, error: insertError } = await supabaseAdmin
+      const skeletonInsertPayload = {
+        learning_field_id: params.learningFieldId,
+        title: step.title,
+        slug: `${fieldSlug}-course-${step.step_number}-${Date.now()}`,
+        description: step.summary,
+        estimated_minutes: 35,
+        difficulty_level: difficulty,
+        resource_generation_status: "pending",
+        is_resource_generated: false,
+        resources_generated_at: null,
+        created_at: nowIso,
+      };
+
+      let { data: inserted, error: insertError } = await supabaseAdmin
         .from("courses")
-        .insert({
-          learning_field_id: params.learningFieldId,
-          title: step.title,
-          slug: `${fieldSlug}-course-${step.step_number}-${Date.now()}`,
-          description: step.summary,
-          estimated_minutes: 35,
-          difficulty_level: difficulty,
-          created_at: nowIso,
-        })
+        .insert(skeletonInsertPayload)
         .select("id")
         .limit(1)
         .maybeSingle();
+
+      if (insertError && isMissingRelationOrColumnError(insertError)) {
+        ({ data: inserted, error: insertError } = await supabaseAdmin
+          .from("courses")
+          .insert({
+            learning_field_id: params.learningFieldId,
+            title: step.title,
+            slug: `${fieldSlug}-course-${step.step_number}-${Date.now()}`,
+            description: step.summary,
+            estimated_minutes: 35,
+            difficulty_level: difficulty,
+            created_at: nowIso,
+          })
+          .select("id")
+          .limit(1)
+          .maybeSingle());
+      }
 
       if (insertError || !inserted) {
         console.warn("[learning_steps] sync_course_insert_failed", {
@@ -705,28 +594,6 @@ async function syncCoursesFromSteps(params: {
         continue;
       }
       courseId = toStringValue((inserted as GenericRecord).id);
-    }
-
-    if (!courseId || step.resources.length === 0) {
-      console.warn("[learning_steps] sync_course_skipped_resources_missing", {
-        learning_field_id: params.learningFieldId,
-        step_number: step.step_number,
-        course_id: courseId || null,
-        resource_count: step.resources.length,
-      });
-      continue;
-    }
-
-    try {
-      await syncCourseResourceOptionsFromStepResources({
-        courseId,
-        resources: step.resources,
-      });
-    } catch (error) {
-      console.warn("[learning_steps] sync_course_resources_failed", {
-        course_id: courseId,
-        reason: error instanceof Error ? error.message : String(error),
-      });
     }
   }
   console.info("[learning_steps] sync_courses_from_steps_success", {
@@ -818,14 +685,12 @@ export async function ensureLearningStepsForUserField(params: {
   const existingStepList = await listLearningStepsForField(params.userFieldId);
   const existingSteps = existingStepList.steps;
   const hasGenericTitles = existingSteps.some((step) => isGenericFallbackTitle(step.title));
-  const hasMissingResources = existingSteps.some((step) => step.resources.length === 0);
   const shouldRegenerate =
     params.forceRegenerate === true ||
     !existingStepList.storageUsable ||
     existingSteps.length === 0 ||
     existingSteps.length < derivedTotalSteps ||
-    hasGenericTitles ||
-    hasMissingResources;
+    hasGenericTitles;
   console.info("[learning_steps] existing_steps_check", {
     user_id: params.userId,
     user_field_id: params.userFieldId,
@@ -834,7 +699,6 @@ export async function ensureLearningStepsForUserField(params: {
     should_regenerate: shouldRegenerate,
     storage_usable: existingStepList.storageUsable,
     has_generic_titles: hasGenericTitles,
-    has_missing_resources: hasMissingResources,
   });
   if (shouldRegenerate) {
     console.info("[learning_steps] cache_miss", {
@@ -1032,23 +896,14 @@ export async function ensureLearningStepsForUserField(params: {
     raw_ai_response_text: plan.debug.raw_ai_response_text,
     parsed_ai_json: plan.debug.parsed_ai_json,
   });
-  let finalizedPlanSteps = plan.steps;
-  try {
-    const enrichmentResult = await enrichLearningStepResourcesWithSearch({
-      userFieldId: params.userFieldId,
-      fieldTitle,
-      userLevel: currentLevel,
-      steps: plan.steps,
-    });
-    finalizedPlanSteps = enrichmentResult.steps;
-  } catch (error) {
-    console.warn("[learning_steps] tavily_deepseek_enrichment_failed", {
-      user_id: params.userId,
-      user_field_id: params.userFieldId,
-      learning_field_id: fieldId,
-      reason: error instanceof Error ? error.message : String(error),
-    });
-  }
+  const finalizedPlanSteps = plan.steps;
+  console.info("[learning_steps] skeleton_generation_completed", {
+    user_id: params.userId,
+    user_field_id: params.userFieldId,
+    learning_field_id: fieldId,
+    step_count: finalizedPlanSteps.length,
+    deferred_resource_generation: true,
+  });
   const nowIso = new Date().toISOString();
 
   const upsertRows = finalizedPlanSteps.map((step) => {

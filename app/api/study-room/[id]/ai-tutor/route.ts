@@ -27,7 +27,7 @@ type AiTutorResponse = {
 };
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -47,9 +47,14 @@ export async function GET(
       );
     }
 
+    const url = new URL(request.url);
+    const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(300, Math.max(20, rawLimit)) : 120;
+
     const result = await listStudyRoomAiMessages({
       userId: sessionUser.id,
       roomId: id,
+      limit,
     });
     if (!result.ok) {
       if (result.code === "NOT_FOUND") {

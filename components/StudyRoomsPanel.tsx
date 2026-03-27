@@ -817,6 +817,9 @@ function presenceBadgeClass(state: StudyRoomParticipant["presence_state"]) {
   return "bg-[#DDF2FF] text-[#1F2937]";
 }
 
+const WORKSPACE_INITIAL_VISIBLE_COUNT = 40;
+const WORKSPACE_VISIBLE_COUNT_STEP = 30;
+
 export default function StudyRoomsPanel({
   rooms,
   activeRoomId,
@@ -841,6 +844,14 @@ export default function StudyRoomsPanel({
   const [roomDetail, setRoomDetail] = useState<StudyRoomDetail | null>(null);
   const [participants, setParticipants] = useState<StudyRoomParticipant[]>([]);
   const [messages, setMessages] = useState<StudyRoomMessage[]>([]);
+  const [messagesVisibleCount, setMessagesVisibleCount] = useState(WORKSPACE_INITIAL_VISIBLE_COUNT);
+  const [noteEntriesVisibleCount, setNoteEntriesVisibleCount] = useState(
+    WORKSPACE_INITIAL_VISIBLE_COUNT,
+  );
+  const [resourcesVisibleCount, setResourcesVisibleCount] = useState(WORKSPACE_INITIAL_VISIBLE_COUNT);
+  const [aiVisibleCount, setAiVisibleCount] = useState(WORKSPACE_INITIAL_VISIBLE_COUNT);
+  const [isLoadingWorkspaceExtras, setIsLoadingWorkspaceExtras] = useState(false);
+  const [hasRealtimeChannelError, setHasRealtimeChannelError] = useState(false);
 
   const [messageDraft, setMessageDraft] = useState("");
   const [isSendingMessage, setIsSendingMessage] = useState(false);
@@ -1022,6 +1033,35 @@ export default function StudyRoomsPanel({
     () => normalizeNoteEntriesByCreatedAt(noteEntries),
     [noteEntries],
   );
+  const participantUsernameMap = useMemo(() => {
+    const map = new Map<string, string>();
+    participants.forEach((participant) => {
+      if (!participant.user_id) {
+        return;
+      }
+      map.set(participant.user_id, participant.username);
+    });
+    return map;
+  }, [participants]);
+  const visibleMessages = useMemo(
+    () => messages.slice(Math.max(0, messages.length - messagesVisibleCount)),
+    [messages, messagesVisibleCount],
+  );
+  const visibleNoteEntries = useMemo(
+    () =>
+      sortedNoteEntries.slice(
+        Math.max(0, sortedNoteEntries.length - noteEntriesVisibleCount),
+      ),
+    [noteEntriesVisibleCount, sortedNoteEntries],
+  );
+  const visibleResources = useMemo(
+    () => resources.slice(Math.max(0, resources.length - resourcesVisibleCount)),
+    [resources, resourcesVisibleCount],
+  );
+  const visibleAiMessages = useMemo(
+    () => aiMessages.slice(Math.max(0, aiMessages.length - aiVisibleCount)),
+    [aiMessages, aiVisibleCount],
+  );
   const myLatestNoteEntry = useMemo(() => {
     if (myNoteEntryId) {
       const byId = noteEntries.find((entry) => entry.id === myNoteEntryId);
@@ -1098,7 +1138,7 @@ export default function StudyRoomsPanel({
             method: "GET",
             cache: "no-store",
           }),
-          fetch(`/api/study-room/${encodeURIComponent(roomId)}/messages`, {
+          fetch(`/api/study-room/${encodeURIComponent(roomId)}/messages?limit=140`, {
             method: "GET",
             cache: "no-store",
           }),
@@ -1119,6 +1159,7 @@ export default function StudyRoomsPanel({
         setMessages((messagesPayload.messages ?? []).sort((a, b) =>
           (a.created_at ?? "").localeCompare(b.created_at ?? ""),
         ));
+        setHasRealtimeChannelError(false);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to load room data.";
         setPanelError(message);
@@ -1141,20 +1182,22 @@ export default function StudyRoomsPanel({
         setNotesDraft("");
         setResources([]);
         setAiMessages([]);
+        setIsLoadingWorkspaceExtras(false);
         return;
       }
 
+      setIsLoadingWorkspaceExtras(true);
       try {
         const [notesResponse, resourcesResponse, aiResponse, goalsResponse] = await Promise.all([
-          fetch(`/api/study-room/${encodeURIComponent(roomId)}/notes`, {
+          fetch(`/api/study-room/${encodeURIComponent(roomId)}/notes?limit=120`, {
             method: "GET",
             cache: "no-store",
           }),
-          fetch(`/api/study-room/${encodeURIComponent(roomId)}/resources`, {
+          fetch(`/api/study-room/${encodeURIComponent(roomId)}/resources?limit=120`, {
             method: "GET",
             cache: "no-store",
           }),
-          fetch(`/api/study-room/${encodeURIComponent(roomId)}/ai-tutor`, {
+          fetch(`/api/study-room/${encodeURIComponent(roomId)}/ai-tutor?limit=120`, {
             method: "GET",
             cache: "no-store",
           }),
@@ -1196,6 +1239,8 @@ export default function StudyRoomsPanel({
           room_id: roomId,
           reason: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        setIsLoadingWorkspaceExtras(false);
       }
     },
     [],
@@ -1224,6 +1269,13 @@ export default function StudyRoomsPanel({
     }
     void loadRoomData(activeRoomId);
     void loadWorkspaceExtras(activeRoomId);
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    setMessagesVisibleCount(WORKSPACE_INITIAL_VISIBLE_COUNT);
+    setNoteEntriesVisibleCount(WORKSPACE_INITIAL_VISIBLE_COUNT);
+    setResourcesVisibleCount(WORKSPACE_INITIAL_VISIBLE_COUNT);
+    setAiVisibleCount(WORKSPACE_INITIAL_VISIBLE_COUNT);
   }, [activeRoomId]);
 
   useEffect(() => {
@@ -1478,6 +1530,7 @@ export default function StudyRoomsPanel({
       subscription_run: subscriptionRun,
       pattern: "friend-chat-style per-table channels",
     });
+    setHasRealtimeChannelError(false);
 
     const channels: RealtimeChannel[] = [];
     const subscribeTableChannel = (params: {
@@ -1531,6 +1584,7 @@ export default function StudyRoomsPanel({
             ...(error ? toRealtimeLogDetails(error) : {}),
           });
           if (status === "SUBSCRIBED") {
+            setHasRealtimeChannelError(false);
             console.info("[study_room_realtime] subscription_succeeded", {
               room_id: activeRoomId,
               subscription_run: subscriptionRun,
@@ -1549,6 +1603,7 @@ export default function StudyRoomsPanel({
             return;
           }
           if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            setHasRealtimeChannelError(true);
             console.error("[study_room_realtime] subscription_failed", {
               room_id: activeRoomId,
               subscription_run: subscriptionRun,
@@ -1576,6 +1631,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] message_event", {
           room_id: activeRoomId,
           event_type: eventType,
+          event_kind:
+            eventType === "INSERT"
+              ? "message_sent"
+              : eventType === "DELETE"
+                ? "message_deleted"
+                : "message_updated",
           message_id: changedId,
         });
         if (eventType === "DELETE") {
@@ -1632,6 +1693,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] participant_event", {
           room_id: activeRoomId,
           event_type: eventType,
+          event_kind:
+            eventType === "INSERT"
+              ? "participant_joined"
+              : eventType === "DELETE"
+                ? "participant_left"
+                : "participant_update",
           participant_id: changedParticipantId || null,
           timestamp_field: "joined_at",
         });
@@ -1709,6 +1776,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] note_event", {
           room_id: activeRoomId,
           event_type: eventType,
+          event_kind:
+            eventType === "INSERT"
+              ? "note_added"
+              : eventType === "DELETE"
+                ? "note_deleted"
+                : "note_updated",
           note_entry_id: changedId,
         });
         if (eventType === "DELETE") {
@@ -1771,6 +1844,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] resource_event", {
           room_id: activeRoomId,
           event_type: eventType,
+          event_kind:
+            eventType === "INSERT"
+              ? "resource_shared"
+              : eventType === "DELETE"
+                ? "resource_deleted"
+                : "resource_updated",
           resource_id: changedId,
         });
         if (eventType === "DELETE") {
@@ -1823,6 +1902,12 @@ export default function StudyRoomsPanel({
         console.info("[study_room_realtime] ai_event", {
           room_id: activeRoomId,
           event_type: eventType,
+          event_kind:
+            eventType === "INSERT"
+              ? "ai_response"
+              : eventType === "DELETE"
+                ? "ai_deleted"
+                : "ai_updated",
           ai_message_id: changedId,
         });
         if (eventType === "DELETE") {
@@ -1928,15 +2013,17 @@ export default function StudyRoomsPanel({
   }, [activeRoomId, roomDetail?.status]);
 
   useEffect(() => {
-    if (!isWorkspaceOpen || !activeRoomId) {
+    if (!isWorkspaceOpen || !activeRoomId || !hasRealtimeChannelError) {
       return;
     }
     const timer = window.setInterval(() => {
       void loadRoomDataRef.current(activeRoomId);
-    }, 5000);
+      void loadWorkspaceExtrasRef.current(activeRoomId);
+    }, 15000);
     console.info("[study_room_collecting_sync] status_polling_started", {
       room_id: activeRoomId,
-      interval_ms: 5000,
+      interval_ms: 15000,
+      reason: "realtime_channel_error_fallback",
     });
     return () => {
       window.clearInterval(timer);
@@ -1944,7 +2031,7 @@ export default function StudyRoomsPanel({
         room_id: activeRoomId,
       });
     };
-  }, [activeRoomId, isWorkspaceOpen]);
+  }, [activeRoomId, hasRealtimeChannelError, isWorkspaceOpen]);
 
   useEffect(() => {
     if (trackedRoomIds.length === 0) {
@@ -3240,17 +3327,21 @@ export default function StudyRoomsPanel({
                         }}
                         className="flex-1 overflow-y-auto rounded-xl border-2 border-[#1F2937]/10 bg-[#F9FCFF] p-3"
                       >
-                        {messages.length === 0 ? (
+                        {isLoadingRoom ? (
+                          <div className="space-y-2">
+                            <div className="skeleton-block h-16 rounded-xl" />
+                            <div className="skeleton-block h-16 rounded-xl" />
+                            <div className="skeleton-block h-16 rounded-xl" />
+                          </div>
+                        ) : messages.length === 0 ? (
                           <p className="my-10 text-center text-sm font-semibold text-[#1F2937]/65">
                             No room messages yet.
                           </p>
                         ) : (
                           <div className="space-y-2">
-                            {messages.map((message) => {
+                            {visibleMessages.map((message) => {
                               const isMine = message.sender_id === roomDetail.viewer_user_id;
-                              const fallbackName =
-                                participants.find((participant) => participant.user_id === message.sender_id)?.username ??
-                                "Unknown";
+                              const fallbackName = participantUsernameMap.get(message.sender_id) ?? "Unknown";
                               const senderName = message.sender_username ?? fallbackName;
                               return (
                                 <div
@@ -3274,6 +3365,19 @@ export default function StudyRoomsPanel({
                           </div>
                         )}
                       </div>
+                      {messages.length > visibleMessages.length ? (
+                        <div className="mt-2 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMessagesVisibleCount((previous) => previous + WORKSPACE_VISIBLE_COUNT_STEP);
+                            }}
+                            className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1.5 text-xs font-extrabold text-[#1F2937]"
+                          >
+                            Load older messages ({messages.length - visibleMessages.length} hidden)
+                          </button>
+                        </div>
+                      ) : null}
                       {newMessagesCount > 0 && !isAtBottom ? (
                         <div className="mt-2 flex justify-center">
                           <button
@@ -3360,7 +3464,12 @@ export default function StudyRoomsPanel({
                         <p className="mb-2 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/65">
                           Room Notes Feed
                         </p>
-                        {sortedNoteEntries.length === 0 ? (
+                        {isLoadingWorkspaceExtras ? (
+                          <div className="space-y-2">
+                            <div className="skeleton-block h-20 rounded-xl" />
+                            <div className="skeleton-block h-20 rounded-xl" />
+                          </div>
+                        ) : sortedNoteEntries.length === 0 ? (
                           notesRecord?.content ? (
                             <div className="rounded-xl border border-[#1F2937]/12 bg-white p-3">
                               <p className="text-xs font-extrabold text-[#1F2937]/65">Legacy Shared Note</p>
@@ -3379,7 +3488,7 @@ export default function StudyRoomsPanel({
                           )
                         ) : (
                           <div className="space-y-2">
-                            {sortedNoteEntries.map((entry) => {
+                            {visibleNoteEntries.map((entry) => {
                               const isMine = roomDetail.viewer_user_id === entry.author_user_id;
                               return (
                                 <div
@@ -3421,6 +3530,21 @@ export default function StudyRoomsPanel({
                             })}
                           </div>
                         )}
+                        {sortedNoteEntries.length > visibleNoteEntries.length ? (
+                          <div className="mt-3 flex justify-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNoteEntriesVisibleCount(
+                                  (previous) => previous + WORKSPACE_VISIBLE_COUNT_STEP,
+                                );
+                              }}
+                              className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1.5 text-xs font-extrabold text-[#1F2937]"
+                            >
+                              Load older notes ({sortedNoteEntries.length - visibleNoteEntries.length} hidden)
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ) : null}
@@ -3562,11 +3686,16 @@ export default function StudyRoomsPanel({
                         </button>
                       )}
                       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-[#1F2937]/12 bg-[#F9FCFF] p-3">
-                        {resources.length === 0 ? (
+                        {isLoadingWorkspaceExtras ? (
+                          <div className="space-y-2">
+                            <div className="skeleton-block h-20 rounded-xl" />
+                            <div className="skeleton-block h-20 rounded-xl" />
+                          </div>
+                        ) : resources.length === 0 ? (
                           <p className="text-sm font-semibold text-[#1F2937]/65">No shared resources yet.</p>
                         ) : (
                           <div className="space-y-2">
-                            {resources.map((resource) => (
+                            {visibleResources.map((resource) => (
                               <div key={resource.id} className="rounded-xl border border-[#1F2937]/12 bg-white p-3">
                                 <div className="flex items-start justify-between gap-2">
                                   <div>
@@ -3619,6 +3748,21 @@ export default function StudyRoomsPanel({
                             ))}
                           </div>
                         )}
+                        {resources.length > visibleResources.length ? (
+                          <div className="mt-3 flex justify-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResourcesVisibleCount(
+                                  (previous) => previous + WORKSPACE_VISIBLE_COUNT_STEP,
+                                );
+                              }}
+                              className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1.5 text-xs font-extrabold text-[#1F2937]"
+                            >
+                              Load older resources ({resources.length - visibleResources.length} hidden)
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ) : null}
@@ -3626,13 +3770,19 @@ export default function StudyRoomsPanel({
                   {workspaceTab === "ai" ? (
                     <div className="flex h-full flex-col">
                       <div className="flex-1 overflow-y-auto rounded-xl border border-[#1F2937]/12 bg-[#F9FCFF] p-3">
-                        {aiMessages.length === 0 ? (
+                        {isLoadingWorkspaceExtras ? (
+                          <div className="space-y-2">
+                            <div className="skeleton-block h-16 rounded-xl" />
+                            <div className="skeleton-block h-16 rounded-xl" />
+                            <div className="skeleton-block h-16 rounded-xl" />
+                          </div>
+                        ) : aiMessages.length === 0 ? (
                           <p className="text-sm font-semibold text-[#1F2937]/65">
                             Ask AI Tutor for help on this room&apos;s topic and shared resources.
                           </p>
                         ) : (
                           <div className="space-y-2">
-                            {aiMessages.map((message) => (
+                            {visibleAiMessages.map((message) => (
                               <div
                                 key={message.id}
                                 className={`rounded-xl border px-3 py-2 ${
@@ -3657,6 +3807,19 @@ export default function StudyRoomsPanel({
                           </div>
                         )}
                       </div>
+                      {aiMessages.length > visibleAiMessages.length ? (
+                        <div className="mt-2 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAiVisibleCount((previous) => previous + WORKSPACE_VISIBLE_COUNT_STEP);
+                            }}
+                            className="rounded-full border border-[#1F2937]/20 bg-white px-4 py-1.5 text-xs font-extrabold text-[#1F2937]"
+                          >
+                            Load older AI messages ({aiMessages.length - visibleAiMessages.length} hidden)
+                          </button>
+                        </div>
+                      ) : null}
                       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                         <textarea
                           value={aiQuestionDraft}

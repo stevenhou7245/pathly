@@ -28,7 +28,7 @@ type NotebookEntriesResponse = {
 };
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -48,9 +48,14 @@ export async function GET(
       );
     }
 
+    const url = new URL(request.url);
+    const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(400, Math.max(20, rawLimit)) : 160;
+
     const result = await listNotebookEntries({
       userId: sessionUser.id,
       notebookId: id,
+      limit,
     });
     if (!result.ok) {
       return NextResponse.json<NotebookEntriesResponse>(

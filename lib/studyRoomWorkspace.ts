@@ -140,6 +140,18 @@ function toNumberValue(value: unknown) {
   return 0;
 }
 
+function resolveOptionalListLimit(
+  value: number | null | undefined,
+  options?: { min?: number; max?: number },
+) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  const min = Math.max(1, Math.floor(options?.min ?? 20));
+  const max = Math.max(min, Math.floor(options?.max ?? 300));
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 function toBoolean(value: unknown) {
   return value === true;
 }
@@ -867,18 +879,28 @@ export async function getStudyRoomNotes(params: {
   userId: string;
   roomId: string;
   membershipMode?: RoomMembershipMode;
+  limit?: number;
 }) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
   }
 
-  const { data: entryRows, error: entriesError } = await supabaseAdmin
+  const effectiveLimit = resolveOptionalListLimit(params.limit, {
+    min: 20,
+    max: 300,
+  });
+
+  let entriesQuery = supabaseAdmin
     .from("study_room_note_entries")
     .select("id, room_id, author_user_id, content_md, created_at, updated_at, is_deleted")
     .eq("room_id", params.roomId)
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false });
+  if (effectiveLimit !== null) {
+    entriesQuery = entriesQuery.limit(effectiveLimit);
+  }
+  const { data: entryRows, error: entriesError } = await entriesQuery;
 
   if (entriesError) {
     const details = toErrorDetails(entriesError);
@@ -1224,19 +1246,29 @@ export async function listStudyRoomResources(params: {
   userId: string;
   roomId: string;
   membershipMode?: RoomMembershipMode;
+  limit?: number;
 }) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
   }
 
-  const { data, error } = await supabaseAdmin
+  const effectiveLimit = resolveOptionalListLimit(params.limit, {
+    min: 20,
+    max: 300,
+  });
+
+  let resourcesQuery = supabaseAdmin
     .from("study_room_resources")
     .select(
       "id, room_id, source_kind, resource_type, title, url, file_name, file_path, file_size_bytes, mime_type, added_by, created_at",
     )
     .eq("room_id", params.roomId)
     .order("created_at", { ascending: false });
+  if (effectiveLimit !== null) {
+    resourcesQuery = resourcesQuery.limit(effectiveLimit);
+  }
+  const { data, error } = await resourcesQuery;
   if (error) {
     const details = toErrorDetails(error);
     console.error("[study_room_workspace] resources_lookup_failed", {
@@ -1547,19 +1579,30 @@ export async function listStudyRoomAiMessages(params: {
   userId: string;
   roomId: string;
   membershipMode?: RoomMembershipMode;
+  limit?: number;
 }) {
   const membership = await requireRoomMembership(params);
   if (!membership.ok) {
     return membership;
   }
 
-  const { data, error } = await supabaseAdmin
+  const effectiveLimit = resolveOptionalListLimit(params.limit, {
+    min: 20,
+    max: 300,
+  });
+
+  let aiQuery = supabaseAdmin
     .from("study_room_ai_messages")
     .select(
       "id, room_id, sender_id, linked_user_id, sender_type, message_kind, body, provider, model, context_summary, metadata, created_at",
     )
-    .eq("room_id", params.roomId)
-    .order("created_at", { ascending: true });
+    .eq("room_id", params.roomId);
+  if (effectiveLimit !== null) {
+    aiQuery = aiQuery.order("created_at", { ascending: false }).limit(effectiveLimit);
+  } else {
+    aiQuery = aiQuery.order("created_at", { ascending: true });
+  }
+  const { data, error } = await aiQuery;
   if (error) {
     const details = toErrorDetails(error);
     console.error("[study_room_workspace] ai_messages_lookup_failed", {
@@ -1574,7 +1617,8 @@ export async function listStudyRoomAiMessages(params: {
     ));
   }
 
-  const rows = (data ?? []) as GenericRecord[];
+  const rows = ((effectiveLimit !== null ? [...((data ?? []) as GenericRecord[])].reverse() : data ?? []) ??
+    []) as GenericRecord[];
   const usernamesById = await loadUsernamesByIds(
     rows.map((row) => toStringValue(row.sender_id)).filter(Boolean),
   );

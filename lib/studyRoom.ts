@@ -22,6 +22,19 @@ function toNumberValue(value: unknown) {
   return 0;
 }
 
+function normalizeListLimit(
+  value: number | null | undefined,
+  options?: { min?: number; max?: number; defaultValue?: number },
+) {
+  const min = Math.max(1, Math.floor(options?.min ?? 20));
+  const max = Math.max(min, Math.floor(options?.max ?? 300));
+  const fallback = Math.min(max, Math.max(min, Math.floor(options?.defaultValue ?? 120)));
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 function toErrorDetails(error: unknown) {
   const record = (error ?? {}) as GenericRecord;
   return {
@@ -1103,6 +1116,8 @@ export async function getStudyRoomDetailsForUser(params: {
 export async function getStudyRoomMessagesForUser(params: {
   userId: string;
   roomId: string;
+  limit?: number;
+  beforeCreatedAt?: string | null;
 }) {
   const participant = await getActiveParticipantRow({
     roomId: params.roomId,
@@ -1123,11 +1138,22 @@ export async function getStudyRoomMessagesForUser(params: {
   }
   await ensureRoomLifecycle(room);
 
-  const { data, error } = await supabaseAdmin
+  const effectiveLimit = normalizeListLimit(params.limit, {
+    min: 20,
+    max: 400,
+    defaultValue: 120,
+  });
+  let messagesQuery = supabaseAdmin
     .from("study_room_messages")
     .select("id, room_id, sender_id, body, created_at, type")
     .eq("room_id", params.roomId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: false })
+    .limit(effectiveLimit);
+  const beforeCreatedAt = toStringValue(params.beforeCreatedAt).trim();
+  if (beforeCreatedAt) {
+    messagesQuery = messagesQuery.lt("created_at", beforeCreatedAt);
+  }
+  const { data, error } = await messagesQuery;
   if (error) {
     const details = toErrorDetails(error);
     console.error("[study_room] messages_lookup_failed", {
@@ -1142,13 +1168,18 @@ export async function getStudyRoomMessagesForUser(params: {
     );
   }
   const messageRows = (data ?? []) as GenericRecord[];
+  const orderedRows = [...messageRows].reverse();
   const usernamesById = await loadUsernamesByIds(
-    messageRows.map((row) => toStringValue(row.sender_id)),
+    orderedRows.map((row) => toStringValue(row.sender_id)),
   );
+  const oldestLoadedCreatedAt =
+    messageRows.length >= effectiveLimit
+      ? toNullableString(messageRows[messageRows.length - 1]?.created_at)
+      : null;
 
   return {
     ok: true as const,
-    messages: messageRows.map((row) => {
+    messages: orderedRows.map((row) => {
       const senderId = toStringValue(row.sender_id);
       return {
         id: toStringValue(row.id),
@@ -1160,6 +1191,8 @@ export async function getStudyRoomMessagesForUser(params: {
         type: toStringValue(row.type) || "chat",
       };
     }),
+    next_before: oldestLoadedCreatedAt,
+    has_more: Boolean(oldestLoadedCreatedAt && messageRows.length >= effectiveLimit),
   };
 }
 

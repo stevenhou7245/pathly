@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getInboxUnreadSummary } from "@/lib/inbox";
+import { getUserRoleContextForOfficialMessages } from "@/lib/officialMessages";
 import { getAuthenticatedSessionUser } from "@/lib/sessionAuth";
 
 export const runtime = "nodejs";
@@ -8,6 +9,7 @@ type MessagesSummaryResponse = {
   success: boolean;
   message?: string;
   current_user_id?: string;
+  current_user_role?: string | null;
   accepted_friendship_ids?: string[];
   unread_friend_messages?: number;
   pending_friend_requests?: number;
@@ -30,10 +32,14 @@ export async function GET() {
       );
     }
 
-    const summary = await getInboxUnreadSummary(sessionUser.id);
+    const [summary, roleContext] = await Promise.all([
+      getInboxUnreadSummary(sessionUser.id),
+      getUserRoleContextForOfficialMessages(sessionUser.id),
+    ]);
     const payload: MessagesSummaryResponse = {
       success: true,
       current_user_id: sessionUser.id,
+      current_user_role: roleContext.role,
       ...summary,
     };
     return NextResponse.json(payload, {

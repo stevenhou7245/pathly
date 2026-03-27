@@ -32,6 +32,9 @@ type GetCourseDetailsResponse = {
       score_at_trigger: number | null;
       question_count: number;
     };
+    resource_generation_status: "pending" | "generating" | "ready" | "failed";
+    is_resource_generated: boolean;
+    resources_generated_at: string | null;
     user_resource_preferences: Array<{
       resource_type: string;
       weighted_score: number;
@@ -108,6 +111,7 @@ export async function GET(
     const failedServiceStep = isCourseDetailsError(error) ? error.step : undefined;
     const failedStep = failedServiceStep ?? currentStep;
     const message = error instanceof Error ? error.message : String(error);
+    const isDetailsError = isCourseDetailsError(error);
 
     console.error("[api/course/:courseId/details] Course details load failed", {
       route_step: currentStep,
@@ -119,8 +123,8 @@ export async function GET(
 
     const payload: GetCourseDetailsResponse = {
       success: false,
-      message: "Unable to load course details right now.",
+      message: isDetailsError ? message : "Unable to load course details right now.",
     };
-    return NextResponse.json(payload, { status: 500 });
+    return NextResponse.json(payload, { status: isDetailsError ? 409 : 500 });
   }
 }

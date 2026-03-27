@@ -44,110 +44,11 @@ const learningStepsOutputSchema = z.object({
       z.object({
         title: z.string().min(3).max(140),
         description: z.string().min(8).max(320),
-        resources: z
-          .array(
-            z.object({
-              name: z.string().min(1).max(140),
-              url: z.string().min(1).max(500),
-            }),
-          )
-          .min(3)
-          .max(8),
       }),
     )
     .min(1)
     .max(20),
 });
-
-function inferResourceType(params: { name: string; url: string }): LearningStepResourceType {
-  const normalized = `${params.name} ${params.url}`.toLowerCase();
-  if (/youtube|vimeo|video|watch/.test(normalized)) {
-    return "video";
-  }
-  if (/interactive|sandbox|lab|repl|exercise|quiz|practice/.test(normalized)) {
-    return "interactive";
-  }
-  if (/doc|docs|documentation|pdf/.test(normalized)) {
-    return "document";
-  }
-  if (/article|blog|guide|read/.test(normalized)) {
-    return "article";
-  }
-  return "tutorial";
-}
-
-function normalizeResourceUrl(rawUrl: string, fallbackQuery: string) {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) {
-    return "";
-  }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
-  }
-  if (/^www\./i.test(trimmed)) {
-    return `https://${trimmed}`;
-  }
-  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed || fallbackQuery)}`;
-}
-
-function buildFallbackResourceLinks(params: {
-  fieldTitle: string;
-  stepTitle: string;
-}) {
-  const keyword = `${params.fieldTitle} ${params.stepTitle}`.trim();
-  const encodedKeyword = encodeURIComponent(keyword);
-  const encodedTutorial = encodeURIComponent(`${keyword} hands on tutorial`);
-  const encodedArticle = encodeURIComponent(`${keyword} guide`);
-  return [
-    {
-      type: "video" as const,
-      title: `${params.stepTitle} Video`,
-      url: `https://www.youtube.com/results?search_query=${encodedKeyword}`,
-      provider: "YouTube",
-      difficulty: "Beginner",
-      estimated_minutes: 20,
-      ai_selected: false,
-      ai_generated_at: null,
-      reason: "Fallback video resource generated from topic search query.",
-      status: "valid" as const,
-    },
-    {
-      type: "article" as const,
-      title: `${params.stepTitle} Reading`,
-      url: `https://duckduckgo.com/?q=${encodedArticle}`,
-      provider: "Web",
-      difficulty: "Beginner",
-      estimated_minutes: 15,
-      ai_selected: false,
-      ai_generated_at: null,
-      reason: "Fallback article resource generated from topic search query.",
-      status: "valid" as const,
-    },
-    {
-      type: "tutorial" as const,
-      title: `${params.stepTitle} Practice`,
-      url: `https://www.coursera.org/search?query=${encodedTutorial}`,
-      provider: "Coursera",
-      difficulty: "Beginner",
-      estimated_minutes: 25,
-      ai_selected: false,
-      ai_generated_at: null,
-      reason: "Fallback tutorial resource generated from topic search query.",
-      status: "valid" as const,
-    },
-  ];
-}
-
-function buildFallbackAiResources(params: { fieldTitle: string; stepTitle: string }) {
-  const fallback = buildFallbackResourceLinks({
-    fieldTitle: params.fieldTitle,
-    stepTitle: params.stepTitle,
-  });
-  return fallback.map((resource) => ({
-    name: resource.title,
-    url: resource.url,
-  }));
-}
 
 function buildDeterministicSteps(params: {
   fieldTitle: string;
@@ -209,15 +110,10 @@ function buildDeterministicSteps(params: {
           : "Performance Practice";
     const catalogTitle = fallbackTitleCatalog[index] ?? "";
     const stepTitle = catalogTitle || `${params.fieldTitle} ${stageLabel} ${stepNumber}`;
-    const resources = buildFallbackAiResources({
-      fieldTitle: params.fieldTitle,
-      stepTitle,
-    });
 
     steps.push({
       title: stepTitle,
       description: `Step ${stepNumber}: build ${slug} capability from ${params.startLevel} toward ${params.targetLevel} through ${stageLabel.toLowerCase()}.`,
-      resources,
     });
   }
 
@@ -241,61 +137,12 @@ function normalizePlan(params: {
     const source = sorted[i] ?? sorted[0];
     const title = source?.title?.trim() || `Step ${i + 1}`;
     const summary = source?.description?.trim() || `Complete step ${i + 1}.`;
-    let resources: LearningStepResource[] = (source?.resources ?? [])
-      .map((item) => {
-        const resourceTitle = item.name.trim() || `${title} resource`;
-        const normalizedUrl = normalizeResourceUrl(
-          item.url,
-          `${params.fieldTitle} ${resourceTitle}`,
-        );
-        if (!normalizedUrl) {
-          return null;
-        }
-        const inferredType = inferResourceType({ name: resourceTitle, url: normalizedUrl });
-        return {
-          type: inferredType,
-          title: resourceTitle,
-          url: normalizedUrl,
-          provider: "Web",
-          difficulty: "Intermediate",
-          estimated_minutes: 20,
-          ai_selected: true,
-          ai_generated_at: new Date().toISOString(),
-          status: "valid" as const,
-        } satisfies LearningStepResource;
-      })
-      .filter((item): item is NonNullable<typeof item> => Boolean(item));
-
-    const fallbackResources = buildFallbackResourceLinks({
-      fieldTitle: params.fieldTitle,
-      stepTitle: title,
-    });
-    if (resources.length < 3) {
-      for (const fallbackResource of fallbackResources) {
-        if (resources.length >= 3) {
-          break;
-        }
-        const alreadyIncluded = resources.some(
-          (resource) =>
-            resource.url === fallbackResource.url || resource.title === fallbackResource.title,
-        );
-        if (alreadyIncluded) {
-          continue;
-        }
-        resources.push(fallbackResource);
-      }
-    }
-    if (resources.length === 0) {
-      resources = fallbackResources;
-    } else {
-      resources = resources.slice(0, 3);
-    }
 
     normalized.push({
       step_number: i + 1,
       title,
       summary,
-      resources,
+      resources: [],
     });
   }
 
@@ -318,19 +165,18 @@ export async function generateLearningStepsPlan(params: {
 
   const { output, provenance, debug } = await generateStructuredJson({
     feature: "learning_steps_plan",
-    promptVersion: "learning_steps_plan_v2",
+    promptVersion: "learning_steps_plan_v3",
     systemInstruction: [
-      "You create topic-specific learning steps.",
+      "You create topic-specific learning path skeletons.",
       "Return JSON only. Do not include markdown or prose.",
       "Output must be an object with keys: template_name, total_steps, steps.",
-      'Each step object must have exactly: "title", "description", "resources".',
-      'Each resource object must have exactly: "name", "url".',
-      "Resource url is plain string text (do not enforce uri formatting).",
-      "Provide at least 3 resources per step.",
+      'Each step object must have exactly: "title", "description".',
       "Use concrete topic-specific step names and skill focus.",
       "Avoid placeholders like milestone, generic practice, or numbered filler titles.",
       "Examples for TOEFL style titles: TOEFL Reading Foundations, TOEFL Listening Note-Taking, TOEFL Speaking Task 1 Strategies, TOEFL Independent Writing Basics.",
       "Examples for HTML style titles: HTML Basics, Semantic HTML, Forms and Inputs, HTML Structure Practice.",
+      "Do not include detailed resources, links, materials, quizzes, or exercises.",
+      "This is a fast skeleton-only generation pass.",
     ].join(" "),
     input: {
       field_title: params.fieldTitle,

@@ -1,8 +1,8 @@
 "use client";
 
 import AvatarPreviewModal from "@/components/AvatarPreviewModal";
+import { playIncomingNotificationSound } from "@/lib/incomingNotificationSound";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
-import { playSound } from "@/lib/sound";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -353,7 +353,6 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       return;
     }
 
-    const shouldNotify = () => didHydrateRealtimeRef.current;
     const normalizedCurrentRole = (currentUserRole ?? "").trim().toLowerCase();
     const officialRoleFilterValue = normalizedCurrentRole || "__pathly_none_role__";
 
@@ -425,9 +424,16 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
       );
       knownOfficialMessageIdsRef.current.add(rowId);
 
-      if (eventType === "INSERT" && !wasKnown && shouldNotify()) {
-        playSound("notification");
-      }
+      playIncomingNotificationSound({
+        type: "official_message",
+        eventId: rowId,
+        isIncoming: eventType === "INSERT" && appliesToUser,
+        isInitialLoad: !didHydrateRealtimeRef.current,
+        isDuplicate: wasKnown,
+        currentUserId: viewerId,
+        receiverId: viewerId,
+        source: "messages_panel:official_messages_realtime",
+      });
       onInboxUpdated?.();
     };
 
@@ -521,9 +527,16 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
 
       const wasKnown = knownStudyInvitationIdsRef.current.has(rowId);
       knownStudyInvitationIdsRef.current.add(rowId);
-      if (eventType === "INSERT" && !wasKnown && shouldNotify()) {
-        playSound("notification");
-      }
+      playIncomingNotificationSound({
+        type: "study_room_invitation",
+        eventId: rowId,
+        isIncoming: eventType === "INSERT",
+        isInitialLoad: !didHydrateRealtimeRef.current,
+        isDuplicate: wasKnown,
+        currentUserId: currentUserIdRef.current,
+        receiverId: receiverId || currentUserIdRef.current,
+        source: "messages_panel:study_room_invitations_realtime",
+      });
       onInboxUpdatedRef.current?.();
       if (eventType === "INSERT" || eventType === "UPDATE") {
         void refreshStudyInvitationsFromServer(`realtime_${eventType.toLowerCase()}`);
@@ -598,9 +611,16 @@ export default function MessagesPanel({ onInboxUpdated, onOpenStudyRoom }: Messa
 
       const wasKnown = knownIncomingFriendshipIdsRef.current.has(friendshipId);
       knownIncomingFriendshipIdsRef.current.add(friendshipId);
-      if (!wasKnown && shouldNotify()) {
-        playSound("notification");
-      }
+      playIncomingNotificationSound({
+        type: "friend_request",
+        eventId: friendshipId,
+        isIncoming: isIncoming && eventType === "INSERT" && status === "pending",
+        isInitialLoad: !didHydrateRealtimeRef.current,
+        isDuplicate: wasKnown,
+        currentUserId: viewerId,
+        receiverId: addresseeId || viewerId,
+        source: "messages_panel:friendships_realtime",
+      });
       onInboxUpdatedRef.current?.();
     };
 

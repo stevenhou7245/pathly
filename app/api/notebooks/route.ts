@@ -20,7 +20,7 @@ type NotebooksResponse = {
   notebook?: UserNotebookRecord;
 };
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const sessionUser = await getAuthenticatedSessionUser();
     if (!sessionUser) {
@@ -30,8 +30,13 @@ export async function GET() {
       );
     }
 
+    const url = new URL(request.url);
+    const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(300, Math.max(20, rawLimit)) : 120;
+
     const notebooks = await listUserNotebooks({
       userId: sessionUser.id,
+      limit,
     });
     return NextResponse.json<NotebooksResponse>(
       {

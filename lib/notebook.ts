@@ -120,6 +120,18 @@ function toErrorDetails(error: unknown) {
   };
 }
 
+function normalizeOptionalListLimit(
+  value: number | null | undefined,
+  options?: { min?: number; max?: number },
+) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  const min = Math.max(1, Math.floor(options?.min ?? 20));
+  const max = Math.max(min, Math.floor(options?.max ?? 300));
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 function isLegacyNotebookTopicRequiredError(error: unknown) {
   const details = toErrorDetails(error);
   if (details.code !== "23502") {
@@ -352,14 +364,22 @@ function resolveMembershipFailureCode(params: {
   return null;
 }
 
-export async function listUserNotebooks(params: { userId: string }) {
-  const { data, error } = await supabaseAdmin
+export async function listUserNotebooks(params: { userId: string; limit?: number }) {
+  const effectiveLimit = normalizeOptionalListLimit(params.limit, {
+    min: 20,
+    max: 300,
+  });
+  let notebooksQuery = supabaseAdmin
     .from("user_notebooks")
     .select("id, user_id, name, created_at, updated_at, is_deleted")
     .eq("user_id", params.userId)
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false })
     .order("name", { ascending: true });
+  if (effectiveLimit !== null) {
+    notebooksQuery = notebooksQuery.limit(effectiveLimit);
+  }
+  const { data, error } = await notebooksQuery;
 
   if (error) {
     const details = toErrorDetails(error);
@@ -534,6 +554,7 @@ export async function deleteUserNotebook(params: {
 export async function listNotebookEntries(params: {
   userId: string;
   notebookId: string;
+  limit?: number;
 }) {
   const owned = await requireNotebookOwnership(params);
   if (!owned) {
@@ -543,7 +564,11 @@ export async function listNotebookEntries(params: {
     };
   }
 
-  const { data, error } = await supabaseAdmin
+  const effectiveLimit = normalizeOptionalListLimit(params.limit, {
+    min: 20,
+    max: 400,
+  });
+  let entriesQuery = supabaseAdmin
     .from("user_notebook_entries")
     .select(
       "id, notebook_id, topic, content_md, source_type, source_room_id, created_at, updated_at, is_deleted",
@@ -552,6 +577,10 @@ export async function listNotebookEntries(params: {
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false })
     .order("topic", { ascending: true });
+  if (effectiveLimit !== null) {
+    entriesQuery = entriesQuery.limit(effectiveLimit);
+  }
+  const { data, error } = await entriesQuery;
 
   if (error) {
     const details = toErrorDetails(error);
