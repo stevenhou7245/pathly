@@ -7,7 +7,7 @@ type GenericRecord = Record<string, unknown>;
 
 const TRANSITION_REVIEW_PERFORMANCE_PASS_SCORE = 70;
 const TRANSITION_REVIEW_QUESTION_COUNT = 3;
-const TRANSITION_REVIEW_PROMPT_VERSION = "transition_review_questions_v1";
+const TRANSITION_REVIEW_PROMPT_VERSION = "transition_review_questions_v2";
 
 export type TransitionReviewQuestion = {
   question_index: number;
@@ -202,64 +202,160 @@ function parseReviewPayload(value: unknown): TransitionReviewPayload | null {
   };
 }
 
+function extractCourseConceptCandidates(params: {
+  fromCourseDescription: string | null;
+  resourceSummaries: string[];
+  weakConcepts: string[];
+}) {
+  const stopWords = new Set([
+    "the", "and", "for", "with", "that", "this", "from", "into", "your", "will", "are", "was",
+    "were", "how", "why", "when", "where", "what", "which", "using", "used", "about", "lesson",
+    "course", "study", "learn", "learning", "resource", "resources", "title", "article", "video",
+    "documentation", "document", "guide", "tutorial", "summary", "concept", "concepts",
+  ]);
+  const conceptCandidates: string[] = [];
+  const pushConcept = (value: string) => {
+    const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!normalized || stopWords.has(normalized)) {
+      return;
+    }
+    if (!conceptCandidates.includes(normalized)) {
+      conceptCandidates.push(normalized);
+    }
+  };
+
+  params.weakConcepts.forEach((concept) => pushConcept(concept));
+
+  const textBlocks = [
+    params.fromCourseDescription ?? "",
+    ...params.resourceSummaries,
+  ]
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  for (const block of textBlocks) {
+    const normalizedText = block
+      .toLowerCase()
+      .replace(/[`~!@#$%^&*()+=\[\]{}\\|;:'",.<>/?]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const words = normalizedText.split(" ").filter(Boolean);
+    const contentWords = words.filter((word) => word.length >= 4 && !stopWords.has(word));
+    for (const word of contentWords.slice(0, 10)) {
+      pushConcept(word);
+    }
+    for (let i = 0; i < contentWords.length - 1; i += 1) {
+      const phrase = `${contentWords[i]} ${contentWords[i + 1]}`;
+      pushConcept(phrase);
+      if (conceptCandidates.length >= 8) {
+        break;
+      }
+    }
+    if (conceptCandidates.length >= 8) {
+      break;
+    }
+  }
+
+  return conceptCandidates.slice(0, 8);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sanitizeTransitionQuestionText(params: {
+  text: string;
+  resourceTitles: string[];
+}) {
+  let normalized = toCleanString(params.text);
+  if (!normalized) {
+    return normalized;
+  }
+
+  normalized = normalized.replace(
+    /^(based on|according to|from)\s+[^,.!?;:]+[,.!?;:]\s*/i,
+    "",
+  );
+  normalized = normalized.replace(
+    /^(based on|according to|from)\s+(the\s+)?(resource|resources|documentation|article|video|guide|tutorial)\s*/i,
+    "",
+  );
+  for (const title of params.resourceTitles) {
+    const safeTitle = toCleanString(title);
+    if (!safeTitle) {
+      continue;
+    }
+    normalized = normalized.replace(new RegExp(escapeRegExp(safeTitle), "ig"), "this lesson");
+  }
+
+  return toCleanString(normalized);
+}
+
 function buildContentBasedQuestions(params: {
   fromCourseTitle: string;
   fromCourseDescription: string | null;
   resourceTitles: string[];
-  resourceSummaries: string[];
   weakConcepts: string[];
+  conceptCandidates: string[];
 }): TransitionReviewQuestion[] {
-  const normalizedDescription = params.fromCourseDescription?.trim() || "";
-  const resourceTitle = params.resourceTitles[0]?.trim() || "";
-  const resourceSummary = params.resourceSummaries[0]?.trim() || "";
-  const weakConcept = params.weakConcepts[0]?.trim() || "";
   const primaryConcept =
-    weakConcept ||
-    resourceTitle ||
-    normalizedDescription ||
-    params.fromCourseTitle;
-  const secondaryContext =
-    resourceSummary ||
-    params.resourceTitles[1]?.trim() ||
-    normalizedDescription ||
-    params.fromCourseTitle;
-  const firstResource = params.resourceTitles[0] ?? "the key resource from the previous lesson";
-  const coreDescription = normalizedDescription || params.fromCourseTitle;
+    params.conceptCandidates[0] ||
+    params.weakConcepts[0]?.trim().toLowerCase() ||
+    "core concept";
+  const secondaryConcept =
+    params.conceptCandidates[1] ||
+    params.conceptCandidates[0] ||
+    primaryConcept;
+  const practicalConcept =
+    params.conceptCandidates[2] ||
+    params.conceptCandidates[0] ||
+    primaryConcept;
+  const practicalAnswer =
+    params.fromCourseDescription?.trim() ||
+    `Use ${primaryConcept} correctly in a practical task.`;
 
   const questions: TransitionReviewQuestion[] = [
     {
       question_index: 1,
       question_type: "single_choice",
-      question_text: `Which option best reviews "${primaryConcept}" from ${params.fromCourseTitle}?`,
+      question_text: `Which statement best explains ${primaryConcept}?`,
       options: [
-        `Explain ${primaryConcept} in one sentence and give one practical usage example.`,
-        `Skip ${primaryConcept} and focus on unrelated advanced topics.`,
-        `Memorize random keywords without applying ${primaryConcept}.`,
-        `Only read titles without checking how ${primaryConcept} is used.`,
+        `${primaryConcept} should be understood with one practical example.`,
+        `${primaryConcept} should be ignored when solving tasks.`,
+        `${primaryConcept} is unrelated to this lesson.`,
+        `${primaryConcept} is only a title and has no real usage.`,
       ],
-      correct_answer: `Explain ${primaryConcept} in one sentence and give one practical usage example.`,
-      explanation: `Reinforcing ${primaryConcept} with a concrete example improves retention for the next lesson.`,
+      correct_answer: `${primaryConcept} should be understood with one practical example.`,
+      explanation: `Understanding ${primaryConcept} with application helps you transition smoothly.`,
     },
     {
       question_index: 2,
       question_type: "fill_blank",
-      question_text: `Fill in the blank: A key lesson resource or topic to review before the next step is "____".`,
+      question_text: "Fill in the blank: A key concept to review before the next lesson is ____.",
       options: [],
-      correct_answer: firstResource,
-      explanation: `Reviewing "${firstResource}" before the next lesson helps bridge concepts smoothly.`,
+      correct_answer: secondaryConcept,
+      explanation: `Reviewing ${secondaryConcept} reinforces core lesson understanding.`,
     },
     {
       question_index: 3,
       question_type: "short_answer",
-      question_text: `In one practical sentence, what should you carry from ${params.fromCourseTitle} into the next lesson based on "${secondaryContext}"?`,
+      question_text: `In one sentence, explain how ${practicalConcept} helps in a practical task.`,
       options: [],
-      correct_answer: coreDescription,
+      correct_answer: practicalAnswer,
       explanation:
-        "Summarizing one practical takeaway from the previous lesson improves transition confidence.",
+        "A one-sentence practical explanation is enough for this transition review.",
     },
   ];
 
-  return questions.slice(0, TRANSITION_REVIEW_QUESTION_COUNT);
+  return questions
+    .slice(0, TRANSITION_REVIEW_QUESTION_COUNT)
+    .map((item) => ({
+      ...item,
+      question_text: sanitizeTransitionQuestionText({
+        text: item.question_text,
+        resourceTitles: params.resourceTitles,
+      }),
+    }));
 }
 
 function buildTrueFallbackQuestions(params: {
@@ -349,13 +445,18 @@ async function generateTransitionReviewQuestions(params: {
     Boolean(params.fromCourseDescription?.trim()) ||
     params.resourceTitles.length > 0 ||
     params.resourceSummaries.length > 0;
+  const conceptCandidates = extractCourseConceptCandidates({
+    fromCourseDescription: params.fromCourseDescription,
+    resourceSummaries: params.resourceSummaries,
+    weakConcepts: params.weakConcepts,
+  });
 
   const deterministicContentBased = buildContentBasedQuestions({
     fromCourseTitle: params.fromCourseTitle,
     fromCourseDescription: params.fromCourseDescription,
     resourceTitles: params.resourceTitles,
-    resourceSummaries: params.resourceSummaries,
     weakConcepts: params.weakConcepts,
+    conceptCandidates,
   });
   const deterministicTrueFallback = buildTrueFallbackQuestions({
     fromCourseTitle: params.fromCourseTitle,
@@ -386,6 +487,7 @@ async function generateTransitionReviewQuestions(params: {
     to_course_id: params.toCourseId,
     from_course_title: params.fromCourseTitle,
     from_course_description: params.fromCourseDescription ?? null,
+    lesson_concepts: conceptCandidates.slice(0, 8),
     resource_titles: params.resourceTitles.slice(0, 5),
     resource_summaries: params.resourceSummaries.slice(0, 5),
     latest_test_score: params.latestTestScore,
@@ -408,6 +510,7 @@ async function generateTransitionReviewQuestions(params: {
     resource_title_count: params.resourceTitles.length,
     resource_summary_count: params.resourceSummaries.length,
     weak_concept_count: params.weakConcepts.length,
+    concept_candidate_count: conceptCandidates.length,
     latest_test_score: params.latestTestScore,
     mode,
   });
@@ -417,18 +520,105 @@ async function generateTransitionReviewQuestions(params: {
     promptVersion: TRANSITION_REVIEW_PROMPT_VERSION,
     systemInstruction: [
       "You generate lightweight transition-review questions between two adjacent lessons.",
-      "This is not a formal exam.",
-      "Always ground questions in the previous lesson context (description, resources, summaries).",
-      "If weak_concepts exist, emphasize them while still using lesson context.",
-      "If weak_concepts are empty, still use lesson content to generate practical review questions.",
-      "Generate exactly 3 questions with these exact types and order: single_choice, fill_blank, short_answer.",
-      "Use only these question_type values: single_choice, fill_blank, short_answer.",
-      "single_choice must include 4 options.",
-      "fill_blank and short_answer must use empty options array.",
-      "short_answer must be answerable in one sentence.",
-      "Avoid generic placeholders and avoid using course title alone as concept.",
+      "This is NOT a formal exam. This is a short, simple review before the next lesson.",
+
+      "----------------------------------------",
+      "CORE GOAL",
+      "----------------------------------------",
+      "Generate simple, specific, concept-based questions that feel like real learning questions.",
+      "Questions must test understanding of the previous lesson's concepts.",
+
+      "----------------------------------------",
+      "CONTEXT USAGE",
+      "----------------------------------------",
+      "Always extract real concepts from:",
+      "- lesson description",
+      "- lesson summaries",
+      "- inferred learning topics (e.g. variables, loops, regression, functions).",
+
+      "DO NOT use resource titles directly as concepts.",
+      "DO NOT treat documentation titles as knowledge points.",
+
+      "----------------------------------------",
+      "STRICT PROHIBITIONS",
+      "----------------------------------------",
+      "NEVER write questions like:",
+      "- Based on ...",
+      "- According to ...",
+      "- From the article ...",
+      "- From the documentation ...",
+
+      "NEVER mention:",
+      "- resource titles",
+      "- article names",
+      "- video names",
+
+      "----------------------------------------",
+      "QUESTION STYLE (VERY IMPORTANT)",
+      "----------------------------------------",
+      "Questions MUST look like normal learning/test questions.",
+      "They should be concrete and specific, not abstract.",
+
+      "GOOD examples:",
+      "- Which Python structure is used to repeat actions?",
+      "- What is the purpose of a function in Python?",
+      "- Fill in the blank: A loop that iterates over a sequence is called a ____ loop.",
+      "- In one sentence, explain why variables are important in programming.",
+
+      "BAD examples:",
+      "- Which option best reviews ...",
+      "- Based on the lesson ...",
+      "- According to the resource ...",
+
+      "----------------------------------------",
+      "WEAKNESS HANDLING",
+      "----------------------------------------",
+      "If weak_concepts exist:",
+      "- prioritize these concepts",
+      "- but still phrase questions naturally",
+
+      "If weak_concepts are empty:",
+      "- generate questions purely from lesson concepts",
+      "- DO NOT fall back to generic placeholders",
+
+      "----------------------------------------",
+      "DIFFICULTY",
+      "----------------------------------------",
+      "Keep questions EASY:",
+      "- basic recall",
+      "- simple understanding",
+      "- one-step reasoning only",
+
+      "----------------------------------------",
+      "OUTPUT STRUCTURE",
+      "----------------------------------------",
+      "Generate EXACTLY 3 questions in this order:",
+      "1. single_choice",
+      "2. fill_blank",
+      "3. short_answer",
+
+      "Use only these question_type values:",
+      "- single_choice",
+      "- fill_blank",
+      "- short_answer",
+
+      "Rules:",
+      "- single_choice MUST have 4 options",
+      "- fill_blank and short_answer MUST have empty options array",
+      "- short_answer MUST be answerable in ONE sentence",
+
+      "----------------------------------------",
+      "OUTPUT FORMAT",
+      "----------------------------------------",
       "Return JSON only with root key review_questions.",
-      "Each question must include: question_type, question_text, options, correct_answer, explanation.",
+      "Each question must include:",
+      "- question_type",
+      "- question_text",
+      "- options",
+      "- correct_answer",
+      "- explanation",
+
+      "Do NOT output any extra text outside JSON.",
     ].join(" "),
     input: promptInput,
     outputSchema: generatedTransitionReviewSchema,
@@ -457,7 +647,13 @@ async function generateTransitionReviewQuestions(params: {
 
   const aiQuestions = normalizeGeneratedTransitionReviewQuestions(
     (output as GenericRecord).review_questions,
-  );
+  ).map((item) => ({
+    ...item,
+    question_text: sanitizeTransitionQuestionText({
+      text: item.question_text,
+      resourceTitles: params.resourceTitles,
+    }),
+  }));
   const composed = ensureTransitionQuestionComposition({
     generated: aiQuestions,
     fallback: deterministicContentBased.length > 0 ? deterministicContentBased : deterministicTrueFallback,
@@ -835,8 +1031,6 @@ export async function getOrCreateTransitionReviewPopup(params: {
   fromCourseId: string;
   toCourseId: string;
 }): Promise<TransitionReviewPopup> {
-  const context = await resolveTransitionReviewContext(params);
-
   console.info("[transitionReview] latest_review_query:start", {
     userId: params.userId,
     journeyPathId: params.journeyPathId,
@@ -870,6 +1064,12 @@ export async function getOrCreateTransitionReviewPopup(params: {
     const status = toStringValue(latest.status).toLowerCase();
     const selectedAction = toStringValue(latest.selected_action).toLowerCase();
     if (status === "completed" && selectedAction === "continue") {
+      console.info("[transitionReview] latest_review_query:completed_continue_skip", {
+        userId: params.userId,
+        journeyPathId: params.journeyPathId,
+        fromCourseId: params.fromCourseId,
+        toCourseId: params.toCourseId,
+      });
       return {
         should_show: false,
         review_id: null,
@@ -885,6 +1085,8 @@ export async function getOrCreateTransitionReviewPopup(params: {
       return toPopupFromRow(latest);
     }
   }
+
+  const context = await resolveTransitionReviewContext(params);
 
   const hasWeaknessData = context.weakConcepts.length > 0;
   console.info("[transitionReview] context:loaded", {
