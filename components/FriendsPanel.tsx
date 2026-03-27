@@ -1046,7 +1046,7 @@ export default function FriendsPanel({ onMessagesUpdated }: FriendsPanelProps) {
                 reason: "manual_refresh",
               });
             }}
-            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-sm"
+            className="btn-3d btn-3d-white inline-flex h-11 items-center justify-center px-5 !text-base"
           >
             Refresh
           </button>
