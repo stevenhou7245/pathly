@@ -1,10 +1,13 @@
+import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { generateStructuredJson } from "@/lib/ai/provider";
 import { trackWeaknessProfilesForIncorrectAnswers } from "@/lib/weaknessProfiles";
 
 type GenericRecord = Record<string, unknown>;
 
 const TRANSITION_REVIEW_PERFORMANCE_PASS_SCORE = 70;
 const TRANSITION_REVIEW_QUESTION_COUNT = 3;
+const TRANSITION_REVIEW_PROMPT_VERSION = "transition_review_questions_v1";
 
 export type TransitionReviewQuestion = {
   question_index: number;
@@ -28,6 +31,20 @@ type TransitionReviewPayload = {
   };
   questions: TransitionReviewQuestion[];
 };
+
+const generatedTransitionReviewQuestionSchema = z.object({
+  question_type: z.enum(["single_choice", "fill_blank", "short_answer"]),
+  question_text: z.string().min(1),
+  options: z
+    .union([z.array(z.string()), z.null(), z.undefined()])
+    .transform((value) => value ?? []),
+  correct_answer: z.union([z.string(), z.number(), z.boolean()]),
+  explanation: z.string().optional().nullable(),
+});
+
+const generatedTransitionReviewSchema = z.object({
+  review_questions: z.array(generatedTransitionReviewQuestionSchema).min(1),
+});
 
 export type TransitionReviewPopup = {
   should_show: boolean;
@@ -60,6 +77,10 @@ function toStringValue(value: unknown) {
 
 function toNullableString(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function toCleanString(value: unknown) {
+  return toStringValue(value).replace(/\s+/g, " ").trim();
 }
 
 function toNumberValue(value: unknown) {
@@ -102,6 +123,46 @@ function parseQuestionArray(value: unknown): TransitionReviewQuestion[] {
         correct_answer: correctAnswer,
         explanation:
           toStringValue(row.explanation).trim() ||
+          "Review the previous lesson summary and try again.",
+      } satisfies TransitionReviewQuestion;
+    })
+    .filter((item): item is TransitionReviewQuestion => Boolean(item));
+}
+
+function normalizeGeneratedTransitionReviewQuestions(value: unknown): TransitionReviewQuestion[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item, index) => {
+      const row = (item ?? {}) as GenericRecord;
+      const questionTypeRaw = toCleanString(row.question_type).toLowerCase();
+      const questionType: TransitionReviewQuestion["question_type"] =
+        questionTypeRaw === "single_choice" ||
+        questionTypeRaw === "fill_blank" ||
+        questionTypeRaw === "short_answer"
+          ? questionTypeRaw
+          : "single_choice";
+      const questionText = toCleanString(row.question_text);
+      const correctAnswer = toCleanString(
+        typeof row.correct_answer === "string"
+          ? row.correct_answer
+          : String(row.correct_answer ?? ""),
+      );
+      if (!questionText || !correctAnswer) {
+        return null;
+      }
+      const options = Array.isArray(row.options)
+        ? row.options.map((option) => toCleanString(option)).filter(Boolean)
+        : [];
+      return {
+        question_index: index + 1,
+        question_type: questionType,
+        question_text: questionText,
+        options: questionType === "single_choice" ? options.slice(0, 6) : [],
+        correct_answer: correctAnswer,
+        explanation:
+          toCleanString(row.explanation) ||
           "Review the previous lesson summary and try again.",
       } satisfies TransitionReviewQuestion;
     })
@@ -236,6 +297,172 @@ function buildTrueFallbackQuestions(params: {
       explanation: "Practical application reinforces understanding better than passive review.",
     },
   ];
+}
+
+function ensureTransitionQuestionComposition(params: {
+  generated: TransitionReviewQuestion[];
+  fallback: TransitionReviewQuestion[];
+}): TransitionReviewQuestion[] {
+  const expectedOrder: TransitionReviewQuestion["question_type"][] = [
+    "single_choice",
+    "fill_blank",
+    "short_answer",
+  ];
+  return expectedOrder.map((questionType, index) => {
+    const generated =
+      params.generated.find((item) => item.question_type === questionType) ?? null;
+    const fallback =
+      params.fallback.find((item) => item.question_type === questionType) ??
+      params.fallback[index];
+    const selected = generated ?? fallback;
+    const safeSelected = selected ?? buildTrueFallbackQuestions({ fromCourseTitle: "Previous lesson" })[index];
+    return {
+      question_index: index + 1,
+      question_type: questionType,
+      question_text: toCleanString(safeSelected.question_text) || `Review question ${index + 1}`,
+      options:
+        questionType === "single_choice"
+          ? (safeSelected.options ?? []).map((item) => toCleanString(item)).filter(Boolean).slice(0, 6)
+          : [],
+      correct_answer: toCleanString(safeSelected.correct_answer) || "Review the previous lesson.",
+      explanation:
+        toCleanString(safeSelected.explanation) ||
+        "Review the previous lesson summary and try again.",
+    };
+  });
+}
+
+async function generateTransitionReviewQuestions(params: {
+  userId: string;
+  journeyPathId: string;
+  fromCourseId: string;
+  toCourseId: string;
+  fromCourseTitle: string;
+  fromCourseDescription: string | null;
+  resourceTitles: string[];
+  resourceSummaries: string[];
+  weakConcepts: string[];
+  latestTestScore: number | null;
+}): Promise<TransitionReviewQuestion[]> {
+  const hasWeaknessData = params.weakConcepts.length > 0;
+  const hasLessonContent =
+    Boolean(params.fromCourseDescription?.trim()) ||
+    params.resourceTitles.length > 0 ||
+    params.resourceSummaries.length > 0;
+
+  const deterministicContentBased = buildContentBasedQuestions({
+    fromCourseTitle: params.fromCourseTitle,
+    fromCourseDescription: params.fromCourseDescription,
+    resourceTitles: params.resourceTitles,
+    resourceSummaries: params.resourceSummaries,
+    weakConcepts: params.weakConcepts,
+  });
+  const deterministicTrueFallback = buildTrueFallbackQuestions({
+    fromCourseTitle: params.fromCourseTitle,
+  });
+
+  if (!hasLessonContent && !hasWeaknessData) {
+    console.info("[transitionReview] generation_mode:true_fallback", {
+      userId: params.userId,
+      journeyPathId: params.journeyPathId,
+      fromCourseId: params.fromCourseId,
+      toCourseId: params.toCourseId,
+    });
+    return deterministicTrueFallback.slice(0, TRANSITION_REVIEW_QUESTION_COUNT);
+  }
+
+  const mode = hasWeaknessData ? "ai_weakness_enhanced" : "ai_content_based";
+  console.info(`[transitionReview] generation_mode:${mode}`, {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+  });
+
+  const promptInput = {
+    user_id: params.userId,
+    journey_path_id: params.journeyPathId,
+    from_course_id: params.fromCourseId,
+    to_course_id: params.toCourseId,
+    from_course_title: params.fromCourseTitle,
+    from_course_description: params.fromCourseDescription ?? null,
+    resource_titles: params.resourceTitles.slice(0, 5),
+    resource_summaries: params.resourceSummaries.slice(0, 5),
+    latest_test_score: params.latestTestScore,
+    weak_concepts: params.weakConcepts.slice(0, 5),
+    mode,
+    requirements: {
+      question_count: 3,
+      allowed_question_types: ["single_choice", "fill_blank", "short_answer"],
+      style: "lightweight_transition_review",
+      not_formal_exam: true,
+      short_answer_one_sentence: true,
+    },
+  };
+  console.info("[transitionReview] generation_prompt:input", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    has_course_description: Boolean(params.fromCourseDescription?.trim()),
+    resource_title_count: params.resourceTitles.length,
+    resource_summary_count: params.resourceSummaries.length,
+    weak_concept_count: params.weakConcepts.length,
+    latest_test_score: params.latestTestScore,
+    mode,
+  });
+
+  const { output, provenance } = await generateStructuredJson({
+    feature: "transition_review_questions",
+    promptVersion: TRANSITION_REVIEW_PROMPT_VERSION,
+    systemInstruction: [
+      "You generate lightweight transition-review questions between two adjacent lessons.",
+      "This is not a formal exam.",
+      "Always ground questions in the previous lesson context (description, resources, summaries).",
+      "If weak_concepts exist, emphasize them while still using lesson context.",
+      "If weak_concepts are empty, still use lesson content to generate practical review questions.",
+      "Generate exactly 3 questions with these exact types and order: single_choice, fill_blank, short_answer.",
+      "Use only these question_type values: single_choice, fill_blank, short_answer.",
+      "single_choice must include 4 options.",
+      "fill_blank and short_answer must use empty options array.",
+      "short_answer must be answerable in one sentence.",
+      "Avoid generic placeholders and avoid using course title alone as concept.",
+      "Return JSON only with root key review_questions.",
+      "Each question must include: question_type, question_text, options, correct_answer, explanation.",
+    ].join(" "),
+    input: promptInput,
+    outputSchema: generatedTransitionReviewSchema,
+    fallback: () => ({
+      review_questions: deterministicContentBased.map((item) => ({
+        question_type: item.question_type,
+        question_text: item.question_text,
+        options: item.options,
+        correct_answer: item.correct_answer,
+        explanation: item.explanation,
+      })),
+    }),
+    temperature: 0.3,
+    maxOutputTokens: 900,
+  });
+  console.info("[transitionReview] generation_prompt:result", {
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    provider: provenance.provider,
+    model: provenance.model,
+    fallback_used: provenance.fallback_used,
+    failure_reason: provenance.failure_reason,
+  });
+
+  const aiQuestions = normalizeGeneratedTransitionReviewQuestions(
+    (output as GenericRecord).review_questions,
+  );
+  const composed = ensureTransitionQuestionComposition({
+    generated: aiQuestions,
+    fallback: deterministicContentBased.length > 0 ? deterministicContentBased : deterministicTrueFallback,
+  });
+  return composed.slice(0, TRANSITION_REVIEW_QUESTION_COUNT);
 }
 
 function gradeTransitionAnswer(params: {
@@ -660,10 +887,6 @@ export async function getOrCreateTransitionReviewPopup(params: {
   }
 
   const hasWeaknessData = context.weakConcepts.length > 0;
-  const hasLessonContent =
-    Boolean(context.fromCourseDescription?.trim()) ||
-    context.resourceTitles.length > 0 ||
-    context.resourceSummaries.length > 0;
   console.info("[transitionReview] context:loaded", {
     userId: params.userId,
     journeyPathId: params.journeyPathId,
@@ -692,46 +915,18 @@ export async function getOrCreateTransitionReviewPopup(params: {
     });
   }
 
-  let questions: TransitionReviewQuestion[];
-  if (hasLessonContent && hasWeaknessData) {
-    console.info("[transitionReview] generation_mode:weakness_enhanced", {
-      userId: params.userId,
-      journeyPathId: params.journeyPathId,
-      fromCourseId: params.fromCourseId,
-      toCourseId: params.toCourseId,
-    });
-    questions = buildContentBasedQuestions({
-      fromCourseTitle: context.fromCourseTitle,
-      fromCourseDescription: context.fromCourseDescription,
-      resourceTitles: context.resourceTitles,
-      resourceSummaries: context.resourceSummaries,
-      weakConcepts: context.weakConcepts,
-    });
-  } else if (hasLessonContent) {
-    console.info("[transitionReview] generation_mode:content_based", {
-      userId: params.userId,
-      journeyPathId: params.journeyPathId,
-      fromCourseId: params.fromCourseId,
-      toCourseId: params.toCourseId,
-    });
-    questions = buildContentBasedQuestions({
-      fromCourseTitle: context.fromCourseTitle,
-      fromCourseDescription: context.fromCourseDescription,
-      resourceTitles: context.resourceTitles,
-      resourceSummaries: context.resourceSummaries,
-      weakConcepts: [],
-    });
-  } else {
-    console.info("[transitionReview] generation_mode:true_fallback", {
-      userId: params.userId,
-      journeyPathId: params.journeyPathId,
-      fromCourseId: params.fromCourseId,
-      toCourseId: params.toCourseId,
-    });
-    questions = buildTrueFallbackQuestions({
-      fromCourseTitle: context.fromCourseTitle,
-    });
-  }
+  const questions = await generateTransitionReviewQuestions({
+    userId: params.userId,
+    journeyPathId: params.journeyPathId,
+    fromCourseId: params.fromCourseId,
+    toCourseId: params.toCourseId,
+    fromCourseTitle: context.fromCourseTitle,
+    fromCourseDescription: context.fromCourseDescription,
+    resourceTitles: context.resourceTitles,
+    resourceSummaries: context.resourceSummaries,
+    weakConcepts: context.weakConcepts,
+    latestTestScore: context.latestTestScore,
+  });
 
   const payload: TransitionReviewPayload = {
     version: "course_transition_review_v1",
