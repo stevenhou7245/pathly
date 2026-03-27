@@ -73,25 +73,6 @@ function normalizeUuidForCompare(value: unknown) {
   return toStringValue(value).trim().toLowerCase();
 }
 
-function normalizeTitleForCompare(value: unknown) {
-  return toStringValue(value).trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function resolveProgressStepNumber(row: GenericRecord | null) {
-  if (!row) {
-    return null;
-  }
-  const candidateKeys = ["step_number", "course_step_number", "assigned_step_number"] as const;
-  for (const key of candidateKeys) {
-    const raw = row[key];
-    const parsed = Math.floor(toNumberValue(raw));
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
 function parseQuestionArray(value: unknown): TransitionReviewQuestion[] {
   if (!Array.isArray(value)) {
     return [];
@@ -241,21 +222,46 @@ async function resolveTransitionReviewContext(params: {
 }) {
   const normalizedFromCourseId = normalizeUuidForCompare(params.fromCourseId);
   const normalizedToCourseId = normalizeUuidForCompare(params.toCourseId);
-  const { data: learningFieldRow, error: learningFieldError } = await supabaseAdmin
-    .from("user_learning_fields")
-    .select("id, user_id, field_id, current_step_index")
+  const { data: journeyPathRow, error: journeyPathError } = await supabaseAdmin
+    .from("journey_paths")
+    .select("id, user_id, learning_field_id")
     .eq("id", params.journeyPathId)
     .eq("user_id", params.userId)
     .limit(1)
     .maybeSingle();
-  if (learningFieldError || !learningFieldRow) {
-    throw new Error("Journey path not found for this user.");
+  if (journeyPathError || !journeyPathRow) {
+    throw new Error("Journey path not found.");
+  }
+
+  const { data: pathCoursesRows, error: pathCoursesError } = await supabaseAdmin
+    .from("journey_path_courses")
+    .select("course_id, step_number")
+    .eq("journey_path_id", params.journeyPathId)
+    .order("step_number", { ascending: true });
+  if (pathCoursesError) {
+    throw new Error("Unable to load journey courses.");
+  }
+
+  const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const fromPathCourse =
+    pathCourses.find((row) => normalizeUuidForCompare(row.course_id) === normalizedFromCourseId) ?? null;
+  const toPathCourse =
+    pathCourses.find((row) => normalizeUuidForCompare(row.course_id) === normalizedToCourseId) ?? null;
+  if (!fromPathCourse || !toPathCourse) {
+    throw new Error("Selected lessons are not part of this journey.");
+  }
+
+  const fromStepNumberFromPath = Math.max(1, Math.floor(toNumberValue(fromPathCourse.step_number) || 1));
+  const toStepNumberFromPath = Math.max(1, Math.floor(toNumberValue(toPathCourse.step_number) || 1));
+  if (toStepNumberFromPath !== fromStepNumberFromPath + 1) {
+    throw new Error("Transition review is only available for adjacent lessons.");
   }
 
   const { data: progressRows, error: progressError } = await supabaseAdmin
     .from("user_course_progress")
     .select("*")
     .eq("user_id", params.userId)
+    .eq("journey_path_id", params.journeyPathId)
     .in("course_id", [params.fromCourseId, params.toCourseId]);
   if (progressError) {
     throw new Error("Unable to load user course progress.");
@@ -304,58 +310,7 @@ async function resolveTransitionReviewContext(params: {
   if (!toCourseRow) {
     throw new Error("Next lesson not found.");
   }
-
   const fromCourseTitle = toStringValue(fromCourseRow.title).trim();
-  const toCourseTitle = toStringValue(toCourseRow.title).trim();
-  const completionTitles = [fromCourseTitle, toCourseTitle].filter(Boolean);
-  const { data: completionRows, error: completionError } =
-    completionTitles.length > 0
-      ? await supabaseAdmin
-          .from("user_learning_step_completions")
-          .select("step_number, step_title")
-          .eq("user_id", params.userId)
-          .eq("user_learning_field_id", params.journeyPathId)
-          .in("step_title", completionTitles)
-      : { data: [], error: null };
-  if (completionError) {
-    throw new Error("Unable to load step completion records.");
-  }
-
-  const typedCompletionRows = (completionRows ?? []) as GenericRecord[];
-  const fromCompletionRow =
-    typedCompletionRows.find(
-      (row) => normalizeTitleForCompare(row.step_title) === normalizeTitleForCompare(fromCourseTitle),
-    ) ?? null;
-  const toCompletionRow =
-    typedCompletionRows.find(
-      (row) => normalizeTitleForCompare(row.step_title) === normalizeTitleForCompare(toCourseTitle),
-    ) ?? null;
-
-  let fromStepNumber =
-    Math.max(0, Math.floor(toNumberValue(fromCompletionRow?.step_number ?? 0))) ||
-    resolveProgressStepNumber(fromProgressRow) ||
-    null;
-  let toStepNumber =
-    Math.max(0, Math.floor(toNumberValue(toCompletionRow?.step_number ?? 0))) ||
-    resolveProgressStepNumber(toProgressRow) ||
-    null;
-
-  const currentStepIndex = Math.max(
-    1,
-    Math.floor(toNumberValue((learningFieldRow as GenericRecord).current_step_index) || 1),
-  );
-  if (fromStepNumber == null && toStepNumber == null) {
-    fromStepNumber = Math.max(1, currentStepIndex - 1);
-    toStepNumber = fromStepNumber + 1;
-  } else if (fromStepNumber == null && toStepNumber != null) {
-    fromStepNumber = Math.max(1, toStepNumber - 1);
-  } else if (fromStepNumber != null && toStepNumber == null) {
-    toStepNumber = fromStepNumber + 1;
-  }
-
-  if (fromStepNumber != null && toStepNumber != null && toStepNumber !== fromStepNumber + 1) {
-    throw new Error("Transition review is only available for adjacent lessons.");
-  }
 
   const { data: resourceRows } = await supabaseAdmin
     .from("course_resource_options")
@@ -389,7 +344,7 @@ async function resolveTransitionReviewContext(params: {
     .maybeSingle();
 
   return {
-    learningFieldId: toStringValue((learningFieldRow as GenericRecord).field_id),
+    learningFieldId: toStringValue((journeyPathRow as GenericRecord).learning_field_id),
     fromCourseTitle: fromCourseTitle || "Previous lesson",
     fromCourseDescription: toNullableString(fromCourseRow.description),
     resourceTitles,
