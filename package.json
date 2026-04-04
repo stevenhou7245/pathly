@@ -10,7 +10,7 @@
     "backfill:weakness-profiles": "node scripts/backfill-weakness-profiles.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.99.1",
+    "@supabase/supabase-js": "^2.49.8",
     "@tavily/core": "^0.7.2",
     "bcryptjs": "^3.0.3",
     "next": "16.1.6",
@@ -24,6 +24,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.27",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",

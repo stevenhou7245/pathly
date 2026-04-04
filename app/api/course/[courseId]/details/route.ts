@@ -40,6 +40,7 @@ type GetCourseDetailsResponse = {
       weighted_score: number;
       confidence: number;
     }>;
+    weakness_concepts: string[] | null;
     resources: Array<{
       id: string;
       resource_option_id: string | null;
