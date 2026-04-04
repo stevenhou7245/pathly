@@ -250,7 +250,7 @@ async function lookupResourcesWithTavily(params: {
           score: Number.isFinite(item.score) ? Number(item.score) : 0,
         } satisfies WeaknessResourceItem;
       })
-      .filter((item): item is WeaknessResourceItem => Boolean(item));
+      .filter((item): item is Exclude<typeof item, null> => item !== null);
 
     console.info("[weakness] resource_search:result", {
       user_id: params.userId,
@@ -537,22 +537,28 @@ function normalizeGeneratedQuestions(params: {
   const shortAnswers: PersistedWeaknessQuestion[] = [];
 
   source.forEach((item, index) => {
-    const type = normalizeQuestionType(item.question_type);
+    const record = item as GenericRecord;
+    const type = normalizeQuestionType(record.question_type);
     const options = type === "multiple_choice"
-      ? (Array.isArray(item.options) ? item.options : []).map((option) => norm(option)).filter(Boolean).slice(0, 4)
+      ? (Array.isArray(record.options) ? record.options : [])
+          .map((option) => norm(toStringValue(option)))
+          .filter(Boolean)
+          .slice(0, 4)
       : [];
     while (type === "multiple_choice" && options.length < 4) {
       options.push(`Option ${options.length + 1}`);
     }
     const row: PersistedWeaknessQuestion = {
-      id: norm(item.question_id || "") || randomUUID(),
+      id: norm(toStringValue(record.question_id)) || randomUUID(),
       question_order: index + 1,
       question_type: type,
-      question_text: norm(item.question_text) || `Question ${index + 1}`,
+      question_text: norm(toStringValue(record.question_text)) || `Question ${index + 1}`,
       options,
-      correct_answer_text: norm(item.correct_answer) || "See explanation.",
-      acceptable_answers: (Array.isArray(item.acceptable_answers) ? item.acceptable_answers : []).map((answer) => norm(answer)).filter(Boolean),
-      explanation: norm(item.explanation) || "Review the concept and retry.",
+      correct_answer_text: norm(toStringValue(record.correct_answer)) || "See explanation.",
+      acceptable_answers: (Array.isArray(record.acceptable_answers) ? record.acceptable_answers : [])
+        .map((answer) => norm(toStringValue(answer)))
+        .filter(Boolean),
+      explanation: norm(toStringValue(record.explanation)) || "Review the concept and retry.",
       score: 20,
     };
     if (type === "short_answer") {

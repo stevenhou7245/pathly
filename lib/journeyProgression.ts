@@ -100,6 +100,9 @@ export type CourseDetailsPayload = {
   current_test_attempt_id: string | null;
   required_test_score: number;
   can_take_test: boolean;
+  resource_generation_status: "pending" | "generating" | "ready" | "failed";
+  is_resource_generated: boolean;
+  resources_generated_at: string | null;
   review_popup: {
     should_show: boolean;
     review_session_id: string | null;
@@ -371,6 +374,26 @@ function normalizeStatus(value: unknown): CourseNodeStatus {
   }
 
   return "locked";
+}
+
+function normalizeResourceGenerationStatus(
+  value: unknown,
+  fallback: "pending" | "generating" | "ready" | "failed" = "pending",
+) {
+  const normalized = toStringValue(value).trim().toLowerCase();
+  if (normalized === "pending") {
+    return "pending" as const;
+  }
+  if (normalized === "generating") {
+    return "generating" as const;
+  }
+  if (normalized === "ready") {
+    return "ready" as const;
+  }
+  if (normalized === "failed") {
+    return "failed" as const;
+  }
+  return fallback;
 }
 
 async function loadTopWeaknessConcepts(params: {
@@ -1832,6 +1855,13 @@ export async function getCourseDetails(params: {
         const status = normalizeStatus(progressRow?.status ?? "locked");
         return status === "in_progress" || status === "ready_for_test" || status === "passed";
       })(),
+      resource_generation_status: normalizeResourceGenerationStatus(
+        (courseRow as GenericRecord).resource_generation_status,
+        resourcesPayload.length > 0 ? "ready" : "pending",
+      ),
+      is_resource_generated:
+        (courseRow as GenericRecord).is_resource_generated === true || resourcesPayload.length > 0,
+      resources_generated_at: toNullableString((courseRow as GenericRecord).resources_generated_at),
       review_popup: {
         should_show: pendingReview.should_show,
         review_session_id: pendingReview.review_session_id,
