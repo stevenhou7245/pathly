@@ -1572,29 +1572,6 @@ export default function LearningFieldPanel({
                     <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
                       {courseDetails.description ?? "No description available yet."}
                     </p>
-                    <div className="mt-1 text-xs font-semibold text-[#DC2626]">
-                      <span>Weakness: </span>
-                      {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
-                        <span className="inline-flex flex-wrap items-center gap-1.5">
-                          {courseDetails.weakness_concepts.map((concept) => (
-                            <button
-                              key={concept}
-                              type="button"
-                              onClick={() =>
-                                router.push(
-                                  `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(concept)}`,
-                                )
-                              }
-                              className="inline-flex items-center rounded-full border border-[#DC2626]/35 bg-[#fff1f1] px-2 py-0.5 text-[11px] font-semibold text-[#B91C1C] transition hover:bg-[#ffe4e4]"
-                            >
-                              {concept}
-                            </button>
-                          ))}
-                        </span>
-                      ) : (
-                        <span>none</span>
-                      )}
-                    </div>
                     <p className="mt-2 text-xs font-bold uppercase tracking-wide text-[#1F2937]/60">
                       Estimated time: {courseDetails.estimated_minutes ?? 30} minutes
                     </p>
@@ -1614,30 +1591,49 @@ export default function LearningFieldPanel({
                       Pass requirement: {courseDetails.required_test_score}+
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (courseDetails.status === "ready_for_test") {
-                        void handlePrepareTest();
-                        return;
+                  <div className="flex flex-col items-end text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (courseDetails.status === "ready_for_test") {
+                          void handlePrepareTest();
+                          return;
+                        }
+                        void handleStartCourse();
+                      }}
+                      disabled={
+                        isStartingCourse ||
+                        isPreparingTest ||
+                        (courseDetails.status !== "ready_for_test" && !selectedResourceId)
                       }
-                      void handleStartCourse();
-                    }}
-                    disabled={
-                      isStartingCourse ||
-                      isPreparingTest ||
-                      (courseDetails.status !== "ready_for_test" && !selectedResourceId)
-                    }
-                    className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    {courseDetails.status === "ready_for_test"
-                      ? isPreparingTest
-                        ? "Preparing test..."
-                        : getPrimaryLearnActionLabel(courseDetails.status)
-                      : isStartingCourse
-                      ? "Opening..."
-                      : getPrimaryLearnActionLabel(courseDetails.status)}
-                  </button>
+                      className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {courseDetails.status === "ready_for_test"
+                        ? isPreparingTest
+                          ? "Preparing test..."
+                          : getPrimaryLearnActionLabel(courseDetails.status)
+                        : isStartingCourse
+                        ? "Opening..."
+                        : getPrimaryLearnActionLabel(courseDetails.status)}
+                    </button>
+                    <div className="mt-2">
+                      {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            router.push(
+                              `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(courseDetails.weakness_concepts?.[0] ?? "")}`,
+                            )
+                          }
+                          className="text-lg font-bold text-red-500 transition hover:text-red-600 hover:underline"
+                        >
+                          Weakness: {courseDetails.weakness_concepts[0]}
+                        </button>
+                      ) : (
+                        <p className="text-lg font-bold text-red-500">Weakness: none</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-3">
