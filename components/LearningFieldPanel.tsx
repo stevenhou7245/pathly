@@ -1612,87 +1612,89 @@ export default function LearningFieldPanel({
                         ? isPreparingTest
                           ? "Preparing test..."
                           : getPrimaryLearnActionLabel(courseDetails.status)
-                        : isStartingCourse
-                        ? "Opening..."
-                        : getPrimaryLearnActionLabel(courseDetails.status)}
+                      : isStartingCourse
+                      ? "Opening..."
+                      : getPrimaryLearnActionLabel(courseDetails.status)}
                     </button>
-                    <div className="mt-2">
-                      {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            router.push(
-                              `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(courseDetails.weakness_concepts?.[0] ?? "")}`,
-                            )
-                          }
-                          className="text-lg font-bold text-red-500 transition hover:text-red-600 hover:underline"
-                        >
-                          Weakness: {courseDetails.weakness_concepts[0]}
-                        </button>
-                      ) : (
-                        <p className="text-lg font-bold text-red-500">Weakness: none</p>
-                      )}
-                    </div>
                   </div>
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-3">
-                  {courseDetails.status === "ready_for_test" ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handleStartCourse();
-                      }}
-                      disabled={isStartingCourse || !selectedResourceId}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      Continue learning
-                    </button>
-                  ) : null}
-                  {courseDetails.can_take_test && courseDetails.status !== "passed" && courseDetails.status !== "ready_for_test" ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handlePrepareTest();
-                      }}
-                      disabled={isPreparingTest || isSubmittingTest}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      {isPreparingTest ? "Preparing test..." : "Take AI Test"}
-                    </button>
-                  ) : null}
-                  {(activeAiTest?.courseId === courseDetails.id &&
-                    (testQuestions.length > 0 || testResult)) ||
-                  hasAnyPreviousTestAttempts ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAiTestError("");
-                        const hasLocalPreparedTest =
-                          activeAiTest?.courseId === courseDetails.id &&
-                          (testQuestions.length > 0 || testResult);
-                        if (hasLocalPreparedTest) {
-                          setIsAiTestModalOpen(true);
-                          return;
-                        }
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <div className="flex flex-wrap gap-3">
+                    {courseDetails.status === "ready_for_test" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleStartCourse();
+                        }}
+                        disabled={isStartingCourse || !selectedResourceId}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        Continue learning
+                      </button>
+                    ) : null}
+                    {courseDetails.can_take_test && courseDetails.status !== "passed" && courseDetails.status !== "ready_for_test" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handlePrepareTest();
+                        }}
+                        disabled={isPreparingTest || isSubmittingTest}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isPreparingTest ? "Preparing test..." : "Take AI Test"}
+                      </button>
+                    ) : null}
+                    {(activeAiTest?.courseId === courseDetails.id &&
+                      (testQuestions.length > 0 || testResult)) ||
+                    hasAnyPreviousTestAttempts ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAiTestError("");
+                          const hasLocalPreparedTest =
+                            activeAiTest?.courseId === courseDetails.id &&
+                            (testQuestions.length > 0 || testResult);
+                          if (hasLocalPreparedTest) {
+                            setIsAiTestModalOpen(true);
+                            return;
+                          }
 
-                        setActiveAiTest({
-                          courseId: courseDetails.id,
-                          courseTitle: courseDetails.title,
-                        });
-                        setIsAiTestModalOpen(true);
-                        void handleLoadAttemptHistory({ openFirstAttempt: true });
-                      }}
-                      disabled={isSubmittingTest || isCheckingPreviousTests}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      {isCheckingPreviousTests
-                        ? "Checking..."
-                        : hasAnyPreviousTestAttempts
-                        ? "Previous AI Test"
-                        : "Open AI Test"}
-                    </button>
-                  ) : null}
+                          setActiveAiTest({
+                            courseId: courseDetails.id,
+                            courseTitle: courseDetails.title,
+                          });
+                          setIsAiTestModalOpen(true);
+                          void handleLoadAttemptHistory({ openFirstAttempt: true });
+                        }}
+                        disabled={isSubmittingTest || isCheckingPreviousTests}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isCheckingPreviousTests
+                          ? "Checking..."
+                          : hasAnyPreviousTestAttempts
+                          ? "Previous AI Test"
+                          : "Open AI Test"}
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="ml-auto text-right">
+                    {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          router.push(
+                            `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(courseDetails.weakness_concepts?.[0] ?? "")}`,
+                          )
+                        }
+                        className="text-lg font-bold text-red-500 transition hover:text-red-600 hover:underline"
+                      >
+                        Weakness: {courseDetails.weakness_concepts[0]}
+                      </button>
+                    ) : (
+                      <p className="text-lg font-bold text-red-500">Weakness: none</p>
+                    )}
+                  </div>
                 </div>
 
                 <div className="mt-5 grid gap-4">
