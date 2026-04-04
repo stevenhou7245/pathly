@@ -60,7 +60,6 @@ const generatedQuestionSchema = z.object({
   explanation: z.string().optional().nullable(),
 
   score: z.number().int().positive().optional(),
-  points: z.number().int().positive().optional(),
 
   skill_tags: z
     .union([z.array(z.string()), z.null(), z.undefined()])
@@ -70,11 +69,13 @@ const generatedQuestionSchema = z.object({
     .union([z.array(z.string()), z.null(), z.undefined()])
     .transform((value) => value ?? []),
 });
-const OBJECTIVE_QUESTION_COUNT = 7;
+const OBJECTIVE_QUESTION_COUNT = 14;
 const SHORT_ANSWER_QUESTION_COUNT = 2;
 const TOTAL_QUESTION_COUNT = OBJECTIVE_QUESTION_COUNT + SHORT_ANSWER_QUESTION_COUNT;
-const OBJECTIVE_QUESTION_SCORE = 10;
+const OBJECTIVE_QUESTION_SCORE = 5;
 const SHORT_ANSWER_QUESTION_SCORE = 15;
+const PASS_SCORE_THRESHOLD = 80;
+const AI_TEST_PROMPT_VERSION = "ai_test_template_v4";
 
 const generatedResourceContextSchema = z.object({
   selected_resource_option_id: z.string().nullable(),
@@ -240,9 +241,131 @@ function isMissingRelationOrColumnError(error: unknown) {
   return code === "42P01" || code === "42703";
 }
 
+type AiResourceMetadata = {
+  id: string;
+  title: string;
+  resource_type: string;
+  provider: string | null;
+  url: string | null;
+  summary: string | null;
+};
+
+type FallbackContentContext = {
+  courseTitle: string;
+  courseDescription?: string | null;
+  selectedResourceTitle?: string | null;
+  selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
+};
+
+const GENERIC_WORDS = new Set([
+  "about",
+  "above",
+  "after",
+  "again",
+  "against",
+  "basic",
+  "between",
+  "build",
+  "course",
+  "description",
+  "during",
+  "focus",
+  "from",
+  "into",
+  "lesson",
+  "level",
+  "more",
+  "practice",
+  "question",
+  "resource",
+  "review",
+  "should",
+  "that",
+  "their",
+  "there",
+  "these",
+  "this",
+  "through",
+  "using",
+  "with",
+]);
+
+function compactWhitespace(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function toSlug(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function extractFocusTerms(params: FallbackContentContext) {
+  const corpus = [
+    params.courseTitle,
+    params.courseDescription ?? "",
+    params.selectedResourceTitle ?? "",
+    params.selectedResourceSummary ?? "",
+    ...(params.resourceMetadata ?? []).flatMap((resource) => [
+      resource.title,
+      resource.resource_type,
+      resource.summary ?? "",
+    ]),
+  ]
+    .map((item) => compactWhitespace(toStringValue(item)))
+    .filter(Boolean)
+    .join(" ");
+
+  const tokens = corpus
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3 && !GENERIC_WORDS.has(item));
+
+  const deduped = Array.from(new Set(tokens));
+  if (deduped.length > 0) {
+    return deduped.slice(0, 12);
+  }
+
+  const titleTokens = params.courseTitle
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3);
+  const titleDeduped = Array.from(new Set(titleTokens));
+  if (titleDeduped.length > 0) {
+    return titleDeduped.slice(0, 8);
+  }
+
+  return ["analysis", "debugging", "implementation", "validation"];
+}
+
+function pickFocusTerm(terms: string[], index: number) {
+  if (terms.length === 0) {
+    return "implementation";
+  }
+  return terms[index % terms.length];
+}
+
+function buildMeaningfulMultipleChoiceOptions(params: {
+  courseTitle: string;
+  focusTerm: string;
+}) {
+  return [
+    `Define constraints for ${params.focusTerm}, implement step by step, then validate output quality.`,
+    `Skip validation of ${params.focusTerm} and rely on intuition to save time.`,
+    `Prioritize tool popularity over task fit for ${params.courseTitle}.`,
+    `Optimize performance before checking whether ${params.focusTerm} logic is correct.`,
+  ];
+}
+
 function getFallbackTemplate(params: {
   courseId: string;
   courseTitle: string;
+  courseDescription?: string | null;
   attemptNumber: number;
   difficultyBand: DifficultyBand;
   selectedResourceOptionId?: string | null;
@@ -251,9 +374,17 @@ function getFallbackTemplate(params: {
   selectedResourceProvider?: string | null;
   selectedResourceUrl?: string | null;
   selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
 }) {
   const totalQuestions = TOTAL_QUESTION_COUNT;
   const questions: Array<z.infer<typeof generatedQuestionSchema>> = [];
+  const focusTerms = extractFocusTerms({
+    courseTitle: params.courseTitle,
+    courseDescription: params.courseDescription ?? null,
+    selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceSummary: params.selectedResourceSummary ?? null,
+    resourceMetadata: params.resourceMetadata ?? [],
+  });
 
   for (let index = 0; index < totalQuestions; index += 1) {
     const questionNo = index + 1;
@@ -263,39 +394,50 @@ function getFallbackTemplate(params: {
           ? "fill_blank"
           : "multiple_choice"
         : "short_answer";
+    const focusTerm = pickFocusTerm(focusTerms, index);
 
     questions.push({
       question_id: `q${questionNo}_v${Math.max(1, Math.floor(params.attemptNumber || 1))}`,
       question_type: questionType,
       question_text:
         questionType === "short_answer"
-          ? `Provide a short answer for ${params.courseTitle} concept ${questionNo}.`
+          ? `In ${params.courseTitle}, a learner keeps making mistakes on ${focusTerm}. Provide a practical fix plan with root-cause analysis, corrected logic or pseudocode, and concrete test cases.`
           : questionType === "fill_blank"
-          ? `Fill in the blank for ${params.courseTitle} concept ${questionNo}.`
-          : `Which option best matches ${params.courseTitle} concept ${questionNo}?`,
+          ? `For ${params.courseTitle}, fill in the blank: before finalizing a solution involving ${focusTerm}, always ____ against realistic edge cases.`
+          : `In ${params.courseTitle}, which approach best applies ${focusTerm} in a real workflow?`,
       options:
         questionType === "multiple_choice"
-          ? ["Option A", "Option B", "Option C", "Option D"]
+          ? buildMeaningfulMultipleChoiceOptions({
+              courseTitle: params.courseTitle,
+              focusTerm,
+            })
           : [],
       correct_answer:
         questionType === "multiple_choice"
-          ? "Option A"
+          ? buildMeaningfulMultipleChoiceOptions({
+              courseTitle: params.courseTitle,
+              focusTerm,
+            })[0]
           : questionType === "fill_blank"
-          ? `${params.courseTitle} concept ${questionNo}`
+          ? "validate assumptions"
           : questionType === "short_answer"
-          ? `${params.courseTitle} concept ${questionNo}`
-          : `${params.courseTitle} concept ${questionNo}`,
+          ? `Identify the ${focusTerm} failure mode, implement corrected logic, and verify with targeted tests.`
+          : "validate assumptions",
       acceptable_answers:
         questionType === "short_answer" || questionType === "fill_blank"
-          ? [`${params.courseTitle} concept ${questionNo}`]
+          ? [
+              "validate assumptions",
+              "verify with edge cases",
+              `correct ${focusTerm} logic`,
+            ]
           : [],
       score:
         questionType === "short_answer"
           ? SHORT_ANSWER_QUESTION_SCORE
           : OBJECTIVE_QUESTION_SCORE,
-      explanation: `Review ${params.courseTitle} concept ${questionNo} and its practical usage.`,
-      skill_tags: [`${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-skill-${questionNo}`],
-      concept_tags: [`${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-concept-${questionNo}`],
+      explanation: `Focus on practical decision quality for ${focusTerm} in ${params.courseTitle}.`,
+      skill_tags: [`${toSlug(focusTerm) || "core"}-skill`],
+      concept_tags: [`${toSlug(focusTerm) || "core"}-concept`],
     });
   }
 
@@ -323,24 +465,39 @@ function getFallbackTemplate(params: {
 
 function createDeterministicFallbackQuestion(params: {
   courseTitle: string;
+  courseDescription?: string | null;
+  selectedResourceTitle?: string | null;
+  selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
   questionOrder: number;
   type: "multiple_choice" | "fill_blank" | "short_answer";
   difficultyBand: DifficultyBand;
   variantNo: number;
 }) {
-  const suffix = `${params.courseTitle} concept ${params.questionOrder}`;
-  const baseSkill = `${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-skill-${params.questionOrder}`;
-  const baseConcept = `${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-concept-${params.questionOrder}`;
+  const focusTerms = extractFocusTerms({
+    courseTitle: params.courseTitle,
+    courseDescription: params.courseDescription ?? null,
+    selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceSummary: params.selectedResourceSummary ?? null,
+    resourceMetadata: params.resourceMetadata ?? [],
+  });
+  const focusTerm = pickFocusTerm(focusTerms, params.questionOrder - 1);
+  const baseSkill = `${toSlug(focusTerm) || "core"}-skill`;
+  const baseConcept = `${toSlug(focusTerm) || "core"}-concept`;
   if (params.type === "multiple_choice") {
+    const options = buildMeaningfulMultipleChoiceOptions({
+      courseTitle: params.courseTitle,
+      focusTerm,
+    });
     return {
       question_order: params.questionOrder,
       question_type: "multiple_choice" as const,
-      question_text: `Which option best matches ${suffix}?`,
-      options: ["Option A", "Option B", "Option C", "Option D"],
-      correct_answer_text: "Option A",
+      question_text: `In ${params.courseTitle}, which workflow best applies ${focusTerm} under realistic constraints?`,
+      options,
+      correct_answer_text: options[0],
       acceptable_answers: [],
       score: OBJECTIVE_QUESTION_SCORE,
-      explanation: `Review ${suffix} at ${params.difficultyBand} level (variant ${params.variantNo}).`,
+      explanation: `Evaluate each option by implementation quality and verification depth for ${focusTerm}.`,
       external_question_key: `fallback_mc_${params.variantNo}_${params.questionOrder}`,
       skill_tags: [baseSkill],
       concept_tags: [baseConcept],
@@ -350,12 +507,12 @@ function createDeterministicFallbackQuestion(params: {
     return {
       question_order: params.questionOrder,
       question_type: "fill_blank" as const,
-      question_text: `Fill in the blank for ${suffix}.`,
+      question_text: `Fill in the blank for ${params.courseTitle}: when handling ${focusTerm}, always ____ results against representative edge cases.`,
       options: [],
-      correct_answer_text: suffix,
-      acceptable_answers: [suffix],
+      correct_answer_text: "validate",
+      acceptable_answers: ["validate", "verify"],
       score: OBJECTIVE_QUESTION_SCORE,
-      explanation: `Focus on core terminology for ${suffix}.`,
+      explanation: `The blank should represent validation behavior that improves reliability.`,
       external_question_key: `fallback_fb_${params.variantNo}_${params.questionOrder}`,
       skill_tags: [baseSkill],
       concept_tags: [baseConcept],
@@ -364,12 +521,16 @@ function createDeterministicFallbackQuestion(params: {
   return {
     question_order: params.questionOrder,
     question_type: "short_answer" as const,
-    question_text: `Provide a short answer for ${suffix}.`,
+    question_text: `A learner in ${params.courseTitle} fails tasks related to ${focusTerm}. Provide a concrete remediation: identify the root cause, write corrected core logic/pseudocode, and define how to test the fix.`,
     options: [],
-    correct_answer_text: suffix,
-    acceptable_answers: [suffix],
+    correct_answer_text: `Explain corrected ${focusTerm} logic with targeted validation.`,
+    acceptable_answers: [
+      "root cause",
+      "corrected logic",
+      "test cases",
+    ],
     score: SHORT_ANSWER_QUESTION_SCORE,
-    explanation: `Apply ${suffix} with your own words.`,
+    explanation: `Strong answers must include practical implementation and debugging details.`,
     external_question_key: `fallback_sa_${params.variantNo}_${params.questionOrder}`,
     skill_tags: [baseSkill],
     concept_tags: [baseConcept],
@@ -380,8 +541,19 @@ function normalizeGeneratedQuestions(params: {
   rawQuestions: Array<z.infer<typeof generatedQuestionSchema>>;
   difficultyBand: DifficultyBand;
   courseTitle: string;
+  courseDescription?: string | null;
+  selectedResourceTitle?: string | null;
+  selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
 }) {
   const normalized: GeneratedAiQuestion[] = [];
+  const focusTerms = extractFocusTerms({
+    courseTitle: params.courseTitle,
+    courseDescription: params.courseDescription ?? null,
+    selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceSummary: params.selectedResourceSummary ?? null,
+    resourceMetadata: params.resourceMetadata ?? [],
+  });
 
   params.rawQuestions.forEach((question, index) => {
     console.info("[ai_test_template] question_type_before_normalization", {
@@ -412,29 +584,35 @@ function normalizeGeneratedQuestions(params: {
     });
     let normalizedOptions = questionType === "multiple_choice" ? options : [];
     if (questionType === "multiple_choice") {
+      const focusTerm = pickFocusTerm(focusTerms, index);
+      const fallbackOptions = buildMeaningfulMultipleChoiceOptions({
+        courseTitle: params.courseTitle,
+        focusTerm,
+      });
       if (normalizedOptions.length === 0) {
-        normalizedOptions = ["Option A", "Option B", "Option C", "Option D"];
+        normalizedOptions = fallbackOptions;
       } else if (normalizedOptions.length < 4) {
         const seed = [...normalizedOptions];
         while (seed.length < 4) {
-          seed.push(`Option ${String.fromCharCode(65 + seed.length)}`);
+          seed.push(fallbackOptions[seed.length]);
         }
         normalizedOptions = seed.slice(0, 4);
       } else {
         normalizedOptions = normalizedOptions.slice(0, 4);
       }
     }
-  const correctAnswerText = normalizeCorrectAnswerText({
-    questionType,
-    rawCorrectAnswer: question.correct_answer,
-    fallback: firstNonEmpty([
-      questionType === "multiple_choice" ? normalizedOptions[0] : "",
-      (questionType === "short_answer" || questionType === "fill_blank")
-        ? `${params.courseTitle} concept ${index + 1}`
-        : "",
-      `See explanation for ${params.courseTitle}.`,
-    ]),
-    questionIndex: index,
+    const focusTerm = pickFocusTerm(focusTerms, index);
+    const correctAnswerText = normalizeCorrectAnswerText({
+      questionType,
+      rawCorrectAnswer: question.correct_answer,
+      fallback: firstNonEmpty([
+        questionType === "multiple_choice" ? normalizedOptions[0] : "",
+        questionType === "short_answer" || questionType === "fill_blank"
+          ? `apply ${focusTerm} with explicit validation`
+          : "",
+        `See explanation for ${params.courseTitle}.`,
+      ]),
+      questionIndex: index,
     });
     console.info("[ai_test_template] acceptable_answers_before_normalization", {
       index,
@@ -462,22 +640,15 @@ function normalizeGeneratedQuestions(params: {
       acceptableAnswers.push(correctAnswerText);
     }
     const rawScoreValue = toNumberValue(question.score);
-    const rawPointsValue = toNumberValue(question.points);
     if (rawScoreValue > 0) {
       console.info("[ai_test_template] raw_score_detected", {
         index,
         value: Math.floor(rawScoreValue),
       });
     }
-    if (rawPointsValue > 0) {
-      console.info("[ai_test_template] raw_points_detected", {
-        index,
-        value: Math.floor(rawPointsValue),
-      });
-    }
     const normalizedRawScore = Math.max(
       1,
-      Math.floor(rawScoreValue > 0 ? rawScoreValue : rawPointsValue > 0 ? rawPointsValue : OBJECTIVE_QUESTION_SCORE),
+      Math.floor(rawScoreValue > 0 ? rawScoreValue : OBJECTIVE_QUESTION_SCORE),
     );
     const explanation =
       toStringValue(question.explanation).trim() ||
@@ -529,11 +700,11 @@ function normalizeGeneratedQuestions(params: {
       skill_tags:
         fullSkillTags.length > 0
           ? fullSkillTags
-          : [`${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-skill-${index + 1}`],
+          : [`${toSlug(focusTerm) || "core"}-skill`],
       concept_tags:
         fullConceptTags.length > 0
           ? fullConceptTags
-          : [`${params.courseTitle.toLowerCase().replace(/\s+/g, "-")}-concept-${index + 1}`],
+          : [`${toSlug(focusTerm) || "core"}-concept`],
     } satisfies GeneratedAiQuestion);
   });
 
@@ -550,6 +721,10 @@ function normalizeGeneratedQuestions(params: {
 function enforceQuestionComposition(params: {
   questions: GeneratedAiQuestion[];
   courseTitle: string;
+  courseDescription?: string | null;
+  selectedResourceTitle?: string | null;
+  selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
   difficultyBand: DifficultyBand;
   variantNo: number;
 }) {
@@ -570,6 +745,10 @@ function enforceQuestionComposition(params: {
     const type: "multiple_choice" | "fill_blank" = index % 2 === 0 ? "fill_blank" : "multiple_choice";
     const fallbackQuestion = createDeterministicFallbackQuestion({
       courseTitle: params.courseTitle,
+      courseDescription: params.courseDescription ?? null,
+      selectedResourceTitle: params.selectedResourceTitle ?? null,
+      selectedResourceSummary: params.selectedResourceSummary ?? null,
+      resourceMetadata: params.resourceMetadata ?? [],
       questionOrder: index,
       type,
       difficultyBand: params.difficultyBand,
@@ -583,6 +762,10 @@ function enforceQuestionComposition(params: {
     const index = OBJECTIVE_QUESTION_COUNT + selectedShortAnswers.length + 1;
     const fallbackQuestion = createDeterministicFallbackQuestion({
       courseTitle: params.courseTitle,
+      courseDescription: params.courseDescription ?? null,
+      selectedResourceTitle: params.selectedResourceTitle ?? null,
+      selectedResourceSummary: params.selectedResourceSummary ?? null,
+      resourceMetadata: params.resourceMetadata ?? [],
       questionOrder: index,
       type: "short_answer",
       difficultyBand: params.difficultyBand,
@@ -631,6 +814,31 @@ function enforceQuestionComposition(params: {
   });
   console.info("[ai_test_template] final_total_score", {
     total_score: totalScore,
+  });
+  if (fallbackQuestions.length > 0) {
+    console.warn("[ai_test] fallback_used", {
+      fallback_question_count: fallbackQuestions.length,
+      total_questions: finalQuestions.length,
+      course_title: params.courseTitle,
+      variant_no: params.variantNo,
+    });
+  }
+  console.info("[ai_test] validation_summary", {
+    expected_total_questions: TOTAL_QUESTION_COUNT,
+    actual_total_questions: finalQuestions.length,
+    expected_objective_count: OBJECTIVE_QUESTION_COUNT,
+    actual_objective_count: compositionBreakdown.multiple_choice + compositionBreakdown.fill_blank,
+    expected_short_answer_count: SHORT_ANSWER_QUESTION_COUNT,
+    actual_short_answer_count: compositionBreakdown.short_answer,
+    expected_objective_score_each: OBJECTIVE_QUESTION_SCORE,
+    expected_short_answer_score_each: SHORT_ANSWER_QUESTION_SCORE,
+    total_score: totalScore,
+    pass_threshold: PASS_SCORE_THRESHOLD,
+    per_question_scores: finalQuestions.map((question) => ({
+      order: question.question_order,
+      type: question.question_type,
+      score: question.score,
+    })),
   });
 
   return {
@@ -685,13 +893,25 @@ async function hasReusableTemplateComposition(params: {
       row.question_type === "fill_blank" ||
       row.question_type === "short_answer",
   );
+  const hasObjectiveScores = rows
+    .filter(
+      (row) =>
+        row.question_type === "multiple_choice" ||
+        row.question_type === "fill_blank",
+    )
+    .every((row) => Math.floor(toNumberValue(row.score)) === OBJECTIVE_QUESTION_SCORE);
+  const hasShortAnswerScores = rows
+    .filter((row) => row.question_type === "short_answer")
+    .every((row) => Math.floor(toNumberValue(row.score)) === SHORT_ANSWER_QUESTION_SCORE);
 
   if (
     rows.length !== TOTAL_QUESTION_COUNT ||
     objectiveCount !== OBJECTIVE_QUESTION_COUNT ||
     shortAnswerCount !== SHORT_ANSWER_QUESTION_COUNT ||
     totalScore !== 100 ||
-    !hasOnlyAllowedTypes
+    !hasOnlyAllowedTypes ||
+    !hasObjectiveScores ||
+    !hasShortAnswerScores
   ) {
     console.warn("[ai_test_template] reusable_template_invalid_composition", {
       template_id: params.templateId,
@@ -701,6 +921,8 @@ async function hasReusableTemplateComposition(params: {
       short_answer_count: shortAnswerCount,
       total_score: totalScore,
       has_only_allowed_types: hasOnlyAllowedTypes,
+      has_objective_scores: hasObjectiveScores,
+      has_short_answer_scores: hasShortAnswerScores,
     });
     return false;
   }
@@ -1001,12 +1223,54 @@ async function insertTemplateQuestions(params: {
   }
 
   if (params.questions.length !== TOTAL_QUESTION_COUNT) {
-    throw new Error("Invalid AI test composition: expected exactly 9 questions.");
+    throw new Error(
+      `Invalid AI test composition: expected exactly ${TOTAL_QUESTION_COUNT} questions.`,
+    );
+  }
+  const objectiveQuestions = params.questions.filter(
+    (question) =>
+      question.question_type === "multiple_choice" || question.question_type === "fill_blank",
+  );
+  const shortAnswerQuestions = params.questions.filter(
+    (question) => question.question_type === "short_answer",
+  );
+  if (
+    objectiveQuestions.length !== OBJECTIVE_QUESTION_COUNT ||
+    shortAnswerQuestions.length !== SHORT_ANSWER_QUESTION_COUNT
+  ) {
+    throw new Error(
+      `Invalid AI test composition: expected ${OBJECTIVE_QUESTION_COUNT} objective and ${SHORT_ANSWER_QUESTION_COUNT} short_answer questions.`,
+    );
+  }
+  const hasObjectiveScores = objectiveQuestions.every(
+    (question) => question.score === OBJECTIVE_QUESTION_SCORE,
+  );
+  const hasShortAnswerScores = shortAnswerQuestions.every(
+    (question) => question.score === SHORT_ANSWER_QUESTION_SCORE,
+  );
+  if (!hasObjectiveScores || !hasShortAnswerScores) {
+    throw new Error(
+      `Invalid AI test composition: expected objective score ${OBJECTIVE_QUESTION_SCORE} and short_answer score ${SHORT_ANSWER_QUESTION_SCORE}.`,
+    );
   }
   const totalScore = params.questions.reduce((sum, question) => sum + question.score, 0);
   if (totalScore !== 100) {
     throw new Error("Invalid AI test composition: total score must equal 100.");
   }
+  console.info("[ai_test] generation_result", {
+    template_id: params.templateId,
+    course_id: params.courseId,
+    question_count: params.questions.length,
+    objective_count: objectiveQuestions.length,
+    short_answer_count: shortAnswerQuestions.length,
+    total_score: totalScore,
+    pass_threshold: PASS_SCORE_THRESHOLD,
+    per_question_scores: params.questions.map((question) => ({
+      order: question.question_order,
+      type: question.question_type,
+      score: question.score,
+    })),
+  });
 
   const { count: existingCount } = await supabaseAdmin
     .from("ai_test_template_questions")
@@ -1277,14 +1541,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
   selectedResourceProvider?: string | null;
   selectedResourceUrl?: string | null;
   selectedResourceSummary?: string | null;
-  resourceMetadata?: Array<{
-    id: string;
-    title: string;
-    resource_type: string;
-    provider: string | null;
-    url: string | null;
-    summary: string | null;
-  }>;
+  resourceMetadata?: AiResourceMetadata[];
   attemptNumber: number;
 }): Promise<{
   templateId: string;
@@ -1362,7 +1619,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
           generated_at: new Date().toISOString(),
           attempt_number: Math.max(1, Math.floor(params.attemptNumber || 1)),
           variant_no: desiredVariantNo,
-          prompt_version: "ai_test_template_v3",
+          prompt_version: AI_TEST_PROMPT_VERSION,
           requirements_met: {
             include_concept_and_skill_tags: true,
             vary_from_previous_attempts: true,
@@ -1384,14 +1641,14 @@ export async function resolveAiTestTemplateForAttempt(params: {
 
   const { output, provenance, debug } = await generateStructuredJson({
     feature: "ai_test_template",
-    promptVersion: "ai_test_template_v3",
+    promptVersion: AI_TEST_PROMPT_VERSION,
     systemInstruction: [
       "Generate a reusable course test template.",
       "Return JSON with root key test_template.",
       "test_template must include: course_id, course_title, difficulty_band, resource_context, questions, metadata.",
-      "Generate exactly 18 questions.",
+      "Generate exactly 16 questions.",
       "Composition must be:",
-      "- 16 objective questions (multiple_choice or fill_blank)",
+      "- 14 objective questions (multiple_choice or fill_blank)",
       "- 2 short_answer questions",
       "Allowed question_type values are only: multiple_choice, fill_blank, short_answer.",
       "Do not output true_false, matching, essay, or any other type.",
@@ -1401,8 +1658,8 @@ export async function resolveAiTestTemplateForAttempt(params: {
       "question_id, question_type, question_text, options, correct_answer, acceptable_answers, explanation, score, concept_tags, skill_tags.",
       "Use field name score for per-question points. Do not use points.",
       "Scoring must be exact:",
-      "- the 16 objective questions must each have score 5",
-      "- the 2 short_answer questions must each have score 10",
+      "- the 14 objective questions must each have score 5",
+      "- the 2 short_answer questions must each have score 15",
       "Total score must be 100.",
       "Passing score in this product is 80 out of 100. Do not mention 60 as a passing score.",
       "options must always be an array, never null.",
@@ -1487,6 +1744,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
       getFallbackTemplate({
         courseId: params.courseId,
         courseTitle: params.courseTitle,
+        courseDescription: params.courseDescription ?? null,
         attemptNumber: params.attemptNumber,
         difficultyBand: desiredDifficultyBand,
         selectedResourceOptionId: params.selectedResourceOptionId ?? null,
@@ -1495,8 +1753,17 @@ export async function resolveAiTestTemplateForAttempt(params: {
         selectedResourceProvider: params.selectedResourceProvider ?? null,
         selectedResourceUrl: params.selectedResourceUrl ?? null,
         selectedResourceSummary: params.selectedResourceSummary ?? null,
+        resourceMetadata: params.resourceMetadata ?? [],
       }),
   });
+  if (provenance.fallback_used) {
+    console.warn("[ai_test] fallback_used", {
+      source: "provider_fallback",
+      course_id: params.courseId,
+      attempt_number: params.attemptNumber,
+      pass_threshold: PASS_SCORE_THRESHOLD,
+    });
+  }
 
   const parsedKeys = extractParsedKeys(debug.parsed_output_json);
   const outputRecord = (output ?? {}) as GenericRecord;
@@ -1556,6 +1823,10 @@ export async function resolveAiTestTemplateForAttempt(params: {
     rawQuestions,
     difficultyBand: resolvedDifficultyBand,
     courseTitle: resolvedCourseTitle,
+    courseDescription: params.courseDescription ?? null,
+    selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceSummary: params.selectedResourceSummary ?? null,
+    resourceMetadata: params.resourceMetadata ?? [],
   });
   console.info("[ai_test_template] normalized_questions_count", {
     count: normalizedQuestions.length,
@@ -1564,10 +1835,29 @@ export async function resolveAiTestTemplateForAttempt(params: {
   const composition = enforceQuestionComposition({
     questions: normalizedQuestions,
     courseTitle: resolvedCourseTitle,
+    courseDescription: params.courseDescription ?? null,
+    selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceSummary: params.selectedResourceSummary ?? null,
+    resourceMetadata: params.resourceMetadata ?? [],
     difficultyBand: resolvedDifficultyBand,
     variantNo: resolvedVariantNo,
   });
   const finalQuestions = composition.finalQuestions;
+  console.info("[ai_test] generation_result", {
+    course_id: resolvedCourseId,
+    question_count: finalQuestions.length,
+    objective_count: composition.compositionBreakdown.multiple_choice + composition.compositionBreakdown.fill_blank,
+    short_answer_count: composition.compositionBreakdown.short_answer,
+    total_score: composition.totalScore,
+    pass_threshold: PASS_SCORE_THRESHOLD,
+    fallback_used: provenance.fallback_used || composition.fallbackQuestions.length > 0,
+    fallback_question_count: composition.fallbackQuestions.length,
+    per_question_scores: finalQuestions.map((question) => ({
+      order: question.question_order,
+      type: question.question_type,
+      score: question.score,
+    })),
+  });
   const sourceHash = sha256Hash({
     course_id: resolvedCourseId,
     difficulty_band: resolvedDifficultyBand,
@@ -1634,7 +1924,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
         generated_at: new Date().toISOString(),
         attempt_number: Math.max(1, Math.floor(params.attemptNumber || 1)),
         variant_no: resolvedVariantNo,
-        prompt_version: "ai_test_template_v3",
+        prompt_version: AI_TEST_PROMPT_VERSION,
         requirements_met: {
           include_concept_and_skill_tags: true,
           vary_from_previous_attempts: true,
@@ -1736,7 +2026,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
         generated_at: new Date().toISOString(),
         attempt_number: Math.max(1, Math.floor(params.attemptNumber || 1)),
         variant_no: resolvedVariantNo,
-        prompt_version: "ai_test_template_v3",
+        prompt_version: AI_TEST_PROMPT_VERSION,
         requirements_met: {
           include_concept_and_skill_tags: true,
           vary_from_previous_attempts: true,

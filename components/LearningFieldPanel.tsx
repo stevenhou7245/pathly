@@ -293,10 +293,10 @@ function getScoreBandFeedback(score: number) {
     return "Great Work!";
   }
   if (score >= 80) {
-    return "Good Job!";
+    return "Passed!";
   }
   if (score >= 60) {
-    return "Passed!";
+    return "Keep Reviewing";
   }
   return "Continue Learning~";
 }
@@ -316,7 +316,7 @@ function getScoreBandEmoji(score: number) {
     return "⭐";
   }
   if (score >= 60) {
-    return "🙂";
+    return "📝";
   }
   return "💪";
 }
@@ -417,7 +417,7 @@ export default function LearningFieldPanel({
   const [testResponses, setTestResponses] = useState<
     Record<string, { selectedOptionIndex: number | null; answerText: string }>
   >({});
-  const [requiredTestScore, setRequiredTestScore] = useState(60);
+  const [requiredTestScore, setRequiredTestScore] = useState(80);
   const [testFeedback, setTestFeedback] = useState("");
   const [testResult, setTestResult] = useState<AiTestReviewResult | null>(null);
   const [aiTestMode, setAiTestMode] = useState<AiTestMode>("taking");
@@ -783,7 +783,7 @@ export default function LearningFieldPanel({
     setTestQuestions([]);
     setActiveUserTestId("");
     setTestResponses({});
-    setRequiredTestScore(60);
+    setRequiredTestScore(80);
     setTestFeedback("");
     setTestResult(null);
     setAiTestMode("taking");
@@ -874,7 +874,7 @@ export default function LearningFieldPanel({
           setTestQuestions([]);
           setActiveUserTestId("");
           setTestResponses({});
-          setRequiredTestScore(60);
+          setRequiredTestScore(80);
           setTestFeedback("");
           setTestResult(null);
           setAiTestMode("taking");
@@ -916,7 +916,7 @@ export default function LearningFieldPanel({
     setTestQuestions([]);
     setActiveUserTestId("");
     setTestResponses({});
-    setRequiredTestScore(60);
+    setRequiredTestScore(80);
     setTestFeedback("");
     setTestResult(null);
     setAiTestMode("taking");
@@ -1523,7 +1523,7 @@ export default function LearningFieldPanel({
                         {node.passed_score ? (
                           <span
                             className={`absolute -right-2 -top-2 rounded-full border-2 border-[#1F2937] px-1.5 py-0.5 text-[10px] font-extrabold text-white ${
-                              node.passed_score >= 60 ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
+                              node.passed_score >= 80 ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
                             }`}
                           >
                             {node.passed_score}

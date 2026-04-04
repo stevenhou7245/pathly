@@ -32,6 +32,10 @@ export type CourseNodeStatus =
   | "passed";
 
 type GenericRecord = Record<string, unknown>;
+const AI_TEST_PASS_SCORE = 80;
+const AI_TEST_TOTAL_SCORE = 100;
+const AI_TEST_OBJECTIVE_SCORE = 5;
+const AI_TEST_SHORT_ANSWER_SCORE = 15;
 
 export type JourneyNode = {
   step_number: number;
@@ -2816,7 +2820,10 @@ async function loadAiTemplateQuestions(templateId: string): Promise<AiTemplateQu
       const questionOrder = Math.max(1, Math.floor(toNumberValue(row.question_order) || index + 1));
       const questionType = normalizeAiQuestionType(row.question_type);
       const questionText = toStringValue(row.question_text) || `Question ${questionOrder}`;
-      const normalizedScoreDefault = 20;
+      const normalizedScoreDefault =
+        questionType === "short_answer"
+          ? AI_TEST_SHORT_ANSWER_SCORE
+          : AI_TEST_OBJECTIVE_SCORE;
       const score = Math.max(1, Math.floor(toNumberValue(row.score) || normalizedScoreDefault));
       const correctAnswerText = toStringValue(row.correct_answer_text);
       const options = questionType === "multiple_choice" ? parseAiOptions(row.options_json) : [];
@@ -3143,7 +3150,7 @@ export async function prepareCourseTest(params: {
     template_id: templateId,
     status: "started",
     started_at: nowIso,
-    total_score: 100,
+    total_score: AI_TEST_TOTAL_SCORE,
     attempt_number: attemptNumber,
     completion_awarded: false,
   };
@@ -3257,7 +3264,7 @@ export async function prepareCourseTest(params: {
       })),
     },
     status: status === "passed" ? "passed" : "ready_for_test",
-    required_score: 60,
+    required_score: AI_TEST_PASS_SCORE,
     questions: questions.map((question) => ({
       id: question.id,
       question_order: question.question_order,
@@ -3511,7 +3518,7 @@ export async function submitCourseTest(params: {
     throw new Error("Unable to save AI test grading details.");
   }
 
-  const totalScore = 100;
+  const totalScore = AI_TEST_TOTAL_SCORE;
   const earnedScore = Math.max(
     0,
     Math.min(
@@ -3519,12 +3526,12 @@ export async function submitCourseTest(params: {
       Math.round(questionResults.reduce((sum, item) => sum + Math.max(0, item.earned_score), 0)),
     ),
   );
-  const passed = earnedScore >= 60;
+  const passed = earnedScore >= AI_TEST_PASS_SCORE;
   const passStatus: "passed" | "failed" = passed ? "passed" : "failed";
   const nowIso = new Date().toISOString();
   const feedbackSummary = passed
     ? `Great work. You scored ${earnedScore}/100 and passed this course.`
-    : `You scored ${earnedScore}/100. You need 60 to pass this course.`;
+    : `You scored ${earnedScore}/${AI_TEST_TOTAL_SCORE}. You need ${AI_TEST_PASS_SCORE} to pass this course.`;
 
   const resolvedJourneyPathId = await resolveJourneyPathIdForCourse({
     userId: params.userId,
@@ -3662,7 +3669,7 @@ export async function submitCourseTest(params: {
     score: earnedScore,
     pass_status: passStatus,
     passed,
-    required_score: 60,
+    required_score: AI_TEST_PASS_SCORE,
     course_completed: courseCompleted,
     attempt_count: Math.max(0, Math.floor(toNumberValue(latestProgressRow?.attempt_count))),
     last_test_score: earnedScore,
@@ -3985,7 +3992,7 @@ export async function getCourseTestAttemptDetail(params: {
   const passStatus: "passed" | "failed" =
     toStringValue(userTestRow.pass_status).toLowerCase() === "passed"
       ? "passed"
-      : earnedScore >= 60
+      : earnedScore >= AI_TEST_PASS_SCORE
       ? "passed"
       : "failed";
 
@@ -4010,12 +4017,12 @@ export async function getCourseTestAttemptDetail(params: {
     total_score: totalScore,
     earned_score: earnedScore,
     pass_status: passStatus,
-    required_score: 60,
+    required_score: AI_TEST_PASS_SCORE,
     feedback_summary:
       toNullableString(userTestRow.feedback_summary) ??
       (passStatus === "passed"
         ? `Great work. You scored ${earnedScore}/${totalScore} and passed this course.`
-        : `You scored ${earnedScore}/${totalScore}. You need 60 to pass this course.`),
+        : `You scored ${earnedScore}/${totalScore}. You need ${AI_TEST_PASS_SCORE} to pass this course.`),
     graded_at: toNullableString(userTestRow.graded_at),
     submitted_at: toNullableString(userTestRow.submitted_at),
     question_results: questionResults,
