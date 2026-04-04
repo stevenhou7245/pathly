@@ -1,4 +1,9 @@
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import {
+  extractConceptTags,
+  formatConceptLabel,
+  normalizeConceptTag as normalizeStoredConceptTag,
+} from "@/lib/conceptTags";
 
 type WeaknessEvaluationInput = {
   isCorrect: boolean;
@@ -12,23 +17,8 @@ function toStringValue(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
-function normalizeWhitespace(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 export function normalizeConceptTag(value: unknown) {
-  const raw = toStringValue(value).toLowerCase();
-  const cleaned = normalizeWhitespace(
-    raw
-      .replace(/[`~!@#$%^&*()+=\[\]{}\\|;:'",.<>/?]/g, " ")
-      .replace(/\s+/g, " "),
-  );
-  if (!cleaned) {
-    return "";
-  }
-  const limited = cleaned.slice(0, 120);
-  const words = limited.split(" ").filter(Boolean).slice(0, 8);
-  return words.join(" ").slice(0, 80);
+  return normalizeStoredConceptTag(value);
 }
 
 function fallbackConceptTag(params: {
@@ -36,16 +26,14 @@ function fallbackConceptTag(params: {
   explanation?: string | null;
   questionIndex?: number | null;
 }) {
-  const questionSource = normalizeConceptTag(params.questionText ?? "");
-  if (questionSource) {
-    return questionSource;
+  const extracted = extractConceptTags({
+    texts: [params.questionText ?? "", params.explanation ?? ""],
+    maxTags: 1,
+  });
+  if (extracted.length > 0) {
+    return extracted[0];
   }
-  const explanationSource = normalizeConceptTag(params.explanation ?? "");
-  if (explanationSource) {
-    return explanationSource;
-  }
-  const fallbackIndex = Math.max(1, Math.floor(Number(params.questionIndex ?? 0) || 1));
-  return `question ${fallbackIndex}`;
+  return "foundational_skills";
 }
 
 function deriveConceptTags(params: {
@@ -55,10 +43,18 @@ function deriveConceptTags(params: {
   questionIndex?: number | null;
 }) {
   const explicit = Array.isArray(params.conceptTags)
-    ? params.conceptTags.map((tag) => normalizeConceptTag(tag)).filter(Boolean)
+    ? params.conceptTags
+        .map((tag) => normalizeConceptTag(tag))
+        .filter(Boolean)
     : [];
-  if (explicit.length > 0) {
-    return [...new Set(explicit)];
+  const extractedFromText = extractConceptTags({
+    texts: [params.questionText ?? "", params.explanation ?? ""],
+    maxTags: 3,
+  });
+
+  const combined = Array.from(new Set([...explicit, ...extractedFromText]));
+  if (combined.length > 0) {
+    return combined;
   }
   return [fallbackConceptTag(params)];
 }
@@ -75,6 +71,17 @@ export async function incrementWeaknessProfile(params: {
   if (!normalizedConceptTag) {
     return;
   }
+  const displayLabel = formatConceptLabel(normalizedConceptTag);
+  console.info("[concept] normalized_tag", {
+    source: params.source,
+    input: params.conceptTag,
+    normalized_tag: normalizedConceptTag,
+  });
+  console.info("[concept] display_label", {
+    source: params.source,
+    concept_tag: normalizedConceptTag,
+    display_label: displayLabel,
+  });
 
   const incrementBy = Math.max(1, Math.floor(Number(params.incrementBy ?? 1) || 1));
   const nowIso = new Date().toISOString();
@@ -164,6 +171,13 @@ export async function trackWeaknessProfilesForIncorrectAnswers(params: {
       questionText: evaluation.questionText ?? "",
       explanation: evaluation.explanation ?? "",
       questionIndex: evaluation.questionIndex ?? null,
+    });
+    console.info("[concept] extracted_tags", {
+      source: params.source,
+      user_id: params.userId,
+      course_id: params.courseId,
+      question_index: evaluation.questionIndex ?? null,
+      extracted_tags: conceptTags,
     });
 
     for (const conceptTag of conceptTags) {

@@ -23,6 +23,7 @@ import { loadUserResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { resolveAiTestTemplateForAttempt } from "@/lib/ai/tests";
 import { analyzeWeaknessAndPrepareReview, getPendingReviewPopup } from "@/lib/ai/review";
 import type { DifficultyBand } from "@/lib/ai/common";
+import { extractConceptTags, formatConceptLabel, normalizeConceptTag } from "@/lib/conceptTags";
 
 export type CourseNodeStatus =
   | "locked"
@@ -428,12 +429,22 @@ async function loadTopWeaknessConcepts(params: {
     const seen = new Set<string>();
 
     for (const row of rows) {
-      const conceptTag = toStringValue(row.concept_tag).trim();
+      const conceptTag = normalizeConceptTag(toStringValue(row.concept_tag).trim());
       if (!conceptTag || seen.has(conceptTag)) {
         continue;
       }
       seen.add(conceptTag);
       concepts.push(conceptTag);
+      console.info("[concept] normalized_tag", {
+        source: "course_weakness_lookup",
+        input: toStringValue(row.concept_tag).trim(),
+        normalized_tag: conceptTag,
+      });
+      console.info("[concept] display_label", {
+        source: "course_weakness_lookup",
+        concept_tag: conceptTag,
+        display_label: formatConceptLabel(conceptTag),
+      });
       if (concepts.length >= 3) {
         break;
       }
@@ -2768,24 +2779,38 @@ function parseAiAcceptableAnswers(value: unknown, fallback: string) {
   return Array.from(new Set(answers));
 }
 
-function parseAiTagList(value: unknown) {
+function parseAiTagList(value: unknown, fallbackTexts: string[] = []) {
   const parsed = parseJsonValue(value);
-  if (Array.isArray(parsed)) {
-    return Array.from(
-      new Set(parsed.map((item) => toStringValue(item).trim()).filter(Boolean)),
-    );
-  }
-  if (typeof parsed === "string") {
-    return Array.from(
+  const normalized = (items: string[]) =>
+    Array.from(
       new Set(
-        parsed
-          .split(/\r?\n|,/)
-          .map((item) => item.trim())
+        items
+          .map((item) => normalizeConceptTag(item))
           .filter(Boolean),
       ),
     );
+  if (Array.isArray(parsed)) {
+    const fromArray = normalized(parsed.map((item) => toStringValue(item).trim()));
+    if (fromArray.length > 0) {
+      return fromArray;
+    }
   }
-  return [] as string[];
+  if (typeof parsed === "string") {
+    const fromString = normalized(
+      parsed
+        .split(/\r?\n|,/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    if (fromString.length > 0) {
+      return fromString;
+    }
+  }
+  const extracted = extractConceptTags({
+    texts: fallbackTexts,
+    maxTags: 3,
+  });
+  return extracted;
 }
 
 function normalizeQuestionResultStatus(value: unknown): QuestionResultStatus | null {
@@ -2827,8 +2852,16 @@ async function loadAiTemplateQuestions(templateId: string): Promise<AiTemplateQu
       const score = Math.max(1, Math.floor(toNumberValue(row.score) || normalizedScoreDefault));
       const correctAnswerText = toStringValue(row.correct_answer_text);
       const options = questionType === "multiple_choice" ? parseAiOptions(row.options_json) : [];
-      const parsedSkillTags = parseAiTagList(row.skill_tags);
-      const parsedConceptTags = parseAiTagList(row.concept_tags);
+      const parsedConceptTags = parseAiTagList(row.concept_tags, [
+        questionText,
+        toStringValue(row.explanation),
+      ]);
+      const parsedSkillTags = parseAiTagList(row.skill_tags, parsedConceptTags);
+      console.info("[concept] extracted_tags", {
+        source: "ai_template_question_load",
+        question_order: questionOrder,
+        extracted_tags: parsedConceptTags,
+      });
 
       return {
         id: toStringValue(row.id),

@@ -7,6 +7,7 @@ import {
   type DifficultyBand,
 } from "@/lib/ai/common";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
+import { extractConceptTags, formatConceptLabel, normalizeConceptTag } from "@/lib/conceptTags";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type GenericRecord = Record<string, unknown>;
@@ -254,111 +255,52 @@ type FallbackContentContext = {
   courseTitle: string;
   courseDescription?: string | null;
   selectedResourceTitle?: string | null;
+  selectedResourceType?: string | null;
   selectedResourceSummary?: string | null;
   resourceMetadata?: AiResourceMetadata[];
 };
-
-const GENERIC_WORDS = new Set([
-  "about",
-  "above",
-  "after",
-  "again",
-  "against",
-  "basic",
-  "between",
-  "build",
-  "course",
-  "description",
-  "during",
-  "focus",
-  "from",
-  "into",
-  "lesson",
-  "level",
-  "more",
-  "practice",
-  "question",
-  "resource",
-  "review",
-  "should",
-  "that",
-  "their",
-  "there",
-  "these",
-  "this",
-  "through",
-  "using",
-  "with",
-]);
 
 function compactWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function toSlug(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+function buildConceptPool(params: FallbackContentContext) {
+  const extracted = extractConceptTags({
+    texts: [
+      params.courseTitle,
+      params.courseDescription ?? "",
+      params.selectedResourceTitle ?? "",
+      params.selectedResourceType ?? "",
+      params.selectedResourceSummary ?? "",
+      ...(params.resourceMetadata ?? []).flatMap((resource) => [
+        resource.title,
+        resource.resource_type,
+        resource.summary ?? "",
+      ]),
+    ],
+    maxTags: 16,
+  });
+  if (extracted.length > 0) {
+    return extracted;
+  }
+  return ["debugging", "implementation_logic", "data_validation", "problem_solving"];
 }
 
-function extractFocusTerms(params: FallbackContentContext) {
-  const corpus = [
-    params.courseTitle,
-    params.courseDescription ?? "",
-    params.selectedResourceTitle ?? "",
-    params.selectedResourceSummary ?? "",
-    ...(params.resourceMetadata ?? []).flatMap((resource) => [
-      resource.title,
-      resource.resource_type,
-      resource.summary ?? "",
-    ]),
-  ]
-    .map((item) => compactWhitespace(toStringValue(item)))
-    .filter(Boolean)
-    .join(" ");
-
-  const tokens = corpus
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 3 && !GENERIC_WORDS.has(item));
-
-  const deduped = Array.from(new Set(tokens));
-  if (deduped.length > 0) {
-    return deduped.slice(0, 12);
+function pickConceptTag(tags: string[], index: number) {
+  if (tags.length === 0) {
+    return "problem_solving";
   }
-
-  const titleTokens = params.courseTitle
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 3);
-  const titleDeduped = Array.from(new Set(titleTokens));
-  if (titleDeduped.length > 0) {
-    return titleDeduped.slice(0, 8);
-  }
-
-  return ["analysis", "debugging", "implementation", "validation"];
-}
-
-function pickFocusTerm(terms: string[], index: number) {
-  if (terms.length === 0) {
-    return "implementation";
-  }
-  return terms[index % terms.length];
+  return tags[index % tags.length];
 }
 
 function buildMeaningfulMultipleChoiceOptions(params: {
-  courseTitle: string;
-  focusTerm: string;
+  conceptLabel: string;
 }) {
   return [
-    `Define constraints for ${params.focusTerm}, implement step by step, then validate output quality.`,
-    `Skip validation of ${params.focusTerm} and rely on intuition to save time.`,
-    `Prioritize tool popularity over task fit for ${params.courseTitle}.`,
-    `Optimize performance before checking whether ${params.focusTerm} logic is correct.`,
+    `Analyze the ${params.conceptLabel} requirement, implement the core logic, and verify output with edge cases.`,
+    `Apply ${params.conceptLabel} without checking assumptions or validating intermediate states.`,
+    `Select tools by popularity instead of fitness for ${params.conceptLabel} tasks.`,
+    `Optimize runtime before confirming ${params.conceptLabel} correctness and failure handling.`,
   ];
 }
 
@@ -378,10 +320,11 @@ function getFallbackTemplate(params: {
 }) {
   const totalQuestions = TOTAL_QUESTION_COUNT;
   const questions: Array<z.infer<typeof generatedQuestionSchema>> = [];
-  const focusTerms = extractFocusTerms({
+  const conceptPool = buildConceptPool({
     courseTitle: params.courseTitle,
     courseDescription: params.courseDescription ?? null,
     selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceType: params.selectedResourceType ?? null,
     selectedResourceSummary: params.selectedResourceSummary ?? null,
     resourceMetadata: params.resourceMetadata ?? [],
   });
@@ -394,50 +337,45 @@ function getFallbackTemplate(params: {
           ? "fill_blank"
           : "multiple_choice"
         : "short_answer";
-    const focusTerm = pickFocusTerm(focusTerms, index);
+    const conceptTag = pickConceptTag(conceptPool, index);
+    const conceptLabel = formatConceptLabel(conceptTag);
+    const options = buildMeaningfulMultipleChoiceOptions({
+      conceptLabel,
+    });
 
     questions.push({
       question_id: `q${questionNo}_v${Math.max(1, Math.floor(params.attemptNumber || 1))}`,
       question_type: questionType,
       question_text:
         questionType === "short_answer"
-          ? `In ${params.courseTitle}, a learner keeps making mistakes on ${focusTerm}. Provide a practical fix plan with root-cause analysis, corrected logic or pseudocode, and concrete test cases.`
+          ? `Case ${questionNo}: In ${params.courseTitle}, a learner keeps making mistakes on ${conceptLabel}. Provide a practical fix plan with root-cause analysis, corrected logic or pseudocode, and concrete test cases.`
           : questionType === "fill_blank"
-          ? `For ${params.courseTitle}, fill in the blank: before finalizing a solution involving ${focusTerm}, always ____ against realistic edge cases.`
-          : `In ${params.courseTitle}, which approach best applies ${focusTerm} in a real workflow?`,
-      options:
-        questionType === "multiple_choice"
-          ? buildMeaningfulMultipleChoiceOptions({
-              courseTitle: params.courseTitle,
-              focusTerm,
-            })
-          : [],
+          ? `Case ${questionNo}: For ${params.courseTitle}, fill in the blank: before finalizing a solution involving ${conceptLabel}, always ____ against realistic edge cases.`
+          : `Case ${questionNo}: In ${params.courseTitle}, which approach best applies ${conceptLabel} in a real workflow?`,
+      options: questionType === "multiple_choice" ? options : [],
       correct_answer:
         questionType === "multiple_choice"
-          ? buildMeaningfulMultipleChoiceOptions({
-              courseTitle: params.courseTitle,
-              focusTerm,
-            })[0]
+          ? options[0]
           : questionType === "fill_blank"
           ? "validate assumptions"
           : questionType === "short_answer"
-          ? `Identify the ${focusTerm} failure mode, implement corrected logic, and verify with targeted tests.`
+          ? `Identify the ${conceptLabel} failure mode, implement corrected logic, and verify with targeted tests.`
           : "validate assumptions",
       acceptable_answers:
         questionType === "short_answer" || questionType === "fill_blank"
           ? [
               "validate assumptions",
               "verify with edge cases",
-              `correct ${focusTerm} logic`,
+              `correct ${conceptLabel} logic`,
             ]
           : [],
       score:
         questionType === "short_answer"
           ? SHORT_ANSWER_QUESTION_SCORE
           : OBJECTIVE_QUESTION_SCORE,
-      explanation: `Focus on practical decision quality for ${focusTerm} in ${params.courseTitle}.`,
-      skill_tags: [`${toSlug(focusTerm) || "core"}-skill`],
-      concept_tags: [`${toSlug(focusTerm) || "core"}-concept`],
+      explanation: `Focus on practical decision quality for ${conceptLabel} in ${params.courseTitle}.`,
+      skill_tags: [`${conceptTag}_application`],
+      concept_tags: [conceptTag],
     });
   }
 
@@ -467,6 +405,7 @@ function createDeterministicFallbackQuestion(params: {
   courseTitle: string;
   courseDescription?: string | null;
   selectedResourceTitle?: string | null;
+  selectedResourceType?: string | null;
   selectedResourceSummary?: string | null;
   resourceMetadata?: AiResourceMetadata[];
   questionOrder: number;
@@ -474,30 +413,31 @@ function createDeterministicFallbackQuestion(params: {
   difficultyBand: DifficultyBand;
   variantNo: number;
 }) {
-  const focusTerms = extractFocusTerms({
+  const conceptPool = buildConceptPool({
     courseTitle: params.courseTitle,
     courseDescription: params.courseDescription ?? null,
     selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceType: params.selectedResourceType ?? null,
     selectedResourceSummary: params.selectedResourceSummary ?? null,
     resourceMetadata: params.resourceMetadata ?? [],
   });
-  const focusTerm = pickFocusTerm(focusTerms, params.questionOrder - 1);
-  const baseSkill = `${toSlug(focusTerm) || "core"}-skill`;
-  const baseConcept = `${toSlug(focusTerm) || "core"}-concept`;
+  const conceptTag = pickConceptTag(conceptPool, params.questionOrder - 1);
+  const conceptLabel = formatConceptLabel(conceptTag);
+  const baseSkill = `${conceptTag}_application`;
+  const baseConcept = conceptTag;
   if (params.type === "multiple_choice") {
     const options = buildMeaningfulMultipleChoiceOptions({
-      courseTitle: params.courseTitle,
-      focusTerm,
+      conceptLabel,
     });
     return {
       question_order: params.questionOrder,
       question_type: "multiple_choice" as const,
-      question_text: `In ${params.courseTitle}, which workflow best applies ${focusTerm} under realistic constraints?`,
+      question_text: `Case ${params.questionOrder}: In ${params.courseTitle}, which workflow best applies ${conceptLabel} under realistic constraints?`,
       options,
       correct_answer_text: options[0],
       acceptable_answers: [],
       score: OBJECTIVE_QUESTION_SCORE,
-      explanation: `Evaluate each option by implementation quality and verification depth for ${focusTerm}.`,
+      explanation: `Evaluate each option by implementation quality and verification depth for ${conceptLabel}.`,
       external_question_key: `fallback_mc_${params.variantNo}_${params.questionOrder}`,
       skill_tags: [baseSkill],
       concept_tags: [baseConcept],
@@ -507,7 +447,7 @@ function createDeterministicFallbackQuestion(params: {
     return {
       question_order: params.questionOrder,
       question_type: "fill_blank" as const,
-      question_text: `Fill in the blank for ${params.courseTitle}: when handling ${focusTerm}, always ____ results against representative edge cases.`,
+      question_text: `Case ${params.questionOrder}: Fill in the blank for ${params.courseTitle}: when handling ${conceptLabel}, always ____ results against representative edge cases.`,
       options: [],
       correct_answer_text: "validate",
       acceptable_answers: ["validate", "verify"],
@@ -521,9 +461,9 @@ function createDeterministicFallbackQuestion(params: {
   return {
     question_order: params.questionOrder,
     question_type: "short_answer" as const,
-    question_text: `A learner in ${params.courseTitle} fails tasks related to ${focusTerm}. Provide a concrete remediation: identify the root cause, write corrected core logic/pseudocode, and define how to test the fix.`,
+    question_text: `Case ${params.questionOrder}: A learner in ${params.courseTitle} fails tasks related to ${conceptLabel}. Provide a concrete remediation: identify the root cause, write corrected core logic/pseudocode, and define how to test the fix.`,
     options: [],
-    correct_answer_text: `Explain corrected ${focusTerm} logic with targeted validation.`,
+    correct_answer_text: `Explain corrected ${conceptLabel} logic with targeted validation.`,
     acceptable_answers: [
       "root cause",
       "corrected logic",
@@ -537,20 +477,63 @@ function createDeterministicFallbackQuestion(params: {
   } satisfies GeneratedAiQuestion;
 }
 
+function deriveConceptTagsForQuestion(params: {
+  explicitConceptTags: unknown[];
+  questionText: string;
+  explanation: string;
+  courseTitle: string;
+  courseDescription?: string | null;
+  selectedResourceTitle?: string | null;
+  selectedResourceSummary?: string | null;
+  resourceMetadata?: AiResourceMetadata[];
+  fallbackConceptTag: string;
+}) {
+  const explicit = params.explicitConceptTags
+    .map((item) => normalizeConceptTag(normalizeUnknownItemToString(item)))
+    .filter(Boolean);
+  if (explicit.length > 0) {
+    return Array.from(new Set(explicit));
+  }
+
+  const extracted = extractConceptTags({
+    texts: [
+      params.questionText,
+      params.explanation,
+      params.courseTitle,
+      params.courseDescription ?? "",
+      params.selectedResourceTitle ?? "",
+      params.selectedResourceSummary ?? "",
+      ...(params.resourceMetadata ?? []).flatMap((resource) => [
+        resource.title,
+        resource.resource_type,
+        resource.summary ?? "",
+      ]),
+    ],
+    maxTags: 3,
+  });
+  if (extracted.length > 0) {
+    return extracted;
+  }
+
+  return [params.fallbackConceptTag];
+}
+
 function normalizeGeneratedQuestions(params: {
   rawQuestions: Array<z.infer<typeof generatedQuestionSchema>>;
   difficultyBand: DifficultyBand;
   courseTitle: string;
   courseDescription?: string | null;
   selectedResourceTitle?: string | null;
+  selectedResourceType?: string | null;
   selectedResourceSummary?: string | null;
   resourceMetadata?: AiResourceMetadata[];
 }) {
   const normalized: GeneratedAiQuestion[] = [];
-  const focusTerms = extractFocusTerms({
+  const conceptPool = buildConceptPool({
     courseTitle: params.courseTitle,
     courseDescription: params.courseDescription ?? null,
     selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceType: params.selectedResourceType ?? null,
     selectedResourceSummary: params.selectedResourceSummary ?? null,
     resourceMetadata: params.resourceMetadata ?? [],
   });
@@ -584,10 +567,10 @@ function normalizeGeneratedQuestions(params: {
     });
     let normalizedOptions = questionType === "multiple_choice" ? options : [];
     if (questionType === "multiple_choice") {
-      const focusTerm = pickFocusTerm(focusTerms, index);
+      const fallbackConceptTag = pickConceptTag(conceptPool, index);
+      const fallbackConceptLabel = formatConceptLabel(fallbackConceptTag);
       const fallbackOptions = buildMeaningfulMultipleChoiceOptions({
-        courseTitle: params.courseTitle,
-        focusTerm,
+        conceptLabel: fallbackConceptLabel,
       });
       if (normalizedOptions.length === 0) {
         normalizedOptions = fallbackOptions;
@@ -601,14 +584,15 @@ function normalizeGeneratedQuestions(params: {
         normalizedOptions = normalizedOptions.slice(0, 4);
       }
     }
-    const focusTerm = pickFocusTerm(focusTerms, index);
+    const fallbackConceptTag = pickConceptTag(conceptPool, index);
+    const fallbackConceptLabel = formatConceptLabel(fallbackConceptTag);
     const correctAnswerText = normalizeCorrectAnswerText({
       questionType,
       rawCorrectAnswer: question.correct_answer,
       fallback: firstNonEmpty([
         questionType === "multiple_choice" ? normalizedOptions[0] : "",
         questionType === "short_answer" || questionType === "fill_blank"
-          ? `apply ${focusTerm} with explicit validation`
+          ? `apply ${fallbackConceptLabel} with explicit validation`
           : "",
         `See explanation for ${params.courseTitle}.`,
       ]),
@@ -698,13 +682,28 @@ function normalizeGeneratedQuestions(params: {
       explanation,
       external_question_key: toStringValue(question.question_id).trim() || null,
       skill_tags:
-        fullSkillTags.length > 0
-          ? fullSkillTags
-          : [`${toSlug(focusTerm) || "core"}-skill`],
-      concept_tags:
-        fullConceptTags.length > 0
-          ? fullConceptTags
-          : [`${toSlug(focusTerm) || "core"}-concept`],
+        fullSkillTags
+          .map((item) => normalizeConceptTag(item))
+          .filter(Boolean).length > 0
+          ? Array.from(
+              new Set(
+                fullSkillTags
+                  .map((item) => normalizeConceptTag(item))
+                  .filter(Boolean),
+              ),
+            )
+          : [`${fallbackConceptTag}_application`],
+      concept_tags: deriveConceptTagsForQuestion({
+        explicitConceptTags: fullConceptTags,
+        questionText,
+        explanation,
+        courseTitle: params.courseTitle,
+        courseDescription: params.courseDescription ?? null,
+        selectedResourceTitle: params.selectedResourceTitle ?? null,
+        selectedResourceSummary: params.selectedResourceSummary ?? null,
+        resourceMetadata: params.resourceMetadata ?? [],
+        fallbackConceptTag,
+      }),
     } satisfies GeneratedAiQuestion);
   });
 
@@ -723,6 +722,7 @@ function enforceQuestionComposition(params: {
   courseTitle: string;
   courseDescription?: string | null;
   selectedResourceTitle?: string | null;
+  selectedResourceType?: string | null;
   selectedResourceSummary?: string | null;
   resourceMetadata?: AiResourceMetadata[];
   difficultyBand: DifficultyBand;
@@ -747,6 +747,7 @@ function enforceQuestionComposition(params: {
       courseTitle: params.courseTitle,
       courseDescription: params.courseDescription ?? null,
       selectedResourceTitle: params.selectedResourceTitle ?? null,
+      selectedResourceType: params.selectedResourceType ?? null,
       selectedResourceSummary: params.selectedResourceSummary ?? null,
       resourceMetadata: params.resourceMetadata ?? [],
       questionOrder: index,
@@ -764,6 +765,7 @@ function enforceQuestionComposition(params: {
       courseTitle: params.courseTitle,
       courseDescription: params.courseDescription ?? null,
       selectedResourceTitle: params.selectedResourceTitle ?? null,
+      selectedResourceType: params.selectedResourceType ?? null,
       selectedResourceSummary: params.selectedResourceSummary ?? null,
       resourceMetadata: params.resourceMetadata ?? [],
       questionOrder: index,
@@ -822,6 +824,13 @@ function enforceQuestionComposition(params: {
       course_title: params.courseTitle,
       variant_no: params.variantNo,
     });
+    console.warn("[pipeline] fallback_used", {
+      pipeline: "ai_test_template",
+      source: "composition_fallback",
+      fallback_question_count: fallbackQuestions.length,
+      total_questions: finalQuestions.length,
+      variant_no: params.variantNo,
+    });
   }
   console.info("[ai_test] validation_summary", {
     expected_total_questions: TOTAL_QUESTION_COUNT,
@@ -855,7 +864,7 @@ async function hasReusableTemplateComposition(params: {
 }) {
   const { data: questionRows, error: questionRowsError } = await supabaseAdmin
     .from("ai_test_template_questions")
-    .select("question_type, score")
+    .select("question_type, score, question_text, options_json")
     .eq("template_id", params.templateId);
 
   if (questionRowsError) {
@@ -865,6 +874,8 @@ async function hasReusableTemplateComposition(params: {
   const rows = (questionRows ?? []) as Array<{
     question_type?: string | null;
     score?: number | null;
+    question_text?: string | null;
+    options_json?: unknown;
   }>;
 
   if (rows.length <= 0) {
@@ -903,6 +914,28 @@ async function hasReusableTemplateComposition(params: {
   const hasShortAnswerScores = rows
     .filter((row) => row.question_type === "short_answer")
     .every((row) => Math.floor(toNumberValue(row.score)) === SHORT_ANSWER_QUESTION_SCORE);
+  const normalizedQuestionTexts = rows
+    .map((row) => compactWhitespace(toStringValue(row.question_text).toLowerCase()))
+    .filter(Boolean);
+  const uniqueQuestionTextCount = new Set(normalizedQuestionTexts).size;
+  const hasPlaceholderQuestionText = normalizedQuestionTexts.some(
+    (text) =>
+      /\bconcept\s*\d+\b/i.test(text) ||
+      /\bquestion\s*\d+\b/i.test(text) ||
+      /\bwhich option best matches\b/i.test(text),
+  );
+  const hasPlaceholderOptions = rows.some((row) => {
+    if (!Array.isArray(row.options_json)) {
+      return false;
+    }
+    const options = (row.options_json as unknown[])
+      .map((option) => compactWhitespace(toStringValue(option)))
+      .filter(Boolean);
+    if (options.length === 0) {
+      return false;
+    }
+    return options.every((option) => /^option\s*[a-d]$/i.test(option));
+  });
 
   if (
     rows.length !== TOTAL_QUESTION_COUNT ||
@@ -911,7 +944,10 @@ async function hasReusableTemplateComposition(params: {
     totalScore !== 100 ||
     !hasOnlyAllowedTypes ||
     !hasObjectiveScores ||
-    !hasShortAnswerScores
+    !hasShortAnswerScores ||
+    uniqueQuestionTextCount < TOTAL_QUESTION_COUNT ||
+    hasPlaceholderQuestionText ||
+    hasPlaceholderOptions
   ) {
     console.warn("[ai_test_template] reusable_template_invalid_composition", {
       template_id: params.templateId,
@@ -923,6 +959,9 @@ async function hasReusableTemplateComposition(params: {
       has_only_allowed_types: hasOnlyAllowedTypes,
       has_objective_scores: hasObjectiveScores,
       has_short_answer_scores: hasShortAnswerScores,
+      unique_question_text_count: uniqueQuestionTextCount,
+      has_placeholder_question_text: hasPlaceholderQuestionText,
+      has_placeholder_options: hasPlaceholderOptions,
     });
     return false;
   }
@@ -1084,13 +1123,13 @@ async function insertTemplateRow(params: {
     based_on_resource_option_id: params.basedOnResourceOptionId ?? null,
   });
 
-  // 1️⃣ 查询是否已有模板
   const { data: existingTemplates, error: existingError } = await supabaseAdmin
     .from("ai_test_templates")
-    .select("id")
+    .select("id, created_at")
     .eq("course_id", params.courseId)
     .eq("version", params.variantNo)
-    .limit(1);
+    .order("created_at", { ascending: false })
+    .limit(10);
 
   if (existingError) {
     console.error("[ai_test_template] template_check_failed", {
@@ -1101,17 +1140,33 @@ async function insertTemplateRow(params: {
     });
   }
 
-  if (existingTemplates?.length && existingTemplates[0]?.id) {
-    const existingId = existingTemplates[0].id;
+  for (const row of (existingTemplates ?? []) as GenericRecord[]) {
+    const existingId = toStringValue(row.id);
+    if (!existingId) {
+      continue;
+    }
+    const reusable = await hasReusableTemplateComposition({
+      templateId: existingId,
+      courseId: params.courseId,
+    });
+    if (!reusable) {
+      console.warn("[ai_test_template] template_existing_invalid", {
+        course_id: params.courseId,
+        variant_no: params.variantNo,
+        template_id: existingId,
+        reason: "invalid_composition_or_placeholder_content",
+      });
+      continue;
+    }
     console.info("[ai_test_template] template_already_exists", {
       course_id: params.courseId,
       variant_no: params.variantNo,
       template_id: existingId,
+      reused: true,
     });
-    return existingId; // 直接返回现有模板 ID
+    return existingId;
   }
 
-  // 2️⃣ 准备插入 payload
   const insertPayload: Record<string, unknown> = {
     course_id: params.courseId,
     version: params.variantNo,
@@ -1666,6 +1721,9 @@ export async function resolveAiTestTemplateForAttempt(params: {
       "acceptable_answers must always be an array, never null.",
       "skill_tags must always be an array, never null.",
       "concept_tags must always be an array, never null.",
+      "Each concept_tags item must be a specific learning concept in lowercase underscore format (e.g., linear_algebra, matrix_multiplication, gradient_descent, missing_data).",
+      "Do not output vague or generic tags such as machine, course, lesson, concept, or tags ending with _concept.",
+      "Do not output numbered placeholders such as concept_1 or mathematics_for_machine_learning_concept_8.",
       "resource_context must always be an object, never a string.",
       "resource_context object must include exactly these keys:",
       "selected_resource_option_id, selected_resource_title, selected_resource_type, selected_resource_provider, selected_resource_url, selected_resource_summary.",
@@ -1763,6 +1821,12 @@ export async function resolveAiTestTemplateForAttempt(params: {
       attempt_number: params.attemptNumber,
       pass_threshold: PASS_SCORE_THRESHOLD,
     });
+    console.warn("[pipeline] fallback_used", {
+      pipeline: "ai_test_template",
+      source: "provider_fallback",
+      course_id: params.courseId,
+      attempt_number: params.attemptNumber,
+    });
   }
 
   const parsedKeys = extractParsedKeys(debug.parsed_output_json);
@@ -1825,6 +1889,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
     courseTitle: resolvedCourseTitle,
     courseDescription: params.courseDescription ?? null,
     selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceType: params.selectedResourceType ?? null,
     selectedResourceSummary: params.selectedResourceSummary ?? null,
     resourceMetadata: params.resourceMetadata ?? [],
   });
@@ -1837,6 +1902,7 @@ export async function resolveAiTestTemplateForAttempt(params: {
     courseTitle: resolvedCourseTitle,
     courseDescription: params.courseDescription ?? null,
     selectedResourceTitle: params.selectedResourceTitle ?? null,
+    selectedResourceType: params.selectedResourceType ?? null,
     selectedResourceSummary: params.selectedResourceSummary ?? null,
     resourceMetadata: params.resourceMetadata ?? [],
     difficultyBand: resolvedDifficultyBand,
@@ -1857,6 +1923,10 @@ export async function resolveAiTestTemplateForAttempt(params: {
       type: question.question_type,
       score: question.score,
     })),
+  });
+  console.info("[ai_test] question_count", {
+    course_id: resolvedCourseId,
+    question_count: finalQuestions.length,
   });
   const sourceHash = sha256Hash({
     course_id: resolvedCourseId,
@@ -1991,17 +2061,20 @@ export async function resolveAiTestTemplateForAttempt(params: {
       if (!candidateId) {
         continue;
       }
-      const { count: questionCount, error: questionCountError } = await supabaseAdmin
-        .from("ai_test_template_questions")
-        .select("id", { count: "exact", head: true })
-        .eq("template_id", candidateId);
-      if (questionCountError) {
+      let isReusable = false;
+      try {
+        isReusable = await hasReusableTemplateComposition({
+          templateId: candidateId,
+          courseId: resolvedCourseId,
+        });
+      } catch {
+        isReusable = false;
+      }
+      if (!isReusable) {
         continue;
       }
-      if (Number(questionCount ?? 0) > 0) {
-        fallbackTemplateId = candidateId;
-        break;
-      }
+      fallbackTemplateId = candidateId;
+      break;
     }
     if (!fallbackTemplateId) {
       throw new Error(

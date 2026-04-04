@@ -7,6 +7,7 @@ import {
   formatCourseDifficultyLabel,
   type CourseDifficultyLevel,
 } from "@/lib/courseDifficulty";
+import { formatConceptLabel } from "@/lib/conceptTags";
 import { playSound } from "@/lib/sound";
 
 type LearningFieldPanelProps = {
@@ -1680,17 +1681,24 @@ export default function LearningFieldPanel({
                   </div>
                   <div className="md:text-right">
                     {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          router.push(
-                            `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(courseDetails.weakness_concepts?.[0] ?? "")}`,
-                          )
-                        }
-                        className="text-lg font-bold text-red-500 transition hover:text-red-600 hover:underline"
-                      >
-                        Weakness: {courseDetails.weakness_concepts[0]}
-                      </button>
+                      <div className="flex flex-wrap items-center justify-end gap-2 text-lg font-bold text-red-500">
+                        <span>Weakness:</span>
+                        {courseDetails.weakness_concepts.map((concept, index) => (
+                          <button
+                            key={concept}
+                            type="button"
+                            onClick={() =>
+                              router.push(
+                                `/dashboard/weakness/${encodeURIComponent(courseDetails.id)}/${encodeURIComponent(concept)}`,
+                              )
+                            }
+                            className="transition hover:text-red-600 hover:underline"
+                          >
+                            {formatConceptLabel(concept)}
+                            {index < (courseDetails.weakness_concepts?.length ?? 0) - 1 ? "," : ""}
+                          </button>
+                        ))}
+                      </div>
                     ) : (
                       <p className="text-lg font-bold text-red-500">Weakness: none</p>
                     )}

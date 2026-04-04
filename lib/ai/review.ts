@@ -7,6 +7,7 @@ import {
   toStringValue,
 } from "@/lib/ai/common";
 import { generateStructuredJson, type AiProvenance } from "@/lib/ai/provider";
+import { formatConceptLabel } from "@/lib/conceptTags";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   incrementWeaknessProfile,
@@ -73,12 +74,19 @@ function computeWeaknessSignals(
     }
     const conceptTags =
       Array.isArray(result.concept_tags) && result.concept_tags.length > 0
-        ? result.concept_tags.map((tag) => toStringValue(tag).trim()).filter(Boolean)
-        : ["general-foundation"];
+        ? result.concept_tags
+            .map((tag) => normalizeConceptTag(tag))
+            .filter(Boolean)
+        : ["foundational_skills"];
     const skillTags =
       Array.isArray(result.skill_tags) && result.skill_tags.length > 0
         ? result.skill_tags.map((tag) => toStringValue(tag).trim()).filter(Boolean)
         : [""];
+    console.info("[concept] extracted_tags", {
+      source: "review_compute_weakness",
+      question_id: result.question_id,
+      extracted_tags: conceptTags,
+    });
 
     conceptTags.forEach((conceptTag) => {
       const uniqueSkillTags = skillTags.length > 0 ? skillTags : [""];
@@ -141,7 +149,7 @@ function buildFallbackReviewQuestion(input: {
   conceptTag: string;
   skillTag: string | null;
 }) {
-  const concept = input.conceptTag.replace(/[-_]/g, " ");
+  const concept = formatConceptLabel(input.conceptTag);
   const skill = input.skillTag ? input.skillTag.replace(/[-_]/g, " ") : "core skill";
   return {
     question_type: "single_choice" as const,
@@ -215,8 +223,8 @@ async function resolveOrCreateReviewQuestionTemplate(params: {
   }
 
   const { output, provenance } = await generateStructuredJson({
-    feature: "review_question_template",
-    promptVersion: "review_question_template_v1",
+    feature: "review_question_set",
+    promptVersion: "review_question_set_v2",
     systemInstruction: [
       "Generate one targeted review question from a weakness signal.",
       "Question must be concise and fix the identified concept gap.",
@@ -237,6 +245,27 @@ async function resolveOrCreateReviewQuestionTemplate(params: {
         skillTag: params.skillTag,
       }),
   });
+  console.info("[review] generation_result", {
+    course_id: params.courseId,
+    concept_tag: params.conceptTag,
+    concept_label: formatConceptLabel(params.conceptTag),
+    fallback_used: provenance.fallback_used,
+    question_count: 1,
+    question_type: output.question_type,
+  });
+  console.info("[review] question_count", {
+    course_id: params.courseId,
+    concept_tag: params.conceptTag,
+    question_count: 1,
+  });
+  if (provenance.fallback_used) {
+    console.warn("[pipeline] fallback_used", {
+      pipeline: "review_question_set",
+      source: "provider_fallback",
+      course_id: params.courseId,
+      concept_tag: params.conceptTag,
+    });
+  }
 
   const sourceHash = sha256Hash({
     course_id: params.courseId,
@@ -466,6 +495,19 @@ export async function analyzeWeaknessAndPrepareReview(params: {
     await createOrReplaceReviewSessionQuestions({
       reviewSessionId,
       generatedQuestions,
+    });
+    console.info("[review] generation_result", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      review_session_id: reviewSessionId,
+      question_count: generatedQuestions.length,
+      concept_tags: generatedQuestions.map((item) => item.conceptTag),
+    });
+    console.info("[review] question_count", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      review_session_id: reviewSessionId,
+      question_count: generatedQuestions.length,
     });
 
     console.info("[review] weakness_detection", {

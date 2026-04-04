@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import { isMissingRelationOrColumnError, toNumberValue, toStringValue } from "@/lib/ai/common";
 import { generateStructuredJson } from "@/lib/ai/provider";
+import { formatConceptLabel, normalizeConceptTag } from "@/lib/conceptTags";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { getTavilyClient } from "@/lib/tavilyClient";
 
@@ -121,16 +122,11 @@ function err(error: unknown) {
 }
 
 function conceptKey(input: string) {
-  return norm(input).toLowerCase();
+  return normalizeConceptTag(input);
 }
 
 function conceptTitle(input: string) {
-  return norm(input)
-    .replace(/[_-]+/g, " ")
-    .split(" ")
-    .filter(Boolean)
-    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
-    .join(" ");
+  return formatConceptLabel(input);
 }
 
 function normalizeQuestionType(value: unknown) {
@@ -188,7 +184,12 @@ function buildSearchQuery(params: {
   conceptTag: string;
 }) {
   const description = params.courseDescription ? norm(params.courseDescription).slice(0, 120) : "";
-  return [params.courseTitle, params.conceptTag, description, "tutorial explanation examples practice debugging"]
+  return [
+    params.courseTitle,
+    formatConceptLabel(params.conceptTag),
+    description,
+    "tutorial explanation examples practice debugging",
+  ]
     .filter(Boolean)
     .join(" ");
 }
@@ -299,7 +300,17 @@ export async function getOrCreateWeaknessConceptDetails(params: {
   courseId: string;
   conceptTag: string;
 }): Promise<WeaknessConceptDetails> {
-  const conceptTag = conceptKey(params.conceptTag);
+  const conceptTag = conceptKey(params.conceptTag) || "foundational_skills";
+  console.info("[concept] normalized_tag", {
+    source: "weakness_concept_details",
+    input: params.conceptTag,
+    normalized_tag: conceptTag,
+  });
+  console.info("[concept] display_label", {
+    source: "weakness_concept_details",
+    concept_tag: conceptTag,
+    display_label: conceptTitle(conceptTag),
+  });
   console.info("[weakness] concept_click:start", {
     user_id: params.userId,
     course_id: params.courseId,
@@ -623,7 +634,12 @@ export async function getOrCreateWeaknessConceptTestSession(params: {
   courseId: string;
   conceptTag: string;
 }): Promise<WeaknessTestSessionPayload> {
-  const conceptTag = conceptKey(params.conceptTag);
+  const conceptTag = conceptKey(params.conceptTag) || "foundational_skills";
+  console.info("[concept] normalized_tag", {
+    source: "weakness_concept_test",
+    input: params.conceptTag,
+    normalized_tag: conceptTag,
+  });
   const { courseTitle, courseDescription } = await getCourseContext(params.courseId);
   const conceptLabel = conceptTitle(conceptTag);
 
@@ -853,7 +869,7 @@ export async function submitWeaknessConceptTest(params: {
     answer_text?: string;
   }>;
 }): Promise<WeaknessTestSubmitResult> {
-  const conceptTag = conceptKey(params.conceptTag);
+  const conceptTag = conceptKey(params.conceptTag) || "foundational_skills";
   const { data: sessionRow, error: sessionError } = await supabaseAdmin
     .from("weakness_test_sessions")
     .select("*")
