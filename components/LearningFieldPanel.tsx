@@ -1619,7 +1619,7 @@ export default function LearningFieldPanel({
                   </div>
                 </div>
 
-                <div className="mt-4 flex flex-wrap items-center gap-3">
+                <div className="mt-4 grid gap-3 md:grid-cols-2 md:items-center">
                   <div className="flex flex-wrap gap-3">
                     {courseDetails.status === "ready_for_test" ? (
                       <button
@@ -1678,7 +1678,7 @@ export default function LearningFieldPanel({
                       </button>
                     ) : null}
                   </div>
-                  <div className="ml-auto text-right">
+                  <div className="md:text-right">
                     {courseDetails.weakness_concepts && courseDetails.weakness_concepts.length > 0 ? (
                       <button
                         type="button"
