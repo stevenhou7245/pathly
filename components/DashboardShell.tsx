@@ -718,7 +718,6 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           event: "*",
           schema: "public",
           table: "official_messages",
-          filter: `target_user_id=eq.${currentUserId}`,
         },
         (payload) => {
           if (!active) {
@@ -726,84 +725,23 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           }
           const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
           const messageId = toStringValue(row?.id);
-          const targetUserId = toStringValue(row?.target_user_id);
+          const targetUserId = toStringValue(row?.target_user_id).trim();
           const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
           const isActiveMessage = toBooleanValue(row?.is_active, true);
           const appliesToUser =
             (targetUserId && targetUserId === currentUserId) ||
             (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
             (!targetUserId && !roleTarget);
-          playIncomingNotificationSound({
-            type: "official_message",
-            eventId: messageId || null,
-            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
-            currentUserId,
-            receiverId: currentUserId,
-            source: "dashboard_badge_realtime:official_messages_targeted",
-          });
-          refreshUnreadBadges();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "official_messages",
-          filter: "target_user_id=is.null",
-        },
-        (payload) => {
-          if (!active) {
+          if (!appliesToUser) {
             return;
           }
-          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
-          const messageId = toStringValue(row?.id);
-          const targetUserId = toStringValue(row?.target_user_id);
-          const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
-          const isActiveMessage = toBooleanValue(row?.is_active, true);
-          const appliesToUser =
-            (targetUserId && targetUserId === currentUserId) ||
-            (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
-            (!targetUserId && !roleTarget);
           playIncomingNotificationSound({
             type: "official_message",
             eventId: messageId || null,
-            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
+            isIncoming: payload.eventType === "INSERT" && isActiveMessage,
             currentUserId,
             receiverId: currentUserId,
-            source: "dashboard_badge_realtime:official_messages_global",
-          });
-          refreshUnreadBadges();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "official_messages",
-          filter: `role_target=eq.${currentUserRole || "__pathly_none_role__"}`,
-        },
-        (payload) => {
-          if (!active) {
-            return;
-          }
-          const row = (payload.new ?? payload.old ?? null) as Record<string, unknown> | null;
-          const messageId = toStringValue(row?.id);
-          const targetUserId = toStringValue(row?.target_user_id);
-          const roleTarget = toStringValue(row?.role_target).trim().toLowerCase();
-          const isActiveMessage = toBooleanValue(row?.is_active, true);
-          const appliesToUser =
-            (targetUserId && targetUserId === currentUserId) ||
-            (!targetUserId && roleTarget && currentUserRole && roleTarget === currentUserRole) ||
-            (!targetUserId && !roleTarget);
-          playIncomingNotificationSound({
-            type: "official_message",
-            eventId: messageId || null,
-            isIncoming: payload.eventType === "INSERT" && isActiveMessage && appliesToUser,
-            currentUserId,
-            receiverId: currentUserId,
-            source: "dashboard_badge_realtime:official_messages_role",
+            source: "dashboard_badge_realtime:official_messages",
           });
           refreshUnreadBadges();
         },
@@ -817,13 +755,14 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
           ...(error ? toRealtimeLogDetails(error) : {}),
         });
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          console.error("[dashboard_badge_realtime] subscription_failed", {
+          console.warn("[dashboard_badge_realtime] subscription_failed", {
             current_user_id: currentUserId,
             current_user_role: currentUserRole || null,
             subscription_run: subscriptionRun,
             status,
             ...(error ? toRealtimeLogDetails(error) : {}),
           });
+          refreshUnreadBadges();
         }
       });
 
@@ -925,6 +864,34 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
     syncSoundEffectsEnabled(soundEffectsEnabled);
   }, [soundEffectsEnabled]);
 
+  useEffect(() => {
+    const handleGlobalButtonClick = (event: MouseEvent) => {
+      const rawTarget = event.target;
+      if (!(rawTarget instanceof Element)) {
+        return;
+      }
+      const clickableElement = rawTarget.closest("button, [role='button']");
+      if (!clickableElement) {
+        return;
+      }
+      if (clickableElement instanceof HTMLButtonElement && clickableElement.disabled) {
+        return;
+      }
+      if (clickableElement.getAttribute("aria-disabled") === "true") {
+        return;
+      }
+      if ((clickableElement as HTMLElement).dataset.clickSound === "off") {
+        return;
+      }
+      playSound("click");
+    };
+
+    document.addEventListener("click", handleGlobalButtonClick, { capture: true });
+    return () => {
+      document.removeEventListener("click", handleGlobalButtonClick, { capture: true });
+    };
+  }, []);
+
   async function patchSettings(patch: ProfileSettingsPatch) {
     const previousTheme = themeMode;
     const previousSound = soundEffectsEnabled;
@@ -985,9 +952,6 @@ export default function DashboardShell({ initialSelectedField = "" }: DashboardS
   }
 
   function handleToggleSoundEffects() {
-    if (soundEffectsEnabled) {
-      playSound("click");
-    }
     void patchSettings({
       sound_effects_enabled: !soundEffectsEnabled,
     });

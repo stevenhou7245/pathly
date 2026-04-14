@@ -34,6 +34,10 @@ type JourneyNode = {
   course_id: string;
   title: string;
   status: CourseNodeStatus;
+  is_locked?: boolean;
+  is_completed?: boolean;
+  latest_score?: number | null;
+  best_score?: number | null;
   passed_score: number | null;
 };
 
@@ -99,6 +103,79 @@ type CourseApiResponse = {
   success: boolean;
   message?: string;
   course?: CourseDetails;
+};
+
+type CourseWeaknessApiResponse = {
+  success: boolean;
+  message?: string;
+  weakness_concepts?: Array<string | null>;
+};
+
+type WeaknessDrillQuestion = {
+  id: string;
+  question_order: number;
+  question_type: "multiple_choice" | "fill_blank" | "short_answer";
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+  acceptable_answers: string[];
+  explanation: string;
+  score: number;
+  concept_tags: string[];
+  skill_tags: string[];
+};
+
+type WeaknessConceptDrill = {
+  concept_tag: string;
+  concept_label: string;
+  concept_explanation: string;
+  resources: Array<{
+    title: string;
+    url: string;
+    summary: string;
+    provider: string;
+  }>;
+  test: {
+    weakness_test_session_id: string;
+    required_score: number;
+    metadata: {
+      generated_at: string;
+      total_questions: number;
+      objective_questions: number;
+      multiple_choice_questions: number;
+      fill_blank_questions: number;
+      total_score: number;
+      reused_existing: boolean;
+      fallback_used: boolean;
+    };
+    questions: WeaknessDrillQuestion[];
+  } | null;
+};
+
+type WeaknessConceptDrillApiResponse = {
+  success: boolean;
+  message?: string;
+  drill?: WeaknessConceptDrill;
+};
+
+type WeaknessDrillSubmitApiResponse = {
+  success: boolean;
+  message?: string;
+  result?: {
+    weakness_test_session_id: string;
+    score?: number;
+    max_score?: number;
+    earned_score: number;
+    total_score: number;
+    required_score: number;
+    passed: boolean;
+    resolved: boolean;
+    resolved_concept_tag?: string | null;
+  };
+  score?: number;
+  max_score?: number;
+  passed?: boolean;
+  resolved_concept_tag?: string | null;
 };
 
 type CourseStartApiResponse = {
@@ -296,6 +373,7 @@ type AiTestReviewResult = {
 type AiTestMode = "taking" | "graded" | "history";
 type JourneyInitStatus = "not_started" | "initializing" | "ready" | "failed";
 const AI_TEST_PASSING_SCORE = 80;
+const WEAKNESS_TEST_PASSING_SCORE = 90;
 const JOURNEY_NODES_INITIAL_VISIBLE = 12;
 const JOURNEY_NODES_VISIBLE_STEP = 8;
 type PendingAiTestResultSound = {
@@ -350,6 +428,21 @@ function getScoreBandFeedback(score: number) {
   return "Keep learning~";
 }
 
+function formatConceptLabel(value: string) {
+  return value
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function normalizeWeaknessConceptKey(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 function getScoreBandMessage(score: number) {
   return `Mark: ${score}  ${getScoreBandFeedback(score)}`;
 }
@@ -401,6 +494,41 @@ function getNodeClassName(status: CourseNodeStatus, options?: { pop?: boolean })
   return `${base} cursor-not-allowed border-[#9CA3AF] bg-[#D1D5DB] text-[#6B7280] opacity-60${popClass}`;
 }
 
+function getJourneyNodeIdentity(node: JourneyNode) {
+  return `${node.step_number}:${node.course_id}`;
+}
+
+function resolveJourneyNodeState(node: JourneyNode) {
+  const explicitLocked = typeof node.is_locked === "boolean" ? node.is_locked : null;
+  const explicitCompleted = typeof node.is_completed === "boolean" ? node.is_completed : null;
+  const isLocked = explicitLocked ?? node.status === "locked";
+  const isCompleted = explicitCompleted ?? node.status === "passed";
+  const status: CourseNodeStatus = isLocked ? "locked" : isCompleted ? "passed" : node.status;
+  const canOpen = !isLocked && Boolean(node.course_id?.trim());
+  const latestScore = typeof node.latest_score === "number" ? node.latest_score : null;
+  const bestScore =
+    typeof node.best_score === "number"
+      ? node.best_score
+      : typeof node.passed_score === "number"
+      ? node.passed_score
+      : null;
+  const showScoreBadge =
+    !isLocked &&
+    ((isCompleted && bestScore !== null) || (!isCompleted && latestScore !== null));
+  const scoreBadgeValue = isCompleted ? bestScore : latestScore;
+
+  return {
+    status,
+    isLocked,
+    isCompleted,
+    canOpen,
+    latestScore,
+    bestScore,
+    showScoreBadge,
+    scoreBadgeValue,
+  };
+}
+
 function getConnectorClassName(_current: CourseNodeStatus, next: CourseNodeStatus) {
   const active =
     next === "passed" ||
@@ -442,6 +570,36 @@ export default function LearningFieldPanel({
   const [courseDetails, setCourseDetails] = useState<CourseDetails | null>(null);
   const [isLoadingCourse, setIsLoadingCourse] = useState(false);
   const [courseError, setCourseError] = useState("");
+  const [weaknessConcepts, setWeaknessConcepts] = useState<string[]>([]);
+  const [isLoadingWeakness, setIsLoadingWeakness] = useState(false);
+  const [weaknessError, setWeaknessError] = useState("");
+  const [isWeaknessDrillModalOpen, setIsWeaknessDrillModalOpen] = useState(false);
+  const [isLoadingWeaknessDrill, setIsLoadingWeaknessDrill] = useState(false);
+  const [weaknessDrillError, setWeaknessDrillError] = useState("");
+  const [activeWeaknessConcept, setActiveWeaknessConcept] = useState("");
+  const [weaknessDrillData, setWeaknessDrillData] = useState<WeaknessConceptDrill | null>(null);
+  const [isGeneratingWeaknessTest, setIsGeneratingWeaknessTest] = useState(false);
+  const [showWeaknessPractice, setShowWeaknessPractice] = useState(false);
+  const [weaknessPracticeResponses, setWeaknessPracticeResponses] = useState<
+    Record<string, { selectedOptionIndex: number | null; answerText: string }>
+  >({});
+  const [weaknessPracticeResult, setWeaknessPracticeResult] = useState<{
+    earnedScore: number;
+    totalScore: number;
+    passed: boolean;
+  } | null>(null);
+  const [showWeaknessResultPopup, setShowWeaknessResultPopup] = useState(false);
+  const [weaknessResultPopupPayload, setWeaknessResultPopupPayload] = useState<{
+    score: number;
+    passed: boolean;
+    feedback: string;
+    emoji: string;
+    message: string;
+  } | null>(null);
+  const [pendingWeaknessResultSound, setPendingWeaknessResultSound] = useState<PendingAiTestResultSound | null>(
+    null,
+  );
+  const [isResolvingWeakness, setIsResolvingWeakness] = useState(false);
   const [isAiTestModalOpen, setIsAiTestModalOpen] = useState(false);
   const [aiTestError, setAiTestError] = useState("");
   const [activeAiTest, setActiveAiTest] = useState<{
@@ -531,6 +689,17 @@ export default function LearningFieldPanel({
     () => journey?.nodes.slice(0, visibleJourneyNodeCount) ?? [],
     [journey?.nodes, visibleJourneyNodeCount],
   );
+  const formattedWeaknessConcepts = useMemo(
+    () =>
+      weaknessConcepts
+        .map((concept) => concept.trim())
+        .filter(Boolean)
+        .map((concept) => ({
+          raw: concept,
+          label: formatConceptLabel(concept),
+        })),
+    [weaknessConcepts],
+  );
 
   const transitionPanelState = useCallback(
     (next: RightPanelState, reason: string, detail?: Record<string, unknown>) => {
@@ -613,6 +782,31 @@ export default function LearningFieldPanel({
     setPendingAiTestResultSound(null);
   }, [pendingAiTestResultSound, resultPopupPayload, showResultPopup]);
 
+  useEffect(() => {
+    if (!showWeaknessResultPopup || !weaknessResultPopupPayload || !pendingWeaknessResultSound) {
+      return;
+    }
+    playSound(pendingWeaknessResultSound.primary);
+    console.info("[audio] weakness_test_result_sound:played", {
+      sound: pendingWeaknessResultSound.primary,
+      score: pendingWeaknessResultSound.score,
+      passed: pendingWeaknessResultSound.passed,
+      popup_open: showWeaknessResultPopup,
+      trigger: "result_popup_visible",
+    });
+    if (pendingWeaknessResultSound.playUnlock) {
+      playSound("unlock");
+      console.info("[audio] weakness_test_result_sound:played", {
+        sound: "unlock",
+        score: pendingWeaknessResultSound.score,
+        passed: pendingWeaknessResultSound.passed,
+        popup_open: showWeaknessResultPopup,
+        trigger: "result_popup_visible",
+      });
+    }
+    setPendingWeaknessResultSound(null);
+  }, [pendingWeaknessResultSound, showWeaknessResultPopup, weaknessResultPopupPayload]);
+
   const triggerNodePop = useCallback((courseIds: string[]) => {
     const uniqueIds = Array.from(new Set(courseIds.filter(Boolean)));
     if (uniqueIds.length === 0) {
@@ -660,11 +854,14 @@ export default function LearningFieldPanel({
   }, []);
 
   const resolveTransitionReviewPair = useCallback(
-    (toCourseId: string) => {
+    (targetNode: JourneyNode) => {
       if (!journey) {
         return null;
       }
-      const index = journey.nodes.findIndex((node) => node.course_id === toCourseId);
+      const index = journey.nodes.findIndex(
+        (node) =>
+          node.course_id === targetNode.course_id && node.step_number === targetNode.step_number,
+      );
       if (index <= 0) {
         return null;
       }
@@ -686,20 +883,45 @@ export default function LearningFieldPanel({
       if (!journey) {
         return false;
       }
-      if (node.status !== "unlocked") {
+      const nodeState = resolveJourneyNodeState(node);
+      if (nodeState.status !== "unlocked") {
         return false;
       }
       if (node.step_number !== journey.current_step) {
         return false;
       }
-      const pair = resolveTransitionReviewPair(node.course_id);
+      const pair = resolveTransitionReviewPair(node);
       if (!pair) {
         return false;
       }
-      return pair.fromNode.status === "passed";
+      return resolveJourneyNodeState(pair.fromNode).isCompleted;
     },
     [journey, resolveTransitionReviewPair],
   );
+
+  useEffect(() => {
+    if (!journey) {
+      return;
+    }
+    console.info("[journey_ui] resolved_nodes_preview", {
+      journey_path_id: journey.journey_path_id,
+      total_nodes: journey.nodes.length,
+      nodes: journey.nodes.slice(0, 10).map((node) => {
+        const state = resolveJourneyNodeState(node);
+        return {
+          course_id: node.course_id,
+          step_number: node.step_number,
+          title: node.title,
+          status: state.status,
+          is_locked: state.isLocked,
+          is_completed: state.isCompleted,
+          latest_score: state.latestScore,
+          best_score: state.bestScore,
+          show_score_badge: state.showScoreBadge,
+        };
+      }),
+    });
+  }, [journey]);
 
   useEffect(
     () => () => {
@@ -954,6 +1176,22 @@ export default function LearningFieldPanel({
     setSelectedCourseId("");
     setCourseDetails(null);
     setCourseError("");
+    setWeaknessConcepts([]);
+    setIsLoadingWeakness(false);
+    setWeaknessError("");
+    setIsWeaknessDrillModalOpen(false);
+    setIsLoadingWeaknessDrill(false);
+    setWeaknessDrillError("");
+    setActiveWeaknessConcept("");
+    setWeaknessDrillData(null);
+    setIsGeneratingWeaknessTest(false);
+    setShowWeaknessPractice(false);
+    setWeaknessPracticeResponses({});
+    setWeaknessPracticeResult(null);
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    setIsResolvingWeakness(false);
     setIsAiTestModalOpen(false);
     setAiTestError("");
     setActiveAiTest(null);
@@ -996,6 +1234,21 @@ export default function LearningFieldPanel({
       setCourseError("");
       setActionMessage("");
       setSelectedCourseId(courseId);
+      setWeaknessConcepts([]);
+      setWeaknessError("");
+      setIsWeaknessDrillModalOpen(false);
+      setIsLoadingWeaknessDrill(false);
+      setWeaknessDrillError("");
+      setActiveWeaknessConcept("");
+      setWeaknessDrillData(null);
+      setIsGeneratingWeaknessTest(false);
+      setShowWeaknessPractice(false);
+      setWeaknessPracticeResponses({});
+      setWeaknessPracticeResult(null);
+      setShowWeaknessResultPopup(false);
+      setWeaknessResultPopupPayload(null);
+      setPendingWeaknessResultSound(null);
+      setIsResolvingWeakness(false);
 
       try {
         const response = await fetch(
@@ -1016,6 +1269,37 @@ export default function LearningFieldPanel({
         }
 
         setCourseDetails(payload.course);
+        setIsLoadingWeakness(true);
+        setWeaknessError("");
+        try {
+          const weaknessResponse = await fetch(`/api/course/weakness/${encodeURIComponent(payload.course.id)}`, {
+            method: "GET",
+            cache: "no-store",
+          });
+          const weaknessPayload = (await weaknessResponse.json()) as CourseWeaknessApiResponse;
+          if (!weaknessResponse.ok || !weaknessPayload.success) {
+            throw new Error(weaknessPayload.message ?? "Unable to load weakness concepts.");
+          }
+          if (courseRequestIdRef.current === requestId) {
+            const concepts = (weaknessPayload.weakness_concepts ?? [])
+              .map((item) => (typeof item === "string" ? item.trim() : ""))
+              .filter(Boolean);
+            setWeaknessConcepts(concepts);
+          }
+        } catch (weaknessLoadError) {
+          if (courseRequestIdRef.current === requestId) {
+            const message =
+              weaknessLoadError instanceof Error
+                ? weaknessLoadError.message
+                : "Unable to load weakness concepts.";
+            setWeaknessConcepts([]);
+            setWeaknessError(message);
+          }
+        } finally {
+          if (courseRequestIdRef.current === requestId) {
+            setIsLoadingWeakness(false);
+          }
+        }
         setIsCheckingPreviousTests(true);
         try {
           const attemptsResponse = await fetch(
@@ -1072,6 +1356,9 @@ export default function LearningFieldPanel({
           error instanceof Error ? error.message : "Unable to load course details right now.";
         setCourseError(message);
         setCourseDetails(null);
+        setWeaknessConcepts([]);
+        setIsLoadingWeakness(false);
+        setWeaknessError("");
         setHasAnyPreviousTestAttempts(false);
         setIsCheckingPreviousTests(false);
       } finally {
@@ -1098,7 +1385,7 @@ export default function LearningFieldPanel({
         return;
       }
 
-      const pair = resolveTransitionReviewPair(node.course_id);
+      const pair = resolveTransitionReviewPair(node);
       if (!pair) {
         await loadCourseDetails(node.course_id);
         return;
@@ -1239,6 +1526,22 @@ export default function LearningFieldPanel({
     if (isStartingCourse || isPreparingTest || isSubmittingTest || isSubmittingResourceAction) {
       return;
     }
+    setIsWeaknessDrillModalOpen(false);
+    setIsLoadingWeaknessDrill(false);
+    setWeaknessDrillError("");
+    setActiveWeaknessConcept("");
+    setWeaknessDrillData(null);
+    setIsGeneratingWeaknessTest(false);
+    setShowWeaknessPractice(false);
+    setWeaknessPracticeResponses({});
+    setWeaknessPracticeResult(null);
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    setIsResolvingWeakness(false);
+    setWeaknessConcepts([]);
+    setIsLoadingWeakness(false);
+    setWeaknessError("");
     setIsAiTestModalOpen(false);
     setAiTestError("");
     setActiveAiTest(null);
@@ -1273,6 +1576,30 @@ export default function LearningFieldPanel({
     setIsAiTestModalOpen(false);
   }
 
+  function closeWeaknessDrillModal() {
+    if (isLoadingWeaknessDrill || isGeneratingWeaknessTest) {
+      return;
+    }
+    setIsWeaknessDrillModalOpen(false);
+    setWeaknessDrillError("");
+    setActiveWeaknessConcept("");
+    setWeaknessDrillData(null);
+    setIsGeneratingWeaknessTest(false);
+    setShowWeaknessPractice(false);
+    setWeaknessPracticeResponses({});
+    setWeaknessPracticeResult(null);
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    setIsResolvingWeakness(false);
+  }
+
+  function dismissWeaknessResultPopup() {
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+  }
+
   function dismissResultPopup() {
     setShowResultPopup(false);
     setResultPopupPayload(null);
@@ -1281,8 +1608,9 @@ export default function LearningFieldPanel({
 
   async function handleNodeClick(node: JourneyNode) {
     setJourneyError("");
+    const nodeState = resolveJourneyNodeState(node);
 
-    if (node.status === "locked") {
+    if (!nodeState.canOpen || !node.course_id.trim()) {
       setJourneyError("Please complete previous courses");
       playSound("error");
       return;
@@ -1295,6 +1623,211 @@ export default function LearningFieldPanel({
     await loadCourseDetails(node.course_id);
   }
 
+  async function handleWeaknessConceptClick(conceptTag: string) {
+    if (!courseDetails) {
+      return;
+    }
+    const normalizedConcept = conceptTag.trim();
+    if (!normalizedConcept) {
+      return;
+    }
+
+    setIsWeaknessDrillModalOpen(true);
+    setIsLoadingWeaknessDrill(true);
+    setWeaknessDrillError("");
+    setActiveWeaknessConcept(normalizedConcept);
+    setWeaknessDrillData(null);
+    setIsGeneratingWeaknessTest(false);
+    setShowWeaknessPractice(false);
+    setWeaknessPracticeResponses({});
+    setWeaknessPracticeResult(null);
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    setIsResolvingWeakness(false);
+
+    try {
+      const response = await fetch(
+        `/api/course/weakness/${encodeURIComponent(courseDetails.id)}/drill`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            concept_tag: normalizedConcept,
+            action: "open",
+          }),
+        },
+      );
+      const payload = (await response.json()) as WeaknessConceptDrillApiResponse;
+      if (!response.ok || !payload.success || !payload.drill) {
+        throw new Error(payload.message ?? "Unable to load weakness concept drill.");
+      }
+      setWeaknessDrillData(payload.drill);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to load weakness concept drill.";
+      setWeaknessDrillError(message);
+    } finally {
+      setIsLoadingWeaknessDrill(false);
+    }
+  }
+
+  async function handleImproveWeakness() {
+    if (!courseDetails || !activeWeaknessConcept || isGeneratingWeaknessTest) {
+      return;
+    }
+
+    setIsGeneratingWeaknessTest(true);
+    setWeaknessDrillError("");
+    setWeaknessPracticeResponses({});
+    setWeaknessPracticeResult(null);
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    setShowWeaknessPractice(false);
+
+    try {
+      const response = await fetch(
+        `/api/course/weakness/${encodeURIComponent(courseDetails.id)}/drill`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            concept_tag: activeWeaknessConcept,
+            action: "improve",
+          }),
+        },
+      );
+      const payload = (await response.json()) as WeaknessConceptDrillApiResponse;
+      if (!response.ok || !payload.success || !payload.drill?.test) {
+        throw new Error(payload.message ?? "Unable to generate weakness practice test.");
+      }
+      setWeaknessDrillData(payload.drill);
+      setShowWeaknessPractice(true);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to generate weakness practice test.";
+      setWeaknessDrillError(message);
+    } finally {
+      setIsGeneratingWeaknessTest(false);
+    }
+  }
+
+  function updateWeaknessChoiceAnswer(questionId: string, optionIndex: number) {
+    setWeaknessPracticeResponses((previous) => ({
+      ...previous,
+      [questionId]: {
+        selectedOptionIndex: optionIndex,
+        answerText: "",
+      },
+    }));
+  }
+
+  function updateWeaknessTextAnswer(questionId: string, answerText: string) {
+    setWeaknessPracticeResponses((previous) => ({
+      ...previous,
+      [questionId]: {
+        selectedOptionIndex: null,
+        answerText,
+      },
+    }));
+  }
+
+  async function handleSubmitWeaknessPractice() {
+    if (!weaknessDrillData?.test || !courseDetails || !activeWeaknessConcept) {
+      return;
+    }
+    const test = weaknessDrillData.test;
+    setIsResolvingWeakness(true);
+    setWeaknessDrillError("");
+    setShowWeaknessResultPopup(false);
+    setWeaknessResultPopupPayload(null);
+    setPendingWeaknessResultSound(null);
+    try {
+      const answers = test.questions.map((question) => ({
+        question_id: question.id,
+        selected_option_index:
+          question.question_type === "multiple_choice"
+            ? (weaknessPracticeResponses[question.id]?.selectedOptionIndex ?? null)
+            : null,
+        answer_text:
+          question.question_type === "fill_blank" || question.question_type === "short_answer"
+            ? (weaknessPracticeResponses[question.id]?.answerText ?? "")
+            : null,
+      }));
+
+      const submitResponse = await fetch(
+        `/api/course/weakness/${encodeURIComponent(courseDetails.id)}/drill/submit`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            concept_tag: activeWeaknessConcept,
+            weakness_test_session_id: test.weakness_test_session_id,
+            answers,
+          }),
+        },
+      );
+      const submitPayload = (await submitResponse.json()) as WeaknessDrillSubmitApiResponse;
+      if (!submitResponse.ok || !submitPayload.success || !submitPayload.result) {
+        throw new Error(submitPayload.message || "Unable to submit weakness practice.");
+      }
+
+      const result = submitPayload.result;
+      const score = Math.max(0, Math.floor(result.score ?? result.earned_score ?? 0));
+      const maxScore = Math.max(
+        1,
+        Math.floor(result.max_score ?? result.total_score ?? test.metadata.total_score ?? 100),
+      );
+      setWeaknessPracticeResult({
+        earnedScore: score,
+        totalScore: maxScore,
+        passed: result.passed,
+      });
+
+      setWeaknessResultPopupPayload({
+        score,
+        passed: result.passed,
+        feedback: getScoreBandFeedback(score),
+        emoji: getScoreBandEmoji(score),
+        message: getScoreBandMessage(score),
+      });
+      setShowWeaknessResultPopup(true);
+      setPendingWeaknessResultSound({
+        primary: result.passed ? "complete" : "failure",
+        playUnlock: false,
+        score,
+        passed: result.passed,
+      });
+      console.info("[audio] weakness_test_result_sound:queued", {
+        primary: result.passed ? "complete" : "failure",
+        play_unlock: false,
+        score,
+        passed: result.passed,
+        trigger: "result_received",
+      });
+
+      if (result.passed && result.resolved) {
+        const targetKey = normalizeWeaknessConceptKey(activeWeaknessConcept);
+        setWeaknessConcepts((previous) =>
+          previous.filter((concept) => normalizeWeaknessConceptKey(concept) !== targetKey),
+        );
+        setActionMessage(`Weakness resolved. Great job. (${score}/${maxScore})`);
+      }
+    } catch (error) {
+      setWeaknessDrillError(
+        error instanceof Error ? error.message : "Unable to submit weakness practice right now.",
+      );
+    } finally {
+      setIsResolvingWeakness(false);
+    }
+  }
   async function handleStartCourse() {
     if (!courseDetails || !journey || !selectedResourceId) {
       playSound("error");
@@ -1325,7 +1858,6 @@ export default function LearningFieldPanel({
 
       setActionMessage("Learning resource opened in a new tab.");
       setTestFeedback("");
-      playSound("click");
 
       setJourney((previous) => {
         if (!previous) {
@@ -1612,32 +2144,36 @@ export default function LearningFieldPanel({
         ...payload.result,
         graded_at: payload.result.graded_at ?? new Date().toISOString(),
       };
-      const previousStatusByCourseId = new Map(
-        (journey?.nodes ?? []).map((node) => [node.course_id, node.status] as const),
+      const previousStatusByNodeId = new Map(
+        (journey?.nodes ?? []).map((node) => [
+          getJourneyNodeIdentity(node),
+          resolveJourneyNodeState(node).status,
+        ] as const),
       );
       const newlyUnlockedIds = reviewResult.journey?.nodes
         ? reviewResult.journey.nodes
         .filter((node) => {
-          const previousStatus = previousStatusByCourseId.get(node.course_id);
+          const previousStatus = previousStatusByNodeId.get(getJourneyNodeIdentity(node));
           if (!previousStatus) {
             return false;
           }
+          const nextStatus = resolveJourneyNodeState(node).status;
           return (
             previousStatus === "locked" &&
-            (node.status === "unlocked" ||
-              node.status === "in_progress" ||
-              node.status === "ready_for_test")
+            (nextStatus === "unlocked" ||
+              nextStatus === "in_progress" ||
+              nextStatus === "ready_for_test")
           );
         })
-        .map((node) => node.course_id)
+        .map((node) => getJourneyNodeIdentity(node))
         : [];
       const newlyPassedIds = reviewResult.journey?.nodes
         ? reviewResult.journey.nodes
         .filter((node) => {
-          const previousStatus = previousStatusByCourseId.get(node.course_id);
-          return node.status === "passed" && previousStatus !== "passed";
+          const previousStatus = previousStatusByNodeId.get(getJourneyNodeIdentity(node));
+          return resolveJourneyNodeState(node).status === "passed" && previousStatus !== "passed";
         })
-        .map((node) => node.course_id)
+        .map((node) => getJourneyNodeIdentity(node))
         : [];
       triggerNodePop([...newlyPassedIds, ...newlyUnlockedIds]);
 
@@ -1794,7 +2330,7 @@ export default function LearningFieldPanel({
 
   return (
     <section className="rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_8px_0_#1F2937,0_18px_28px_rgba(31,41,55,0.12)] sm:p-7">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
         <div>
           <p className="inline-flex rounded-full border-2 border-[#1F2937]/15 bg-[#FFF7CF] px-4 py-1 text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/75">
             {folder.name}
@@ -1804,18 +2340,20 @@ export default function LearningFieldPanel({
             Start: {folder.currentLevel} · Destination: {folder.targetLevel}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            void loadJourney({
-              reason: "manual_refresh",
-              force: true,
-            });
-          }}
-          className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm"
-        >
-          Refresh
-        </button>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              void loadJourney({
+                reason: "manual_refresh",
+                force: true,
+              });
+            }}
+            className="btn-3d btn-3d-white inline-flex h-10 w-auto shrink-0 items-center justify-center px-5 !text-sm"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {journeyError ? (
@@ -1860,12 +2398,16 @@ export default function LearningFieldPanel({
             <div className="flex flex-col items-center pt-2 sm:pt-3">
               {visibleJourneyNodes.map((node, index) => {
                 const nextNode = visibleJourneyNodes[index + 1];
-                const isLocked = node.status === "locked";
-                const shouldPop = poppingNodeIds.includes(node.course_id);
-                const isFlipping = flippingNodeIds.includes(node.course_id);
+                const nodeId = getJourneyNodeIdentity(node);
+                const nodeState = resolveJourneyNodeState(node);
+                const nextNodeState = nextNode ? resolveJourneyNodeState(nextNode) : null;
+                const isLocked = nodeState.isLocked;
+                const shouldPop = poppingNodeIds.includes(nodeId);
+                const isFlipping = flippingNodeIds.includes(nodeId);
+                const scoreBadge = nodeState.showScoreBadge ? nodeState.scoreBadgeValue : null;
 
                 return (
-                  <div key={node.course_id} className="flex flex-col items-center">
+                  <div key={nodeId} className="flex flex-col items-center">
                     <div className="journey-node-coin-wrap">
                       <button
                         type="button"
@@ -1873,43 +2415,36 @@ export default function LearningFieldPanel({
                           if (isLocked) {
                             return;
                           }
-                          triggerNodeFlip(node.course_id);
+                          triggerNodeFlip(nodeId);
                         }}
                         onAnimationEnd={(event) => {
                           if (event.animationName !== "journey-node-coin-flip") {
                             return;
                           }
-                          clearNodeFlip(node.course_id);
+                          clearNodeFlip(nodeId);
                         }}
                         onClick={() => {
-                          if (node.status !== "locked") {
-                            playSound("click");
-                            console.info("[audio] course_click_sound:played", {
-                              course_id: node.course_id,
-                              status: node.status,
-                              trigger: "journey_node_click_handler_start",
-                            });
-                          }
                           void handleNodeClick(node);
                         }}
-                        className={`${getNodeClassName(node.status, { pop: shouldPop })} journey-node-coin${
+                        disabled={!nodeState.canOpen}
+                        className={`${getNodeClassName(nodeState.status, { pop: shouldPop })} journey-node-coin${
                           isFlipping ? " is-flipping" : ""
                         }`}
-                        aria-label={`${node.title} ${node.status}`}
+                        aria-label={`${node.title} ${nodeState.status}`}
                       >
-                        {node.status === "passed" ? "✓" : node.step_number}
+                        {nodeState.isCompleted ? "✓" : node.step_number}
                         {isLocked ? (
                           <span className="absolute -right-1 -top-1 rounded-full bg-[#6B7280] px-1.5 py-0.5 text-[10px] font-extrabold text-white">
                             🔒
                           </span>
                         ) : null}
-                        {node.passed_score ? (
+                        {scoreBadge ? (
                           <span
                             className={`absolute -right-2 -top-2 rounded-full border-2 border-[#1F2937] px-1.5 py-0.5 text-[10px] font-extrabold text-white ${
-                              node.passed_score >= AI_TEST_PASSING_SCORE ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
+                              scoreBadge >= AI_TEST_PASSING_SCORE ? "bg-[#58CC02]" : "bg-[#9CA3AF]"
                             }`}
                           >
-                            {node.passed_score}
+                            {scoreBadge}
                           </span>
                         ) : null}
                       </button>
@@ -1920,8 +2455,18 @@ export default function LearningFieldPanel({
 
                     {nextNode ? (
                       <div className="my-2 flex flex-col items-center gap-1.5">
-                        <span className={getConnectorClassName(node.status, nextNode.status)} />
-                        <span className={getConnectorClassName(node.status, nextNode.status)} />
+                        <span
+                          className={getConnectorClassName(
+                            nodeState.status,
+                            nextNodeState?.status ?? "locked",
+                          )}
+                        />
+                        <span
+                          className={getConnectorClassName(
+                            nodeState.status,
+                            nextNodeState?.status ?? "locked",
+                          )}
+                        />
                       </div>
                     ) : null}
                   </div>
@@ -2135,8 +2680,8 @@ export default function LearningFieldPanel({
 
             {courseDetails ? (
               <>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
+                <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
+                  <div className="min-w-0">
                     <h3 className="text-2xl font-extrabold text-[#1F2937]">{courseDetails.title}</h3>
                     <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
                       {courseDetails.description ?? "No description available yet."}
@@ -2160,30 +2705,79 @@ export default function LearningFieldPanel({
                       Pass requirement: {courseDetails.required_test_score}+
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (courseDetails.status === "ready_for_test") {
-                        void handlePrepareTest();
-                        return;
+                  <div className="flex w-full max-w-[340px] justify-self-end flex-col items-end gap-3 lg:w-[320px] lg:max-w-[320px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (courseDetails.status === "ready_for_test") {
+                          void handlePrepareTest();
+                          return;
+                        }
+                        void handleStartCourse();
+                      }}
+                      disabled={
+                        isStartingCourse ||
+                        isPreparingTest ||
+                        (courseDetails.status !== "ready_for_test" && !selectedResourceId)
                       }
-                      void handleStartCourse();
-                    }}
-                    disabled={
-                      isStartingCourse ||
-                      isPreparingTest ||
-                      (courseDetails.status !== "ready_for_test" && !selectedResourceId)
-                    }
-                    className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    {courseDetails.status === "ready_for_test"
-                      ? isPreparingTest
-                        ? "Preparing test..."
-                        : getPrimaryLearnActionLabel(courseDetails.status)
-                      : isStartingCourse
-                      ? "Opening..."
-                      : getPrimaryLearnActionLabel(courseDetails.status)}
-                  </button>
+                      className="btn-3d btn-3d-green inline-flex h-11 items-center justify-center px-6 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {courseDetails.status === "ready_for_test"
+                        ? isPreparingTest
+                          ? "Preparing test..."
+                          : getPrimaryLearnActionLabel(courseDetails.status)
+                        : isStartingCourse
+                        ? "Opening..."
+                        : getPrimaryLearnActionLabel(courseDetails.status)}
+                    </button>
+                    {courseDetails.can_take_test && courseDetails.status !== "passed" && courseDetails.status !== "ready_for_test" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handlePrepareTest();
+                        }}
+                        disabled={isPreparingTest || isSubmittingTest}
+                        className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isPreparingTest ? "Preparing test..." : "Take AI Test"}
+                      </button>
+                    ) : null}
+                    <div className="w-full flex justify-end mt-6">
+                      <div className="flex flex-wrap items-center justify-start gap-2 max-w-[60%]">
+                        <span className="text-lg font-bold text-red-500">Weakness:</span>
+                        {isLoadingWeakness ? (
+                          <span className="text-sm font-semibold text-[#1F2937]/60">Loading...</span>
+                        ) : null}
+                        {!isLoadingWeakness && formattedWeaknessConcepts.length > 0
+                          ? formattedWeaknessConcepts.map((concept) => (
+                              <button
+                                key={concept.raw}
+                                type="button"
+                                onClick={() => {
+                                  void handleWeaknessConceptClick(concept.raw);
+                                }}
+                                className="rounded-full border-2 border-red-500/70 bg-red-50 px-3 py-1 text-xs font-bold text-red-600 transition hover:bg-red-100"
+                              >
+                                {concept.label}
+                              </button>
+                            ))
+                          : null}
+                        {!isLoadingWeakness && formattedWeaknessConcepts.length === 0 ? (
+                          <span className="text-base font-bold text-red-500">none</span>
+                        ) : null}
+                      </div>
+                      {!isLoadingWeakness && formattedWeaknessConcepts.length === 0 ? (
+                        <p className="mt-1 text-xs font-semibold text-[#1F2937]/60 text-right">
+                          All concepts mastered.
+                        </p>
+                      ) : null}
+                      {weaknessError ? (
+                        <p className="mt-1 text-xs font-semibold text-[#c62828] text-right">
+                          {weaknessError}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-3">
@@ -2197,18 +2791,6 @@ export default function LearningFieldPanel({
                       className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       Continue learning
-                    </button>
-                  ) : null}
-                  {courseDetails.can_take_test && courseDetails.status !== "passed" && courseDetails.status !== "ready_for_test" ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handlePrepareTest();
-                      }}
-                      disabled={isPreparingTest || isSubmittingTest}
-                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      {isPreparingTest ? "Preparing test..." : "Take AI Test"}
                     </button>
                   ) : null}
                   {(activeAiTest?.courseId === courseDetails.id &&
@@ -2379,6 +2961,274 @@ export default function LearningFieldPanel({
                   </button>
                 </div>
               </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {isWeaknessDrillModalOpen ? (
+        <div className="fixed inset-0 z-[88] flex items-center justify-center bg-black/40 px-4 motion-modal-overlay">
+          <div className="max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-[2rem] border-2 border-[#1F2937] bg-white p-6 shadow-[0_10px_0_#1F2937,0_24px_34px_rgba(31,41,55,0.16)] sm:p-7 motion-modal-content">
+            <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
+              <div>
+                <h3 className="text-2xl font-extrabold text-[#1F2937]">
+                  Weakness Drill:{" "}
+                  {weaknessDrillData?.concept_label ?? formatConceptLabel(activeWeaknessConcept || "none")}
+                </h3>
+                <p className="mt-1 text-sm font-semibold text-[#1F2937]/70">
+                  Focused learning module with targeted resources and concept practice.
+                </p>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={closeWeaknessDrillModal}
+                  disabled={isLoadingWeaknessDrill || isGeneratingWeaknessTest}
+                  className="btn-3d btn-3d-white inline-flex h-10 w-auto shrink-0 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            {isLoadingWeaknessDrill ? (
+              <p className="mt-4 rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-3 text-sm font-semibold text-[#1F2937]/70">
+                Loading weakness concept module...
+              </p>
+            ) : null}
+
+            {weaknessDrillError ? (
+              <p className="mt-4 rounded-xl bg-[#fff1f1] px-3 py-2 text-sm font-semibold text-[#c62828]">
+                {weaknessDrillError}
+              </p>
+            ) : null}
+
+            {weaknessDrillData ? (
+              weaknessDrillData.test && showWeaknessPractice ? (
+                <div className="relative mt-5 space-y-4">
+                  {showWeaknessResultPopup && weaknessResultPopupPayload ? (
+                    <div className="absolute right-0 top-0 z-20 w-[min(92vw,360px)]">
+                      <div
+                        className={`rounded-3xl border-2 border-[#1F2937] px-4 py-4 shadow-[0_8px_0_#1F2937,0_14px_24px_rgba(31,41,55,0.18)] ${
+                          weaknessResultPopupPayload.passed ? "bg-[#ECFFE1]" : "bg-[#FFE3E3]"
+                        }`}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        <button
+                          type="button"
+                          onClick={dismissWeaknessResultPopup}
+                          className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#1F2937]/20 bg-white/80 text-base font-extrabold text-[#1F2937] transition hover:bg-white"
+                          aria-label="Close weakness result popup"
+                        >
+                          ×
+                        </button>
+                        <div className="pr-8">
+                          <p className="text-xs font-extrabold uppercase tracking-wide text-[#1F2937]/70">
+                            Weakness Test Result
+                          </p>
+                          <div className="mt-2 flex items-center gap-3">
+                            <span className="inline-flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#1F2937]/20 bg-white text-2xl">
+                              {weaknessResultPopupPayload.emoji}
+                            </span>
+                            <div>
+                              <p className="text-xl font-extrabold text-[#1F2937]">
+                                Mark: {weaknessResultPopupPayload.score}
+                              </p>
+                              <p className="text-sm font-semibold text-[#1F2937]/80">
+                                {weaknessResultPopupPayload.feedback}
+                              </p>
+                            </div>
+                          </div>
+                          <p className="mt-2 text-xs font-semibold text-[#1F2937]/75">
+                            {weaknessResultPopupPayload.message}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-lg font-extrabold text-[#1F2937]">Weakness Practice Test</p>
+                      <p className="mt-1 text-xs font-semibold text-[#1F2937]/70">
+                        {weaknessDrillData.test.metadata.total_questions} questions · Pass score{" "}
+                        {weaknessDrillData.test.required_score || WEAKNESS_TEST_PASSING_SCORE}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowWeaknessPractice(false)}
+                      className="btn-3d btn-3d-white inline-flex h-10 items-center justify-center px-5 !text-sm"
+                    >
+                      Back to Resources
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {weaknessDrillData.test.questions.map((question) => (
+                      <article
+                        key={question.id}
+                        className="rounded-2xl border-2 border-[#1F2937]/12 bg-white p-4"
+                      >
+                        <p className="text-sm font-extrabold text-[#1F2937]">
+                          Q{question.question_order}. {question.question_text}
+                        </p>
+                        <p className="mt-1 text-xs font-semibold text-[#1F2937]/65">
+                          Type: {question.question_type.replaceAll("_", " ")} · Score: {question.score}
+                        </p>
+                        {question.question_type === "multiple_choice" ? (
+                          <div className="mt-2 space-y-1.5">
+                            {question.options.map((option, optionIndex) => (
+                              <label
+                                key={`${question.id}-${optionIndex}`}
+                                className="flex items-center gap-2 text-xs font-semibold text-[#1F2937]/80"
+                              >
+                                <input
+                                  type="radio"
+                                  name={`weakness-question-${question.id}`}
+                                  checked={
+                                    weaknessPracticeResponses[question.id]?.selectedOptionIndex === optionIndex
+                                  }
+                                  onChange={() => updateWeaknessChoiceAnswer(question.id, optionIndex)}
+                                  className="h-4 w-4 accent-[#58CC02]"
+                                />
+                                <span>{option}</span>
+                              </label>
+                            ))}
+                          </div>
+                        ) : null}
+                        {question.question_type === "fill_blank" ? (
+                          <div className="mt-2">
+                            <input
+                              type="text"
+                              value={weaknessPracticeResponses[question.id]?.answerText ?? ""}
+                              onChange={(event) => updateWeaknessTextAnswer(question.id, event.target.value)}
+                              className="w-full rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-xs font-semibold text-[#1F2937]"
+                              placeholder="Type your answer"
+                            />
+                          </div>
+                        ) : null}
+                        {question.question_type === "short_answer" ? (
+                          <div className="mt-2">
+                            <textarea
+                              value={weaknessPracticeResponses[question.id]?.answerText ?? ""}
+                              onChange={(event) => updateWeaknessTextAnswer(question.id, event.target.value)}
+                              rows={4}
+                              className="w-full resize-y rounded-xl border-2 border-[#1F2937]/15 bg-white px-3 py-2 text-xs font-semibold text-[#1F2937]"
+                              placeholder="Write a concise practical answer"
+                            />
+                          </div>
+                        ) : null}
+                        {weaknessPracticeResult ? (
+                          <p className="mt-2 text-xs font-semibold text-[#1F2937]/70">
+                            Explanation: {question.explanation}
+                          </p>
+                        ) : null}
+                      </article>
+                    ))}
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleSubmitWeaknessPractice();
+                        }}
+                        disabled={isResolvingWeakness}
+                        className="btn-3d btn-3d-green inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isResolvingWeakness ? "Submitting..." : "Submit Weakness Test"}
+                      </button>
+                      {weaknessPracticeResult ? (
+                        <p className="text-sm font-extrabold text-[#1F2937]">
+                          Mark: {weaknessPracticeResult.earnedScore}/{weaknessPracticeResult.totalScore} ·{" "}
+                          {weaknessPracticeResult.passed ? "Passed" : "Not passed"}
+                        </p>
+                      ) : (
+                        <p className="text-xs font-semibold text-[#1F2937]/70">
+                          Pass score: {weaknessDrillData.test.required_score || WEAKNESS_TEST_PASSING_SCORE}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-5 space-y-5">
+                  <section>
+                    <p className="text-base font-extrabold text-[#1F2937]">Concept Explanation</p>
+                    <p className="mt-2 text-sm font-semibold text-[#1F2937]/75">
+                      {weaknessDrillData.concept_explanation}
+                    </p>
+                  </section>
+
+                  <section>
+                    <p className="text-base font-extrabold text-[#1F2937]">Targeted Resources</p>
+                    {weaknessDrillData.resources.length === 0 ? (
+                      <p className="mt-2 rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-3 py-2 text-sm font-semibold text-[#1F2937]/70">
+                        No targeted resources found right now.
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid gap-3">
+                        {weaknessDrillData.resources.map((resource) => (
+                          <article
+                            key={resource.url}
+                            className="rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4"
+                          >
+                            <p className="text-sm font-extrabold text-[#1F2937]">{resource.title}</p>
+                            <p className="mt-1 text-xs font-bold uppercase tracking-wide text-[#1F2937]/60">
+                              {resource.provider}
+                            </p>
+                            <p className="mt-2 text-sm font-semibold text-[#1F2937]/75">
+                              {resource.summary}
+                            </p>
+                            <a
+                              href={resource.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 inline-flex text-xs font-extrabold text-[#1F2937] underline underline-offset-2"
+                            >
+                              Open resource
+                            </a>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  <section>
+                    {weaknessDrillData.test ? (
+                      <div className="rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-4">
+                        <p className="text-sm font-semibold text-[#1F2937]/75">
+                          Test is ready. Click below to start the weakness-only practice paper.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setShowWeaknessPractice(true)}
+                          className="btn-3d btn-3d-green mt-3 inline-flex h-10 items-center justify-center px-5 !text-sm"
+                        >
+                          Start Weakness Test
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] px-4 py-4">
+                        <p className="text-sm font-semibold text-[#1F2937]/75">
+                          Ready to focus on this weakness. Generate a dedicated test (4 multiple choice, 10 points for each and 4 fill blank, 
+                          15 points for each, pass score 90).
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleImproveWeakness();
+                          }}
+                          disabled={isGeneratingWeaknessTest}
+                          className="btn-3d btn-3d-green mt-3 inline-flex h-10 items-center justify-center px-5 !text-sm disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          {isGeneratingWeaknessTest ? "Generating..." : "Improve weakness"}
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              )
             ) : null}
           </div>
         </div>
@@ -2571,7 +3421,7 @@ export default function LearningFieldPanel({
 
               {(aiTestMode === "graded" || aiTestMode === "history") && testResult ? (
                 <div className="mt-4 rounded-2xl border-2 border-[#1F2937]/12 bg-[#F8FCFF] p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
                     <div>
                       <p className="text-base font-extrabold text-[#1F2937]">Graded Paper Review</p>
                       <p className="mt-1 text-xs font-semibold text-[#1F2937]/75">
@@ -2708,5 +3558,12 @@ export default function LearningFieldPanel({
     </section>
   );
 }
+
+
+
+
+
+
+
 
 

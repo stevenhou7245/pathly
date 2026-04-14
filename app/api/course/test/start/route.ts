@@ -29,6 +29,10 @@ type PrepareCourseTestResponse = {
     user_test_id: string;
     test_attempt_id: string;
     template_id: string;
+    total_questions: number;
+    objective_questions: number;
+    short_answer_questions: number;
+    total_score: number;
     title: string;
     difficulty_band: "beginner" | "basic" | "intermediate" | "advanced" | "expert";
     test_template: {
@@ -56,6 +60,10 @@ type PrepareCourseTestResponse = {
         ai_model: string | null;
         fallback_used: boolean;
         reused_existing: boolean;
+        total_questions: number;
+        objective_questions: number;
+        short_answer_questions: number;
+        total_score: number;
       };
       questions: Array<{
         id: string;
@@ -115,6 +123,30 @@ function getClientErrorCategory(message: string) {
     return "business_rule";
   }
   return "unknown";
+}
+
+function toStringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function extractPipelineErrorContext(error: unknown) {
+  const record = (error ?? {}) as Record<string, unknown>;
+  const details =
+    record.details && typeof record.details === "object"
+      ? (record.details as Record<string, unknown>)
+      : null;
+  const cause = (record.cause ?? null) as unknown;
+  const causeRecord = (cause ?? {}) as Record<string, unknown>;
+
+  return {
+    step: toStringValue(record.step) || null,
+    code: toStringValue(record.code) || null,
+    details,
+    name: toStringValue(record.name) || null,
+    cause_message:
+      toStringValue(causeRecord.message) || toStringValue(record.cause) || null,
+    stack: error instanceof Error ? error.stack : null,
+  };
 }
 
 export async function POST(request: Request) {
@@ -202,6 +234,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to prepare test right now.";
+    const context = extractPipelineErrorContext(error);
     const clientErrorMessages = new Set([
       "User not found.",
       "Course not found.",
@@ -221,22 +254,30 @@ export async function POST(request: Request) {
       message.startsWith("Invalid AI test composition:");
 
     const status = isClientError ? 400 : 500;
-    if (status === 400) {
-      console.error("[ai_test_start] request_rejected", {
-        category: getClientErrorCategory(message),
-        reason: message,
-      });
-    }
+    const category = getClientErrorCategory(message);
+    const logLabel = status === 400 ? "[ai_test_start] request_rejected" : "[ai_test_start] request_failed";
+    console.error(logLabel, {
+      category,
+      reason: message,
+      step: context.step,
+      code: context.code,
+      error_name: context.name,
+      pipeline_details: context.details,
+      cause_message: context.cause_message,
+      stack: context.stack,
+    });
+
     const payload: PrepareCourseTestResponse = {
       success: false,
       error: message,
       message,
-      details:
-        status === 400
-          ? {
-              category: getClientErrorCategory(message),
-            }
-          : undefined,
+      details: {
+        category,
+        step: context.step,
+        code: context.code,
+        pipeline_details: context.details,
+        cause_message: context.cause_message,
+      },
     };
     return NextResponse.json(payload, { status });
   }

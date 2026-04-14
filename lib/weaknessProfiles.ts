@@ -8,6 +8,16 @@ type WeaknessEvaluationInput = {
   explanation?: string | null;
 };
 
+type GenericRecord = Record<string, unknown>;
+
+function getErrorCode(value: unknown) {
+  return toStringValue((value as GenericRecord)?.code).trim();
+}
+
+function isMissingResolvedColumnError(error: unknown) {
+  return getErrorCode(error) === "42703";
+}
+
 function toStringValue(value: unknown) {
   return typeof value === "string" ? value : "";
 }
@@ -29,6 +39,149 @@ export function normalizeConceptTag(value: unknown) {
   const limited = cleaned.slice(0, 120);
   const words = limited.split(" ").filter(Boolean).slice(0, 8);
   return words.join(" ").slice(0, 80);
+}
+
+export function formatConceptLabel(value: string | null | undefined) {
+  const raw = toStringValue(value).trim();
+  if (!raw) {
+    return "None";
+  }
+  return raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function parseWeaknessConceptRows(rows: GenericRecord[]) {
+  return rows
+    .map((row) => toStringValue(row.concept_tag).trim())
+    .filter(Boolean);
+}
+
+export async function getTopWeaknessConceptTagsForCourse(params: {
+  userId: string;
+  courseId: string;
+  limit?: number;
+}) {
+  const limit = Math.max(1, Math.min(10, Math.floor(Number(params.limit ?? 3) || 3)));
+
+  console.info("[course] weakness_lookup:start", {
+    user_id: params.userId,
+    course_id: params.courseId,
+  });
+
+  try {
+    const queryByMistakeCount = (onlyUnresolved: boolean) =>
+      supabaseAdmin
+        .from("weakness_profiles")
+        .select("concept_tag, mistake_count, updated_at")
+        .eq("user_id", params.userId)
+        .eq("course_id", params.courseId)
+        .order("mistake_count", { ascending: false })
+        .order("updated_at", { ascending: false })
+        .limit(limit)
+        .match(onlyUnresolved ? { resolved: false } : {});
+
+    let byMistakeCount = await queryByMistakeCount(true);
+    if (byMistakeCount.error && isMissingResolvedColumnError(byMistakeCount.error)) {
+      byMistakeCount = await queryByMistakeCount(false);
+    }
+
+    if (!byMistakeCount.error) {
+      const concepts = parseWeaknessConceptRows((byMistakeCount.data ?? []) as GenericRecord[]);
+      console.info("[course] weakness_lookup:result", {
+        user_id: params.userId,
+        course_id: params.courseId,
+        weakness_row_count: concepts.length,
+      });
+      return concepts;
+    }
+
+    const queryByWeaknessScore = (onlyUnresolved: boolean) =>
+      supabaseAdmin
+        .from("weakness_profiles")
+        .select("concept_tag, weakness_score, updated_at")
+        .eq("user_id", params.userId)
+        .eq("course_id", params.courseId)
+        .order("weakness_score", { ascending: false })
+        .order("updated_at", { ascending: false })
+        .limit(limit)
+        .match(onlyUnresolved ? { resolved: false } : {});
+
+    let byWeaknessScore = await queryByWeaknessScore(true);
+    if (byWeaknessScore.error && isMissingResolvedColumnError(byWeaknessScore.error)) {
+      byWeaknessScore = await queryByWeaknessScore(false);
+    }
+
+    if (byWeaknessScore.error) {
+      throw byWeaknessScore.error;
+    }
+
+    const concepts = parseWeaknessConceptRows((byWeaknessScore.data ?? []) as GenericRecord[]);
+    console.info("[course] weakness_lookup:result", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      weakness_row_count: concepts.length,
+    });
+    return concepts;
+  } catch (error) {
+    console.error("[course] weakness_lookup:failed", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      weakness_row_count: 0,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return [] as string[];
+  }
+}
+
+export async function resolveWeaknessConcept(params: {
+  userId: string;
+  courseId: string;
+  conceptTag: string;
+}) {
+  const normalizedConceptTag = normalizeConceptTag(params.conceptTag);
+  if (!normalizedConceptTag) {
+    return {
+      success: false,
+      updatedCount: 0,
+      message: "Invalid concept_tag.",
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const updateWithResolved = await supabaseAdmin
+    .from("weakness_profiles")
+    .update({
+      resolved: true,
+      updated_at: nowIso,
+    })
+    .eq("user_id", params.userId)
+    .eq("course_id", params.courseId)
+    .eq("concept_tag", normalizedConceptTag)
+    .select("id");
+
+  if (updateWithResolved.error && isMissingResolvedColumnError(updateWithResolved.error)) {
+    return {
+      success: false,
+      updatedCount: 0,
+      message: "weakness_profiles.resolved column is missing.",
+    };
+  }
+
+  if (updateWithResolved.error) {
+    throw updateWithResolved.error;
+  }
+
+  return {
+    success: true,
+    updatedCount: (updateWithResolved.data ?? []).length,
+    message: "Weakness resolved.",
+  };
 }
 
 function fallbackConceptTag(params: {
@@ -93,7 +246,7 @@ export async function incrementWeaknessProfile(params: {
   }
 
   if (!existingRow) {
-    const { error: insertError } = await supabaseAdmin
+    let insertResult = await supabaseAdmin
       .from("weakness_profiles")
       .insert({
         user_id: params.userId,
@@ -101,11 +254,25 @@ export async function incrementWeaknessProfile(params: {
         concept_tag: normalizedConceptTag,
         mistake_count: incrementBy,
         weakness_score: incrementBy,
+        resolved: false,
         last_mistake_at: nowIso,
         updated_at: nowIso,
       });
-    if (insertError) {
-      throw insertError;
+    if (insertResult.error && isMissingResolvedColumnError(insertResult.error)) {
+      insertResult = await supabaseAdmin
+        .from("weakness_profiles")
+        .insert({
+          user_id: params.userId,
+          course_id: params.courseId,
+          concept_tag: normalizedConceptTag,
+          mistake_count: incrementBy,
+          weakness_score: incrementBy,
+          last_mistake_at: nowIso,
+          updated_at: nowIso,
+        });
+    }
+    if (insertResult.error) {
+      throw insertResult.error;
     }
     console.info("[weakness_profiles] insert_new", {
       source: params.source,
@@ -123,17 +290,29 @@ export async function incrementWeaknessProfile(params: {
   const nextMistakeCount = currentMistakeCount + incrementBy;
   const nextWeaknessScore = currentWeaknessScore + incrementBy;
 
-  const { error: updateError } = await supabaseAdmin
+  let updateResult = await supabaseAdmin
     .from("weakness_profiles")
     .update({
       mistake_count: nextMistakeCount,
       weakness_score: nextWeaknessScore,
+      resolved: false,
       last_mistake_at: nowIso,
       updated_at: nowIso,
     })
     .eq("id", toStringValue(existingRow.id));
-  if (updateError) {
-    throw updateError;
+  if (updateResult.error && isMissingResolvedColumnError(updateResult.error)) {
+    updateResult = await supabaseAdmin
+      .from("weakness_profiles")
+      .update({
+        mistake_count: nextMistakeCount,
+        weakness_score: nextWeaknessScore,
+        last_mistake_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq("id", toStringValue(existingRow.id));
+  }
+  if (updateResult.error) {
+    throw updateResult.error;
   }
 
   console.info("[weakness_profiles] update_existing", {

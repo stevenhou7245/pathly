@@ -10,10 +10,20 @@ const submitReviewSchema = z.object({
   mark_skipped: z.boolean().optional(),
   answers: z
     .array(
-      z.object({
-        question_id: z.string().uuid("question_id must be a valid UUID."),
-        answer_text: z.string().trim().min(1, "answer_text is required."),
-      }),
+      z
+        .object({
+          question_id: z.string().uuid("question_id must be a valid UUID.").optional(),
+          question_order: z.number().int().positive().optional(),
+          answer_text: z.string().optional().nullable(),
+        })
+        .refine(
+          (value) =>
+            (typeof value.question_id === "string" && value.question_id.trim().length > 0) ||
+            typeof value.question_order === "number",
+          {
+            message: "Each answer must include question_id or question_order.",
+          },
+        ),
     )
     .optional(),
 });
@@ -74,7 +84,8 @@ export async function POST(request: Request) {
       answers:
         parsed.data.answers?.map((item) => ({
           question_id: item.question_id,
-          answer_text: item.answer_text,
+          question_order: item.question_order,
+          answer_text: item.answer_text ?? "",
         })) ?? [],
       markSkipped: Boolean(parsed.data.mark_skipped),
     });

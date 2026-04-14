@@ -110,3 +110,5 @@ Failed to load study rooms. table=study_room_participants user_id=d03dadf8-a4a2-
 还有一个需要修改的设计：当study room让用户选择收集笔记时，如果当前没有创建的note，不是就报告没有note，而是提供一个创建按钮让用户先创建一个note，再直接将room中需要的内容存储到新创建的note中。
 
 还有两个需要修改的设计：1. 当study room因为倒计时结束关闭或者被开启人提前关闭时，也会跳出弹窗让所有关闭时还在study room的用户收集笔记。 2. 在Study room，笔记的框的右下角会出现clear按钮，点击可以清除方框中写的笔记的内容。
+
+还有些设计更改：1. 当前session的有效时间有些长了（第二天登陆也可以直接进去）。网站session和cookie的有效期12小时比较合适。

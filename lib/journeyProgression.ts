@@ -23,7 +23,7 @@ import { loadUserResourcePreferenceProfile } from "@/lib/ai/preferences";
 import { resolveAiTestTemplateForAttempt } from "@/lib/ai/tests";
 import { analyzeWeaknessAndPrepareReview, getPendingReviewPopup } from "@/lib/ai/review";
 import type { DifficultyBand } from "@/lib/ai/common";
-import { trackWeaknessProfilesForIncorrectAnswers } from "@/lib/weaknessProfiles";
+import { extractConceptTags, formatConceptLabel, normalizeConceptTag } from "@/lib/conceptTags";
 
 export type CourseNodeStatus =
   | "locked"
@@ -32,20 +32,21 @@ export type CourseNodeStatus =
   | "ready_for_test"
   | "passed";
 
-export type CourseResourceGenerationStatus =
-  | "pending"
-  | "generating"
-  | "ready"
-  | "failed";
-
 type GenericRecord = Record<string, unknown>;
-const AI_TEST_PASSING_SCORE = 80;
+const AI_TEST_PASS_SCORE = 80;
+const AI_TEST_TOTAL_SCORE = 100;
+const AI_TEST_OBJECTIVE_SCORE = 5;
+const AI_TEST_SHORT_ANSWER_SCORE = 20;
 
 export type JourneyNode = {
   step_number: number;
   course_id: string;
   title: string;
   status: CourseNodeStatus;
+  is_locked: boolean;
+  is_completed: boolean;
+  latest_score: number | null;
+  best_score: number | null;
   passed_score: number | null;
 };
 
@@ -108,20 +109,21 @@ export type CourseDetailsPayload = {
   current_test_attempt_id: string | null;
   required_test_score: number;
   can_take_test: boolean;
+  resource_generation_status: "pending" | "generating" | "ready" | "failed";
+  is_resource_generated: boolean;
+  resources_generated_at: string | null;
   review_popup: {
     should_show: boolean;
     review_session_id: string | null;
     score_at_trigger: number | null;
     question_count: number;
   };
-  resource_generation_status: CourseResourceGenerationStatus;
-  is_resource_generated: boolean;
-  resources_generated_at: string | null;
   user_resource_preferences: Array<{
     resource_type: string;
     weighted_score: number;
     confidence: number;
   }>;
+  weakness_concepts: string[] | null;
   resources: CourseResourcePayload[];
 };
 
@@ -336,10 +338,6 @@ function toNumberValue(value: unknown) {
   return 0;
 }
 
-function toBoolean(value: unknown) {
-  return value === true;
-}
-
 function parseStringArray(value: unknown) {
   if (Array.isArray(value)) {
     return value.map((item) => toStringValue(item)).filter(Boolean);
@@ -387,17 +385,174 @@ function normalizeStatus(value: unknown): CourseNodeStatus {
   return "locked";
 }
 
-function normalizeResourceGenerationStatus(value: unknown): CourseResourceGenerationStatus {
-  const normalized = toStringValue(value).trim().toLowerCase();
-  if (
-    normalized === "pending" ||
-    normalized === "generating" ||
-    normalized === "ready" ||
-    normalized === "failed"
-  ) {
-    return normalized;
+function normalizeJourneyPathRows(rows: GenericRecord[]) {
+  const orderedRows = [...rows].sort((left, right) => {
+    const leftStep = Math.max(1, Math.floor(toNumberValue(left.step_number) || 1));
+    const rightStep = Math.max(1, Math.floor(toNumberValue(right.step_number) || 1));
+    if (leftStep !== rightStep) {
+      return leftStep - rightStep;
+    }
+
+    const leftCreatedAt = toStringValue(left.created_at);
+    const rightCreatedAt = toStringValue(right.created_at);
+    if (leftCreatedAt && rightCreatedAt) {
+      return leftCreatedAt.localeCompare(rightCreatedAt);
+    }
+    if (leftCreatedAt) {
+      return -1;
+    }
+    if (rightCreatedAt) {
+      return 1;
+    }
+    return toStringValue(left.id).localeCompare(toStringValue(right.id));
+  });
+
+  const seenStepNumbers = new Set<number>();
+  const seenCourseIds = new Set<string>();
+  const removedRows: Array<{
+    id: string;
+    step_number: number;
+    course_id: string;
+    reason: "missing_course_id" | "duplicate_step_number" | "duplicate_course_id";
+  }> = [];
+  const canonicalRows: GenericRecord[] = [];
+
+  for (const row of orderedRows) {
+    const rowId = toStringValue(row.id);
+    const stepNumber = Math.max(1, Math.floor(toNumberValue(row.step_number) || 1));
+    const courseId = toStringValue(row.course_id).trim();
+
+    if (!courseId) {
+      removedRows.push({
+        id: rowId,
+        step_number: stepNumber,
+        course_id: courseId,
+        reason: "missing_course_id",
+      });
+      continue;
+    }
+    if (seenStepNumbers.has(stepNumber)) {
+      removedRows.push({
+        id: rowId,
+        step_number: stepNumber,
+        course_id: courseId,
+        reason: "duplicate_step_number",
+      });
+      continue;
+    }
+    if (seenCourseIds.has(courseId)) {
+      removedRows.push({
+        id: rowId,
+        step_number: stepNumber,
+        course_id: courseId,
+        reason: "duplicate_course_id",
+      });
+      continue;
+    }
+
+    seenStepNumbers.add(stepNumber);
+    seenCourseIds.add(courseId);
+    canonicalRows.push(row);
   }
-  return "pending";
+
+  const reindexedRows: GenericRecord[] = canonicalRows.map((row, index) => ({
+    ...row,
+    step_number: index + 1,
+    course_id: toStringValue(row.course_id).trim(),
+  }));
+
+  return {
+    orderedRows,
+    canonicalRows: reindexedRows,
+    removedRows,
+  };
+}
+
+function normalizeResourceGenerationStatus(
+  value: unknown,
+  fallback: "pending" | "generating" | "ready" | "failed" = "pending",
+) {
+  const normalized = toStringValue(value).trim().toLowerCase();
+  if (normalized === "pending") {
+    return "pending" as const;
+  }
+  if (normalized === "generating") {
+    return "generating" as const;
+  }
+  if (normalized === "ready") {
+    return "ready" as const;
+  }
+  if (normalized === "failed") {
+    return "failed" as const;
+  }
+  return fallback;
+}
+
+async function loadTopWeaknessConcepts(params: {
+  userId: string;
+  courseId: string;
+}): Promise<string[]> {
+  console.info("[course] weakness_lookup:start", {
+    user_id: params.userId,
+    course_id: params.courseId,
+    weakness_row_count: 0,
+  });
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("weakness_profiles")
+      .select("concept_tag, mistake_count, updated_at")
+      .eq("user_id", params.userId)
+      .eq("course_id", params.courseId)
+      .order("mistake_count", { ascending: false })
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    const rows = (data ?? []) as GenericRecord[];
+    const concepts: string[] = [];
+    const seen = new Set<string>();
+
+    for (const row of rows) {
+      const conceptTag = normalizeConceptTag(toStringValue(row.concept_tag).trim());
+      if (!conceptTag || seen.has(conceptTag)) {
+        continue;
+      }
+      seen.add(conceptTag);
+      concepts.push(conceptTag);
+      console.info("[concept] normalized_tag", {
+        source: "course_weakness_lookup",
+        input: toStringValue(row.concept_tag).trim(),
+        normalized_tag: conceptTag,
+      });
+      console.info("[concept] display_label", {
+        source: "course_weakness_lookup",
+        concept_tag: conceptTag,
+        display_label: formatConceptLabel(conceptTag),
+      });
+      if (concepts.length >= 3) {
+        break;
+      }
+    }
+
+    console.info("[course] weakness_lookup:result", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      weakness_row_count: rows.length,
+    });
+
+    return concepts;
+  } catch (error) {
+    console.warn("[course] weakness_lookup:failed", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      weakness_row_count: 0,
+      reason: toErrorMessage(error),
+    });
+    return [];
+  }
 }
 
 function getFieldTitle(field: GenericRecord | null) {
@@ -447,7 +602,7 @@ export async function validateJourneySchema() {
     {
       table: "courses",
       columns:
-        "id, learning_field_id, title, slug, description, estimated_minutes, difficulty_level, resource_generation_status, is_resource_generated, resources_generated_at, created_at",
+        "id, learning_field_id, title, slug, description, estimated_minutes, difficulty_level, created_at",
     },
     {
       table: "journey_paths",
@@ -561,9 +716,6 @@ async function ensureCoursesForField(params: {
       difficulty_level: normalizeCourseDifficultyForWrite(
         plannedStep?.difficulty_level || "intermediate",
       ),
-      resource_generation_status: "pending",
-      is_resource_generated: false,
-      resources_generated_at: null,
       created_at: nowIso,
     });
   }
@@ -679,7 +831,8 @@ async function ensureJourneyPathCourses(params: {
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (existingRowsError) {
     throw mapSupabaseError(
@@ -693,7 +846,9 @@ async function ensureJourneyPathCourses(params: {
   const existingByStep = new Map<number, GenericRecord>();
   existing.forEach((row) => {
     const stepNumber = Math.max(1, Math.floor(toNumberValue(row.step_number) || 1));
-    existingByStep.set(stepNumber, row);
+    if (!existingByStep.has(stepNumber)) {
+      existingByStep.set(stepNumber, row);
+    }
   });
 
   const targetStepCount = Math.max(params.plannedSteps.length, params.courses.length);
@@ -774,11 +929,71 @@ async function ensureJourneyPathCourses(params: {
     total_steps: targetStepCount,
   });
 
+  const { data: cleanupRows, error: cleanupRowsError } = await supabaseAdmin
+    .from("journey_path_courses")
+    .select("id, step_number, course_id, created_at")
+    .eq("journey_path_id", params.journeyPathId)
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
+
+  if (cleanupRowsError) {
+    throw mapSupabaseError(
+      "reload_journey_path_courses_for_cleanup",
+      cleanupRowsError,
+      "Failed to load journey steps for cleanup.",
+    );
+  }
+
+  const staleRowIds: string[] = [];
+  const seenSteps = new Set<number>();
+  const seenCourses = new Set<string>();
+  ((cleanupRows ?? []) as GenericRecord[]).forEach((row) => {
+    const rowId = toStringValue(row.id);
+    const stepNumber = Math.max(1, Math.floor(toNumberValue(row.step_number) || 1));
+    const courseId = toStringValue(row.course_id);
+    const staleByStepRange = stepNumber > targetStepCount;
+    const staleByDuplicateStep = seenSteps.has(stepNumber);
+    const staleByDuplicateCourse = Boolean(courseId) && seenCourses.has(courseId);
+
+    if (staleByStepRange || staleByDuplicateStep || staleByDuplicateCourse) {
+      if (rowId) {
+        staleRowIds.push(rowId);
+      }
+      return;
+    }
+
+    seenSteps.add(stepNumber);
+    if (courseId) {
+      seenCourses.add(courseId);
+    }
+  });
+
+  if (staleRowIds.length > 0) {
+    const { error: cleanupError } = await supabaseAdmin
+      .from("journey_path_courses")
+      .delete()
+      .in("id", staleRowIds);
+
+    if (cleanupError) {
+      throw mapSupabaseError(
+        "cleanup_journey_path_courses",
+        cleanupError,
+        "Failed to cleanup stale journey steps.",
+      );
+    }
+
+    console.info("[journey_path_courses] stale_rows_cleaned", {
+      journey_path_id: params.journeyPathId,
+      removed_count: staleRowIds.length,
+    });
+  }
+
   const { data: refreshedRows, error: refreshedRowsError } = await supabaseAdmin
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (refreshedRowsError) {
     throw mapSupabaseError(
@@ -932,6 +1147,7 @@ export async function generateOrGetJourney(params: {
     });
   }
   const fieldTitle = getFieldTitle(learningField);
+  const preferenceProfile = await loadUserResourcePreferenceProfile(params.userId);
   const journeyTemplate = await resolveOrCreateJourneyTemplate({
     userId: params.userId,
     learningFieldId: params.learningFieldId,
@@ -939,6 +1155,7 @@ export async function generateOrGetJourney(params: {
     startLevel: normalizedCurrentLevel ?? params.startingPoint,
     targetLevel: normalizedTargetLevel ?? params.destination,
     desiredTotalSteps: totalSteps,
+    userPreferenceProfile: preferenceProfile,
   });
   logJourneyStep("build_ordered_journey_steps:total_steps", {
     total_steps: totalSteps,
@@ -973,9 +1190,6 @@ export async function generateOrGetJourney(params: {
       description: `Step ${index + 1} for ${fieldTitle}.`,
       estimated_minutes: 35,
       difficulty_level: "basic",
-      resource_generation_status: "pending",
-      is_resource_generated: false,
-      resources_generated_at: null,
       created_at: nowIso,
     }));
 
@@ -1142,7 +1356,8 @@ export async function getJourneyById(params: {
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (pathCoursesError) {
     throw mapSupabaseError(
@@ -1152,11 +1367,33 @@ export async function getJourneyById(params: {
     );
   }
 
-  const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const rawPathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const normalizedPathRows = normalizeJourneyPathRows(rawPathCourses);
+  const pathCourses = normalizedPathRows.canonicalRows;
   console.info("[journey_read] loaded_journey_steps_count", {
     journey_path_id: params.journeyPathId,
     count: pathCourses.length,
   });
+  console.info("[journey] ordered_journey_path_courses", {
+    user_id: params.userId,
+    journey_path_id: params.journeyPathId,
+    total_rows: normalizedPathRows.orderedRows.length,
+    rows: normalizedPathRows.orderedRows.slice(0, 30).map((row) => ({
+      id: toStringValue(row.id),
+      step_number: Math.max(1, Math.floor(toNumberValue(row.step_number) || 1)),
+      course_id: toStringValue(row.course_id),
+      title: toStringValue(row.title),
+    })),
+  });
+  if (normalizedPathRows.removedRows.length > 0) {
+    console.warn("[journey] ordered_journey_path_courses:discarded_rows", {
+      user_id: params.userId,
+      journey_path_id: params.journeyPathId,
+      removed_count: normalizedPathRows.removedRows.length,
+      removed_rows: normalizedPathRows.removedRows,
+    });
+  }
+
   await ensureUserCourseProgress({
     userId: params.userId,
     journeyPathId: params.journeyPathId,
@@ -1197,8 +1434,21 @@ export async function getJourneyById(params: {
     );
   }
 
+  const progressRowsList = (progressRows ?? []) as GenericRecord[];
+  console.info("[journey] user_course_progress_rows", {
+    user_id: params.userId,
+    journey_path_id: params.journeyPathId,
+    total_rows: progressRowsList.length,
+    rows: progressRowsList.slice(0, 30).map((row) => ({
+      course_id: toStringValue(row.course_id),
+      status: normalizeStatus(row.status),
+      best_test_score: toNumberValue(row.best_test_score),
+      last_test_score: toNumberValue(row.last_test_score),
+    })),
+  });
+
   const progressByCourseId = new Map(
-    ((progressRows ?? []) as GenericRecord[]).map((row) => [toStringValue(row.course_id), row]),
+    progressRowsList.map((row) => [toStringValue(row.course_id), row]),
   );
 
   const bestScoreByCourseId = new Map<string, number>();
@@ -1246,36 +1496,123 @@ export async function getJourneyById(params: {
     };
   });
 
-  const nodes: JourneyNode[] = steps.map((step, index) => {
+  const stepNumberByCourseId = new Map<string, number>();
+  steps.forEach((step) => {
+    if (step.course_id) {
+      stepNumberByCourseId.set(step.course_id, step.step_number);
+    }
+  });
+
+  const passedStepSet = new Set<number>();
+  progressRowsList.forEach((row) => {
+    const courseId = toStringValue(row.course_id);
+    if (!courseId) {
+      return;
+    }
+    if (normalizeStatus(row.status) !== "passed") {
+      return;
+    }
+    const stepNumber = stepNumberByCourseId.get(courseId);
+    if (!stepNumber) {
+      return;
+    }
+    passedStepSet.add(stepNumber);
+  });
+
+  const passedStepNumbers = Array.from(passedStepSet).sort((a, b) => a - b);
+  const highestPassedStep = passedStepNumbers.length > 0 ? passedStepNumbers[passedStepNumbers.length - 1] : 0;
+
+  let highestContiguousPassedStep = 0;
+  for (let step = 1; step <= steps.length; step += 1) {
+    if (!passedStepSet.has(step)) {
+      break;
+    }
+    highestContiguousPassedStep = step;
+  }
+
+  if (highestPassedStep > highestContiguousPassedStep) {
+    const missingSteps: number[] = [];
+    for (let step = 1; step <= highestPassedStep; step += 1) {
+      if (!passedStepSet.has(step)) {
+        missingSteps.push(step);
+      }
+    }
+    console.warn("[journey] inconsistent_progress_skipping_steps_detected", {
+      user_id: params.userId,
+      journey_path_id: params.journeyPathId,
+      highest_passed_step: highestPassedStep,
+      highest_contiguous_passed_step: highestContiguousPassedStep,
+      missing_steps: missingSteps,
+    });
+  }
+
+  const currentStep =
+    steps.length > 0 ? Math.min(highestContiguousPassedStep + 1, steps.length) : 1;
+
+  console.info("[journey] step_resolution", {
+    user_id: params.userId,
+    journey_path_id: params.journeyPathId,
+    passed_steps: passedStepNumbers,
+    highest_passed_step: highestPassedStep,
+    highest_contiguous_passed_step: highestContiguousPassedStep,
+    resolved_current_step: currentStep,
+  });
+
+  const nodes: JourneyNode[] = steps.map((step) => {
     const courseId = step.course_id ?? "";
     const progress = progressByCourseId.get(courseId);
-    const status = normalizeStatus(progress?.status ?? (index === 0 ? "unlocked" : "locked"));
+    const rawStatus = normalizeStatus(progress?.status ?? "locked");
     const bestTestScoreValue = Math.max(
       toNumberValue(progress?.best_test_score),
       bestScoreByCourseId.get(courseId) ?? 0,
     );
+    const lastTestScoreValue = Math.max(0, Math.floor(toNumberValue(progress?.last_test_score)));
+    const bestScore = bestTestScoreValue > 0 ? bestTestScoreValue : null;
+    const latestScore = lastTestScoreValue > 0 ? lastTestScoreValue : null;
+
+    let status: CourseNodeStatus = "locked";
+    if (step.step_number <= highestContiguousPassedStep) {
+      status = "passed";
+    } else if (step.step_number === currentStep) {
+      if (rawStatus === "in_progress" || rawStatus === "ready_for_test") {
+        status = rawStatus;
+      } else {
+        status = "unlocked";
+      }
+    }
 
     return {
       step_number: step.step_number,
       course_id: courseId,
       title: step.title,
       status,
-      passed_score: bestTestScoreValue > 0 ? bestTestScoreValue : null,
+      is_locked: status === "locked",
+      is_completed: status === "passed",
+      latest_score: latestScore,
+      best_score: bestScore,
+      passed_score: bestScore,
     };
   });
 
-  let currentStep = 1;
-  const currentNode = nodes.find(
-    (node) =>
-      node.status === "in_progress" ||
-      node.status === "unlocked" ||
-      node.status === "ready_for_test",
-  );
-  if (currentNode) {
-    currentStep = currentNode.step_number;
-  } else if (nodes.length > 0 && nodes.every((node) => node.status === "passed")) {
-    currentStep = nodes.length;
-  }
+  console.info("[journey] resolved_nodes", {
+    user_id: params.userId,
+    journey_path_id: params.journeyPathId,
+    total_nodes: nodes.length,
+    nodes: nodes.slice(0, 30).map((node) => ({
+      course_id: node.course_id,
+      step_number: node.step_number,
+      title: node.title,
+      status: node.status,
+      is_locked: node.is_locked,
+      is_completed: node.is_completed,
+      latest_score: node.latest_score,
+      best_score: node.best_score,
+      show_score_badge:
+        !node.is_locked &&
+        ((node.is_completed && node.best_score !== null) ||
+          (!node.is_completed && node.latest_score !== null)),
+    })),
+  });
 
   return {
     journey_path_id: toStringValue(journeyPath.id),
@@ -1289,279 +1626,6 @@ export async function getJourneyById(params: {
   };
 }
 
-type CourseResourceState = {
-  status: CourseResourceGenerationStatus;
-  isGenerated: boolean;
-  generatedAt: string | null;
-  supportsStatusColumns: boolean;
-};
-
-function readCourseResourceStateFromRow(row: GenericRecord) {
-  const supportsStatusColumns =
-    Object.prototype.hasOwnProperty.call(row, "resource_generation_status") ||
-    Object.prototype.hasOwnProperty.call(row, "is_resource_generated") ||
-    Object.prototype.hasOwnProperty.call(row, "resources_generated_at");
-  return {
-    status: normalizeResourceGenerationStatus(row.resource_generation_status),
-    isGenerated: toBoolean(row.is_resource_generated),
-    generatedAt: toNullableString(row.resources_generated_at),
-    supportsStatusColumns,
-  } satisfies CourseResourceState;
-}
-
-async function readCourseResourceState(courseId: string): Promise<CourseResourceState> {
-  const { data, error } = await supabaseAdmin
-    .from("courses")
-    .select("resource_generation_status, is_resource_generated, resources_generated_at")
-    .eq("id", courseId)
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    if (
-      isMissingColumnError(error, "courses", "resource_generation_status") ||
-      isMissingColumnError(error, "courses", "is_resource_generated") ||
-      isMissingColumnError(error, "courses", "resources_generated_at")
-    ) {
-      return {
-        status: "pending",
-        isGenerated: false,
-        generatedAt: null,
-        supportsStatusColumns: false,
-      };
-    }
-    throw createCourseDetailsError({
-      step: "fetch_course_resource_status",
-      message: "Failed to load course resource generation status.",
-      details: {
-        course_id: courseId,
-        reason: toErrorMessage(error),
-      },
-      cause: error,
-    });
-  }
-
-  return readCourseResourceStateFromRow((data as GenericRecord | null) ?? {});
-}
-
-async function updateCourseResourceState(params: {
-  courseId: string;
-  status: CourseResourceGenerationStatus;
-  isGenerated: boolean;
-  generatedAt?: string | null;
-}) {
-  const payload: Record<string, unknown> = {
-    resource_generation_status: params.status,
-    is_resource_generated: params.isGenerated,
-    resources_generated_at: params.generatedAt ?? null,
-  };
-  const { error } = await supabaseAdmin
-    .from("courses")
-    .update(payload)
-    .eq("id", params.courseId);
-  if (error) {
-    if (
-      isMissingColumnError(error, "courses", "resource_generation_status") ||
-      isMissingColumnError(error, "courses", "is_resource_generated") ||
-      isMissingColumnError(error, "courses", "resources_generated_at")
-    ) {
-      return false;
-    }
-    throw createCourseDetailsError({
-      step: "update_course_resource_status",
-      message: "Failed to update course resource generation status.",
-      details: {
-        course_id: params.courseId,
-        status: params.status,
-        reason: toErrorMessage(error),
-      },
-      cause: error,
-    });
-  }
-  return true;
-}
-
-async function tryClaimCourseResourceGeneration(courseId: string) {
-  const nowIso = new Date().toISOString();
-  const { data, error } = await supabaseAdmin
-    .from("courses")
-    .update({
-      resource_generation_status: "generating",
-      is_resource_generated: false,
-      resources_generated_at: null,
-    })
-    .eq("id", courseId)
-    .eq("is_resource_generated", false)
-    .in("resource_generation_status", ["pending", "failed"])
-    .select("id")
-    .limit(1);
-
-  if (error) {
-    if (
-      isMissingColumnError(error, "courses", "resource_generation_status") ||
-      isMissingColumnError(error, "courses", "is_resource_generated") ||
-      isMissingColumnError(error, "courses", "resources_generated_at")
-    ) {
-      return { claimed: true, supportsStatusColumns: false, nowIso };
-    }
-    throw createCourseDetailsError({
-      step: "claim_course_resource_generation",
-      message: "Failed to claim course resource generation.",
-      details: {
-        course_id: courseId,
-        reason: toErrorMessage(error),
-      },
-      cause: error,
-    });
-  }
-
-  return {
-    claimed: ((data ?? []) as GenericRecord[]).length > 0,
-    supportsStatusColumns: true,
-    nowIso,
-  };
-}
-
-async function readCourseResourceRows(courseId: string) {
-  const { data: activeOptions, error: activeOptionsError } = await supabaseAdmin
-    .from("course_resource_options")
-    .select("*")
-    .eq("course_id", courseId)
-    .eq("is_active", true)
-    .order("option_no", { ascending: true })
-    .limit(3);
-
-  if (activeOptionsError) {
-    if (!isMissingColumnError(activeOptionsError, "course_resource_options", "is_active")) {
-      throw createCourseDetailsError({
-        step: "fetch_course_resources",
-        message: "Failed to load course resource options.",
-        details: {
-          reason: toErrorMessage(activeOptionsError),
-          course_id: courseId,
-        },
-        cause: activeOptionsError,
-      });
-    }
-
-    const { data: fallbackOptions, error: fallbackOptionsError } = await supabaseAdmin
-      .from("course_resource_options")
-      .select("*")
-      .eq("course_id", courseId)
-      .order("option_no", { ascending: true })
-      .limit(3);
-    if (fallbackOptionsError) {
-      throw createCourseDetailsError({
-        step: "fetch_course_resources",
-        message: "Failed to load course resource options.",
-        details: {
-          reason: toErrorMessage(fallbackOptionsError),
-          course_id: courseId,
-        },
-        cause: fallbackOptionsError,
-      });
-    }
-    return (fallbackOptions ?? []) as GenericRecord[];
-  }
-
-  return (activeOptions ?? []) as GenericRecord[];
-}
-
-function mapAndSortResourceRows(params: {
-  courseId: string;
-  optionRows: GenericRecord[];
-  preferenceProfile: Awaited<ReturnType<typeof loadUserResourcePreferenceProfile>>;
-}) {
-  const mappedOptions = params.optionRows.map((row, index) => ({
-    id: toStringValue(row.id),
-    course_id: toStringValue(row.course_id) || params.courseId,
-    option_no: Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1)),
-    title: toStringValue(row.title) || `Resource ${index + 1}`,
-    resource_type: (toStringValue(row.resource_type) || "tutorial") as
-      | "video"
-      | "article"
-      | "tutorial"
-      | "document"
-      | "interactive",
-    provider: toStringValue(row.provider) || "Unknown",
-    url: toStringValue(row.url),
-    summary: toNullableString(row.summary),
-  }));
-  const sorted = sortResourceOptionsByPreference(mappedOptions, params.preferenceProfile);
-  const rankById = new Map<string, number>();
-  sorted.forEach((item, index) => {
-    rankById.set(item.id, index + 1);
-  });
-
-  return params.optionRows
-    .map((row, index) => {
-      const displayOrder = Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1));
-      const optionId = toStringValue(row.id);
-      return {
-        ...row,
-        id: optionId,
-        resource_option_id: optionId,
-        display_order: displayOrder,
-        legacy_resource_id: null,
-        option_id: optionId,
-        option_no: displayOrder,
-        course_id: toStringValue(row.course_id) || params.courseId,
-        title: toStringValue(row.title),
-        resource_type: toStringValue(row.resource_type),
-        url: toStringValue(row.url),
-        summary: toNullableString(row.summary),
-        provider: toStringValue(row.provider) || "Unknown",
-      } satisfies GenericRecord;
-    })
-    .sort((a, b) => {
-      const rankA = rankById.get(toStringValue(a.option_id) || toStringValue(a.id)) ?? 999;
-      const rankB = rankById.get(toStringValue(b.option_id) || toStringValue(b.id)) ?? 999;
-      if (rankA !== rankB) {
-        return rankA - rankB;
-      }
-      return (
-        Math.max(1, Math.floor(toNumberValue(a.display_order) || 1)) -
-        Math.max(1, Math.floor(toNumberValue(b.display_order) || 1))
-      );
-    })
-    .slice(0, 3);
-}
-
-function sleepMs(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-async function waitForConcurrentResourceGeneration(params: {
-  courseId: string;
-  maxAttempts?: number;
-  waitMs?: number;
-}) {
-  const maxAttempts = Math.max(1, params.maxAttempts ?? 15);
-  const waitMs = Math.max(200, params.waitMs ?? 800);
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const rows = await readCourseResourceRows(params.courseId);
-    if (rows.length > 0) {
-      return rows;
-    }
-
-    const state = await readCourseResourceState(params.courseId);
-    if (state.supportsStatusColumns && state.status === "failed") {
-      throw createCourseDetailsError({
-        step: "wait_concurrent_course_resources",
-        message: "Resource generation failed. Please retry this course.",
-        details: {
-          course_id: params.courseId,
-          attempt,
-        },
-      });
-    }
-    await sleepMs(waitMs);
-  }
-  return [] as GenericRecord[];
-}
-
 async function ensureThreeResources(params: {
   userId: string;
   journeyPathId: string;
@@ -1571,85 +1635,9 @@ async function ensureThreeResources(params: {
   courseDescription: string | null;
 }) {
   const step = "fetch_course_resources";
-  let shouldMarkFailure = false;
 
   try {
     const preferenceProfile = await loadUserResourcePreferenceProfile(params.userId);
-
-    const existingRows = await readCourseResourceRows(params.courseId);
-    if (existingRows.length > 0) {
-      await updateCourseResourceState({
-        courseId: params.courseId,
-        status: "ready",
-        isGenerated: true,
-        generatedAt: new Date().toISOString(),
-      });
-      const normalizedRows = mapAndSortResourceRows({
-        courseId: params.courseId,
-        optionRows: existingRows,
-        preferenceProfile,
-      });
-      logCourseDetailsStep("fetch_course_resources:after", {
-        course_id: params.courseId,
-        count: normalizedRows.length,
-        source_table: "course_resource_options",
-        reused_existing: true,
-      });
-      return normalizedRows;
-    }
-
-    const currentState = await readCourseResourceState(params.courseId);
-    if (currentState.supportsStatusColumns && currentState.status === "generating") {
-      const waitedRows = await waitForConcurrentResourceGeneration({
-        courseId: params.courseId,
-      });
-      if (waitedRows.length > 0) {
-        const normalizedRows = mapAndSortResourceRows({
-          courseId: params.courseId,
-          optionRows: waitedRows,
-          preferenceProfile,
-        });
-        logCourseDetailsStep("fetch_course_resources:after", {
-          course_id: params.courseId,
-          count: normalizedRows.length,
-          source_table: "course_resource_options",
-          reused_existing: true,
-          waited_for_concurrent_generation: true,
-        });
-        return normalizedRows;
-      }
-    }
-
-    const claim = await tryClaimCourseResourceGeneration(params.courseId);
-    shouldMarkFailure = claim.claimed && claim.supportsStatusColumns;
-    if (!claim.claimed && claim.supportsStatusColumns) {
-      const waitedRows = await waitForConcurrentResourceGeneration({
-        courseId: params.courseId,
-      });
-      if (waitedRows.length > 0) {
-        const normalizedRows = mapAndSortResourceRows({
-          courseId: params.courseId,
-          optionRows: waitedRows,
-          preferenceProfile,
-        });
-        logCourseDetailsStep("fetch_course_resources:after", {
-          course_id: params.courseId,
-          count: normalizedRows.length,
-          source_table: "course_resource_options",
-          reused_existing: true,
-          waited_for_concurrent_generation: true,
-        });
-        return normalizedRows;
-      }
-      throw createCourseDetailsError({
-        step,
-        message: "Resource generation is in progress. Please retry in a moment.",
-        details: {
-          course_id: params.courseId,
-        },
-      });
-    }
-
     await ensureCourseResourceOptions({
       userId: params.userId,
       courseId: params.courseId,
@@ -1659,53 +1647,142 @@ async function ensureThreeResources(params: {
       preferenceProfile,
     });
 
-    const generatedRows = await readCourseResourceRows(params.courseId);
-    if (generatedRows.length === 0) {
-      await updateCourseResourceState({
-        courseId: params.courseId,
-        status: "failed",
-        isGenerated: false,
-        generatedAt: null,
-      });
-      throw createCourseDetailsError({
-        step,
-        message: "Resource generation returned no results. Please retry this course.",
-        details: {
-          course_id: params.courseId,
-        },
-      });
+    let optionRows: GenericRecord[] = [];
+    let legacyFallbackUsed = false;
+
+    const { data: activeOptions, error: activeOptionsError } = await supabaseAdmin
+      .from("course_resource_options")
+      .select("*")
+      .eq("course_id", params.courseId)
+      .eq("is_active", true)
+      .order("option_no", { ascending: true })
+      .limit(3);
+
+    if (activeOptionsError) {
+      if (!isMissingColumnError(activeOptionsError, "course_resource_options", "is_active")) {
+        throw createCourseDetailsError({
+          step,
+          message: "Failed to load course resource options.",
+          details: {
+            reason: toErrorMessage(activeOptionsError),
+            course_id: params.courseId,
+          },
+          cause: activeOptionsError,
+        });
+      }
+
+      const { data: fallbackOptions, error: fallbackOptionsError } = await supabaseAdmin
+        .from("course_resource_options")
+        .select("*")
+        .eq("course_id", params.courseId)
+        .order("option_no", { ascending: true })
+        .limit(3);
+      if (fallbackOptionsError) {
+        throw createCourseDetailsError({
+          step,
+          message: "Failed to load course resource options.",
+          details: {
+            reason: toErrorMessage(fallbackOptionsError),
+            course_id: params.courseId,
+          },
+          cause: fallbackOptionsError,
+        });
+      }
+      optionRows = (fallbackOptions ?? []) as GenericRecord[];
+    } else {
+      optionRows = (activeOptions ?? []) as GenericRecord[];
     }
 
-    const nowIso = new Date().toISOString();
-    await updateCourseResourceState({
-      courseId: params.courseId,
-      status: "ready",
-      isGenerated: true,
-      generatedAt: nowIso,
-    });
-    const normalizedRows = mapAndSortResourceRows({
-      courseId: params.courseId,
-      optionRows: generatedRows,
-      preferenceProfile,
-    });
+    if (optionRows.length > 0) {
+      console.info("[resource_options] read_source_table", {
+        course_id: params.courseId,
+        table: "course_resource_options",
+      });
+      console.info("[resource_options] legacy_fallback_used", {
+        course_id: params.courseId,
+        used: false,
+      });
 
-    logCourseDetailsStep("fetch_course_resources:after", {
+      const mappedOptions = optionRows.map((row, index) => ({
+        id: toStringValue(row.id),
+        course_id: toStringValue(row.course_id) || params.courseId,
+        option_no: Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1)),
+        title: toStringValue(row.title) || `Resource ${index + 1}`,
+        resource_type: (toStringValue(row.resource_type) || "tutorial") as
+          | "video"
+          | "article"
+          | "tutorial"
+          | "document"
+          | "interactive",
+        provider: toStringValue(row.provider) || "Unknown",
+        url: toStringValue(row.url),
+        summary: toNullableString(row.summary),
+      }));
+
+      const sorted = sortResourceOptionsByPreference(mappedOptions, preferenceProfile);
+      const rankById = new Map<string, number>();
+      sorted.forEach((item, index) => {
+        rankById.set(item.id, index + 1);
+      });
+
+      const normalizedRows = optionRows
+        .map((row, index) => {
+          const displayOrder = Math.max(1, Math.floor(toNumberValue(row.option_no) || index + 1));
+          const optionId = toStringValue(row.id);
+          return {
+            ...row,
+            id: optionId,
+            resource_option_id: optionId,
+            display_order: displayOrder,
+            legacy_resource_id: null,
+            option_id: optionId,
+            option_no: displayOrder,
+            course_id: toStringValue(row.course_id) || params.courseId,
+            title: toStringValue(row.title),
+            resource_type: toStringValue(row.resource_type),
+            url: toStringValue(row.url),
+            summary: toNullableString(row.summary),
+            provider: toStringValue(row.provider) || "Unknown",
+          } satisfies GenericRecord;
+        })
+        .sort((a, b) => {
+          const rankA = rankById.get(toStringValue(a.option_id) || toStringValue(a.id)) ?? 999;
+          const rankB = rankById.get(toStringValue(b.option_id) || toStringValue(b.id)) ?? 999;
+          if (rankA !== rankB) {
+            return rankA - rankB;
+          }
+          return (
+            Math.max(1, Math.floor(toNumberValue(a.display_order) || 1)) -
+            Math.max(1, Math.floor(toNumberValue(b.display_order) || 1))
+          );
+        });
+
+      logCourseDetailsStep("fetch_course_resources:after", {
+        course_id: params.courseId,
+        count: normalizedRows.length,
+        source_table: "course_resource_options",
+      });
+      return normalizedRows.slice(0, 3);
+    }
+
+    legacyFallbackUsed = false;
+    console.warn("[migration_cleanup] legacy_table_reference_found", {
+      table: "course_resources",
+      path: "journeyProgression.ensureThreeResources",
+      action: "return_empty_resource_list",
       course_id: params.courseId,
-      count: normalizedRows.length,
-      source_table: "course_resource_options",
-      generated_on_demand: true,
     });
-    return normalizedRows;
+    console.info("[resource_read] source_table_used", {
+      table: "course_resource_options",
+      course_id: params.courseId,
+      rows: 0,
+    });
+    console.info("[resource_options] legacy_fallback_used", {
+      course_id: params.courseId,
+      used: legacyFallbackUsed,
+    });
+    return [];
   } catch (error) {
-    if (shouldMarkFailure) {
-      await updateCourseResourceState({
-        courseId: params.courseId,
-        status: "failed",
-        isGenerated: false,
-        generatedAt: null,
-      });
-    }
-
     const normalizedError = isCourseDetailsError(error)
       ? error
       : createCourseDetailsError({
@@ -1994,7 +2071,10 @@ export async function getCourseDetails(params: {
       journeyPathId: params.journeyPathId,
       nextCourseId: params.courseId,
     });
-    const latestCourseResourceState = await readCourseResourceState(params.courseId);
+    const weaknessConcepts = await loadTopWeaknessConcepts({
+      userId: params.userId,
+      courseId: params.courseId,
+    });
 
     const resourcesPayload: CourseResourcePayload[] = resources.map((resource) => {
       const resourceId =
@@ -2063,20 +2143,25 @@ export async function getCourseDetails(params: {
         const status = normalizeStatus(progressRow?.status ?? "locked");
         return status === "in_progress" || status === "ready_for_test" || status === "passed";
       })(),
+      resource_generation_status: normalizeResourceGenerationStatus(
+        (courseRow as GenericRecord).resource_generation_status,
+        resourcesPayload.length > 0 ? "ready" : "pending",
+      ),
+      is_resource_generated:
+        (courseRow as GenericRecord).is_resource_generated === true || resourcesPayload.length > 0,
+      resources_generated_at: toNullableString((courseRow as GenericRecord).resources_generated_at),
       review_popup: {
         should_show: pendingReview.should_show,
         review_session_id: pendingReview.review_session_id,
         score_at_trigger: pendingReview.score_at_trigger,
         question_count: pendingReview.questions.length,
       },
-      resource_generation_status: latestCourseResourceState.status,
-      is_resource_generated: latestCourseResourceState.isGenerated,
-      resources_generated_at: latestCourseResourceState.generatedAt,
       user_resource_preferences: preferenceProfile.signals.map((signal) => ({
         resource_type: signal.resource_type,
         weighted_score: signal.weighted_score,
         confidence: signal.confidence,
       })),
+      weakness_concepts: weaknessConcepts.length > 0 ? weaknessConcepts : null,
       resources: resourcesPayload,
     };
 
@@ -2526,6 +2611,10 @@ export type CourseTestPayload = {
   user_test_id: string;
   test_attempt_id: string;
   template_id: string;
+  total_questions: number;
+  objective_questions: number;
+  short_answer_questions: number;
+  total_score: number;
   title: string;
   difficulty_band: DifficultyBand;
   test_template: {
@@ -2553,6 +2642,10 @@ export type CourseTestPayload = {
       ai_model: string | null;
       fallback_used: boolean;
       reused_existing: boolean;
+      total_questions: number;
+      objective_questions: number;
+      short_answer_questions: number;
+      total_score: number;
     };
     questions: Array<{
       id: string;
@@ -2678,13 +2771,14 @@ async function ensureProgressRowForCourse(params: {
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (pathCoursesError) {
     throw new Error("Failed to load journey path courses.");
   }
 
-  const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const pathCourses = normalizeJourneyPathRows((pathCoursesRows ?? []) as GenericRecord[]).canonicalRows;
   const targetIndex = pathCourses.findIndex(
     (row) => toStringValue(row.course_id) === params.courseId,
   );
@@ -2739,13 +2833,14 @@ async function unlockNextCourse(params: {
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (pathCoursesError) {
     throw new Error("Failed to load journey path courses.");
   }
 
-  const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const pathCourses = normalizeJourneyPathRows((pathCoursesRows ?? []) as GenericRecord[]).canonicalRows;
   const currentIndex = pathCourses.findIndex(
     (pathCourse) => toStringValue(pathCourse.course_id) === params.courseId,
   );
@@ -2906,6 +3001,39 @@ function logAiTestStep(step: string, detail?: Record<string, unknown>) {
   console.info(`[ai_test] ${step}`);
 }
 
+type AiTestPreparationError = Error & {
+  code?: string;
+  step?: string;
+  details?: Record<string, unknown>;
+  cause?: unknown;
+};
+
+function createAiTestPreparationError(params: {
+  message: string;
+  step: string;
+  code: string;
+  details?: Record<string, unknown>;
+  cause?: unknown;
+}) {
+  const error = new Error(params.message) as AiTestPreparationError;
+  error.name = "AiTestPreparationError";
+  error.code = params.code;
+  error.step = params.step;
+  error.details = params.details;
+  error.cause = params.cause;
+  return error;
+}
+
+function isAiTestPreparationError(error: unknown): error is AiTestPreparationError {
+  const record = (error ?? {}) as Record<string, unknown>;
+  return (
+    error instanceof Error &&
+    (record.name === "AiTestPreparationError" ||
+      typeof record.step === "string" ||
+      typeof record.code === "string")
+  );
+}
+
 function normalizeAiQuestionType(value: unknown): AiTemplateQuestionType {
   const normalized = toStringValue(value).trim().toLowerCase();
   if (
@@ -2967,24 +3095,38 @@ function parseAiAcceptableAnswers(value: unknown, fallback: string) {
   return Array.from(new Set(answers));
 }
 
-function parseAiTagList(value: unknown) {
+function parseAiTagList(value: unknown, fallbackTexts: string[] = []) {
   const parsed = parseJsonValue(value);
-  if (Array.isArray(parsed)) {
-    return Array.from(
-      new Set(parsed.map((item) => toStringValue(item).trim()).filter(Boolean)),
-    );
-  }
-  if (typeof parsed === "string") {
-    return Array.from(
+  const normalized = (items: string[]) =>
+    Array.from(
       new Set(
-        parsed
-          .split(/\r?\n|,/)
-          .map((item) => item.trim())
+        items
+          .map((item) => normalizeConceptTag(item))
           .filter(Boolean),
       ),
     );
+  if (Array.isArray(parsed)) {
+    const fromArray = normalized(parsed.map((item) => toStringValue(item).trim()));
+    if (fromArray.length > 0) {
+      return fromArray;
+    }
   }
-  return [] as string[];
+  if (typeof parsed === "string") {
+    const fromString = normalized(
+      parsed
+        .split(/\r?\n|,/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    if (fromString.length > 0) {
+      return fromString;
+    }
+  }
+  const extracted = extractConceptTags({
+    texts: fallbackTexts,
+    maxTags: 3,
+  });
+  return extracted;
 }
 
 function normalizeQuestionResultStatus(value: unknown): QuestionResultStatus | null {
@@ -3019,12 +3161,23 @@ async function loadAiTemplateQuestions(templateId: string): Promise<AiTemplateQu
       const questionOrder = Math.max(1, Math.floor(toNumberValue(row.question_order) || index + 1));
       const questionType = normalizeAiQuestionType(row.question_type);
       const questionText = toStringValue(row.question_text) || `Question ${questionOrder}`;
-      const normalizedScoreDefault = 20;
+      const normalizedScoreDefault =
+        questionType === "short_answer"
+          ? AI_TEST_SHORT_ANSWER_SCORE
+          : AI_TEST_OBJECTIVE_SCORE;
       const score = Math.max(1, Math.floor(toNumberValue(row.score) || normalizedScoreDefault));
       const correctAnswerText = toStringValue(row.correct_answer_text);
       const options = questionType === "multiple_choice" ? parseAiOptions(row.options_json) : [];
-      const parsedSkillTags = parseAiTagList(row.skill_tags);
-      const parsedConceptTags = parseAiTagList(row.concept_tags);
+      const parsedConceptTags = parseAiTagList(row.concept_tags, [
+        questionText,
+        toStringValue(row.explanation),
+      ]);
+      const parsedSkillTags = parseAiTagList(row.skill_tags, parsedConceptTags);
+      console.info("[concept] extracted_tags", {
+        source: "ai_template_question_load",
+        question_order: questionOrder,
+        extracted_tags: parsedConceptTags,
+      });
 
       return {
         id: toStringValue(row.id),
@@ -3125,17 +3278,23 @@ export async function prepareCourseTest(params: {
   courseId: string;
   selectedResourceId?: string | null;
 }): Promise<CourseTestPayload> {
-  const resolvedJourneyPathId = await resolveJourneyPathIdForCourse({
-    userId: params.userId,
-    courseId: params.courseId,
-    journeyPathId: params.journeyPathId,
-  });
-  logAiTestStep("prepare:start", {
-    user_id: params.userId,
-    journey_path_id: resolvedJourneyPathId,
-    course_id: params.courseId,
-  });
+  let currentStep = "resolve_journey_path";
+  let resolvedJourneyPathId = toStringValue(params.journeyPathId);
 
+  try {
+    currentStep = "resolve_journey_path";
+    resolvedJourneyPathId = await resolveJourneyPathIdForCourse({
+      userId: params.userId,
+      courseId: params.courseId,
+      journeyPathId: params.journeyPathId,
+    });
+    logAiTestStep("prepare:start", {
+      user_id: params.userId,
+      journey_path_id: resolvedJourneyPathId,
+      course_id: params.courseId,
+    });
+
+  currentStep = "load_user";
   const { data: userRow, error: userError } = await supabaseAdmin
     .from("users")
     .select("id")
@@ -3151,6 +3310,7 @@ export async function prepareCourseTest(params: {
     throw new Error("User not found.");
   }
 
+  currentStep = "load_course";
   const { data: courseRow, error: courseError } = await supabaseAdmin
     .from("courses")
     .select("*")
@@ -3166,6 +3326,7 @@ export async function prepareCourseTest(params: {
     throw new Error("Course not found.");
   }
 
+  currentStep = "ensure_progress_row";
   const progressRow = await ensureProgressRowForCourse({
     userId: params.userId,
     journeyPathId: resolvedJourneyPathId,
@@ -3179,6 +3340,7 @@ export async function prepareCourseTest(params: {
     throw new Error("Start learning before taking the AI test.");
   }
 
+  currentStep = "load_resource_metadata";
   const { data: resourceMetadataRows, error: resourceMetadataError } = await supabaseAdmin
     .from("course_resource_options")
     .select("id, title, resource_type, provider, url, summary")
@@ -3214,6 +3376,7 @@ export async function prepareCourseTest(params: {
     user_id: params.userId,
     course_id: params.courseId,
   });
+  currentStep = "load_saved_resource_selection";
   const { data: savedSelectionRow, error: savedSelectionError } = await supabaseAdmin
     .from("user_course_resource_selections")
     .select("resource_option_id, selected_at")
@@ -3248,6 +3411,7 @@ export async function prepareCourseTest(params: {
 
   let selectedResourceRow: GenericRecord | null = null;
   if (selectedResourceOptionIdFromDb) {
+    currentStep = "load_selected_resource_option";
     console.info("[ai_test_resource] loading_resource_option_started", {
       user_id: params.userId,
       course_id: params.courseId,
@@ -3275,6 +3439,7 @@ export async function prepareCourseTest(params: {
     });
   }
 
+  currentStep = "load_latest_attempt_number";
   const { data: latestAttemptRow, error: latestAttemptError } = await supabaseAdmin
     .from("ai_user_tests")
     .select("attempt_number")
@@ -3307,6 +3472,7 @@ export async function prepareCourseTest(params: {
     resource_metadata_count: normalizedResourceMetadata.length,
   });
 
+  currentStep = "resolve_ai_test_template";
   const resolvedTemplate = await resolveAiTestTemplateForAttempt({
     userId: params.userId,
     courseId: params.courseId,
@@ -3324,6 +3490,7 @@ export async function prepareCourseTest(params: {
     attemptNumber,
   });
   const templateId = resolvedTemplate.templateId;
+  currentStep = "load_ai_template_questions";
   const questions = await loadAiTemplateQuestions(templateId);
   logAiTestStep("template_lookup:after", {
     template_id: templateId,
@@ -3346,7 +3513,7 @@ export async function prepareCourseTest(params: {
     template_id: templateId,
     status: "started",
     started_at: nowIso,
-    total_score: 100,
+    total_score: AI_TEST_TOTAL_SCORE,
     attempt_number: attemptNumber,
     completion_awarded: false,
   };
@@ -3356,6 +3523,7 @@ export async function prepareCourseTest(params: {
     template_id: templateId,
     attempt_number: attemptNumber,
   });
+  currentStep = "create_user_test_attempt";
   let { data: userTestRow, error: userTestError } = await supabaseAdmin
     .from("ai_user_tests")
     .insert(primaryUserTestPayload)
@@ -3417,6 +3585,7 @@ export async function prepareCourseTest(params: {
     user_test_id: userTestId,
   });
 
+  currentStep = "mark_progress_ready_for_test";
   const { error: progressUpdateError } = await supabaseAdmin
     .from("user_course_progress")
     .update({
@@ -3436,12 +3605,17 @@ export async function prepareCourseTest(params: {
     });
   }
 
+  currentStep = "build_test_response_payload";
   const payload: CourseTestPayload = {
     course_id: params.courseId,
     journey_path_id: resolvedJourneyPathId,
     user_test_id: userTestId,
     test_attempt_id: userTestId,
     template_id: templateId,
+    total_questions: resolvedTemplate.totalQuestions,
+    objective_questions: resolvedTemplate.objectiveQuestions,
+    short_answer_questions: resolvedTemplate.shortAnswerQuestions,
+    total_score: resolvedTemplate.totalScore,
     title: getCourseTitle(courseRow as GenericRecord),
     difficulty_band: resolvedTemplate.difficultyBand,
     test_template: {
@@ -3449,7 +3623,13 @@ export async function prepareCourseTest(params: {
       course_title: getCourseTitle(courseRow as GenericRecord),
       difficulty_band: resolvedTemplate.difficultyBand,
       resource_context: resolvedTemplate.resourceContext,
-      metadata: resolvedTemplate.metadata,
+      metadata: {
+        ...resolvedTemplate.metadata,
+        total_questions: resolvedTemplate.totalQuestions,
+        objective_questions: resolvedTemplate.objectiveQuestions,
+        short_answer_questions: resolvedTemplate.shortAnswerQuestions,
+        total_score: resolvedTemplate.totalScore,
+      },
       questions: questions.map((question) => ({
         id: question.id,
         question_order: question.question_order,
@@ -3460,7 +3640,7 @@ export async function prepareCourseTest(params: {
       })),
     },
     status: status === "passed" ? "passed" : "ready_for_test",
-    required_score: AI_TEST_PASSING_SCORE,
+    required_score: AI_TEST_PASS_SCORE,
     questions: questions.map((question) => ({
       id: question.id,
       question_order: question.question_order,
@@ -3487,7 +3667,45 @@ export async function prepareCourseTest(params: {
     questions_count: payload.questions.length,
     difficulty_band: resolvedTemplate.difficultyBand,
   });
-  return payload;
+    return payload;
+  } catch (error) {
+    const errorRecord = (error ?? {}) as Record<string, unknown>;
+    const message =
+      error instanceof Error
+        ? error.message
+        : toStringValue(errorRecord.message) || "Unable to prepare test right now.";
+    const resolvedStep = toStringValue(errorRecord.step) || currentStep;
+    const resolvedCode = toStringValue(errorRecord.code) || "AI_TEST_PREPARE_FAILED";
+    const resolvedDetails =
+      (errorRecord.details as Record<string, unknown> | undefined) ?? undefined;
+
+    console.error("[ai_test_prepare] failed", {
+      user_id: params.userId,
+      course_id: params.courseId,
+      journey_path_id: resolvedJourneyPathId || null,
+      step: resolvedStep,
+      code: resolvedCode,
+      reason: message,
+      details: resolvedDetails ?? null,
+      stack: error instanceof Error ? error.stack : null,
+    });
+
+    if (isAiTestPreparationError(error)) {
+      throw error;
+    }
+
+    throw createAiTestPreparationError({
+      message,
+      step: resolvedStep || "prepare_course_test",
+      code: resolvedCode,
+      details: {
+        ...(resolvedDetails ?? {}),
+        user_id: params.userId,
+        course_id: params.courseId,
+      },
+      cause: error,
+    });
+  }
 }
 
 export async function submitCourseTest(params: {
@@ -3714,7 +3932,7 @@ export async function submitCourseTest(params: {
     throw new Error("Unable to save AI test grading details.");
   }
 
-  const totalScore = 100;
+  const totalScore = AI_TEST_TOTAL_SCORE;
   const earnedScore = Math.max(
     0,
     Math.min(
@@ -3722,12 +3940,12 @@ export async function submitCourseTest(params: {
       Math.round(questionResults.reduce((sum, item) => sum + Math.max(0, item.earned_score), 0)),
     ),
   );
-  const passed = earnedScore >= AI_TEST_PASSING_SCORE;
+  const passed = earnedScore >= AI_TEST_PASS_SCORE;
   const passStatus: "passed" | "failed" = passed ? "passed" : "failed";
   const nowIso = new Date().toISOString();
   const feedbackSummary = passed
     ? `Great work. You scored ${earnedScore}/100 and passed this course.`
-    : `You scored ${earnedScore}/100. You need ${AI_TEST_PASSING_SCORE} to pass this course.`;
+    : `You scored ${earnedScore}/${AI_TEST_TOTAL_SCORE}. You need ${AI_TEST_PASS_SCORE} to pass this course.`;
 
   const resolvedJourneyPathId = await resolveJourneyPathIdForCourse({
     userId: params.userId,
@@ -3824,19 +4042,6 @@ export async function submitCourseTest(params: {
     passed,
   });
 
-  await trackWeaknessProfilesForIncorrectAnswers({
-    userId: params.userId,
-    courseId,
-    source: "ai_test_submission",
-    evaluations: questionResults.map((item) => ({
-      isCorrect: item.is_correct,
-      questionIndex: item.question_order,
-      conceptTags: item.concept_tags,
-      questionText: item.question_text,
-      explanation: item.explanation,
-    })),
-  });
-
   const reviewResult = await analyzeWeaknessAndPrepareReview({
     userId: params.userId,
     courseId,
@@ -3878,7 +4083,7 @@ export async function submitCourseTest(params: {
     score: earnedScore,
     pass_status: passStatus,
     passed,
-    required_score: AI_TEST_PASSING_SCORE,
+    required_score: AI_TEST_PASS_SCORE,
     course_completed: courseCompleted,
     attempt_count: Math.max(0, Math.floor(toNumberValue(latestProgressRow?.attempt_count))),
     last_test_score: earnedScore,
@@ -4201,7 +4406,7 @@ export async function getCourseTestAttemptDetail(params: {
   const passStatus: "passed" | "failed" =
     toStringValue(userTestRow.pass_status).toLowerCase() === "passed"
       ? "passed"
-      : earnedScore >= AI_TEST_PASSING_SCORE
+      : earnedScore >= AI_TEST_PASS_SCORE
       ? "passed"
       : "failed";
 
@@ -4226,12 +4431,12 @@ export async function getCourseTestAttemptDetail(params: {
     total_score: totalScore,
     earned_score: earnedScore,
     pass_status: passStatus,
-    required_score: AI_TEST_PASSING_SCORE,
+    required_score: AI_TEST_PASS_SCORE,
     feedback_summary:
       toNullableString(userTestRow.feedback_summary) ??
       (passStatus === "passed"
         ? `Great work. You scored ${earnedScore}/${totalScore} and passed this course.`
-        : `You scored ${earnedScore}/${totalScore}. You need ${AI_TEST_PASSING_SCORE} to pass this course.`),
+        : `You scored ${earnedScore}/${totalScore}. You need ${AI_TEST_PASS_SCORE} to pass this course.`),
     graded_at: toNullableString(userTestRow.graded_at),
     submitted_at: toNullableString(userTestRow.submitted_at),
     question_results: questionResults,
@@ -4247,13 +4452,14 @@ export async function completeCourseProgress(params: {
     .from("journey_path_courses")
     .select("*")
     .eq("journey_path_id", params.journeyPathId)
-    .order("step_number", { ascending: true });
+    .order("step_number", { ascending: true })
+    .order("created_at", { ascending: true });
 
   if (pathCoursesError) {
     throw new Error("Failed to load journey path courses.");
   }
 
-  const pathCourses = (pathCoursesRows ?? []) as GenericRecord[];
+  const pathCourses = normalizeJourneyPathRows((pathCoursesRows ?? []) as GenericRecord[]).canonicalRows;
   const currentIndex = pathCourses.findIndex(
     (pathCourse) => toStringValue(pathCourse.course_id) === params.courseId,
   );

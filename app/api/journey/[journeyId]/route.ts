@@ -29,6 +29,10 @@ type GetJourneyResponse = {
       course_id: string;
       title: string;
       status: "locked" | "unlocked" | "in_progress" | "ready_for_test" | "passed";
+      is_locked: boolean;
+      is_completed: boolean;
+      latest_score: number | null;
+      best_score: number | null;
       passed_score: number | null;
     }>;
   };

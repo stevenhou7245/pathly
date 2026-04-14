@@ -15,6 +15,22 @@ import {
 
 type GenericRecord = Record<string, unknown>;
 
+function getUnknownErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  const record = (error ?? {}) as GenericRecord;
+  const message = toStringValue(record.message).trim();
+  if (message) {
+    return message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 type WeaknessSignal = {
   concept_tag: string;
   skill_tag: string;
@@ -585,11 +601,19 @@ export async function submitReviewSessionAnswers(params: {
   userId: string;
   reviewSessionId: string;
   answers: Array<{
-    question_id: string;
-    answer_text: string;
+    question_id?: string;
+    question_order?: number;
+    answer_text?: string | null;
   }>;
   markSkipped?: boolean;
 }) {
+  console.info("[review] submit_answers:start", {
+    user_id: params.userId,
+    review_session_id: params.reviewSessionId,
+    mark_skipped: Boolean(params.markSkipped),
+    answer_count: params.answers.length,
+  });
+
   const { data: session, error: sessionError } = await supabaseAdmin
     .from("user_review_sessions")
     .select("*")
@@ -599,18 +623,39 @@ export async function submitReviewSessionAnswers(params: {
     .maybeSingle();
 
   if (sessionError || !session) {
+    console.error("[review] submit_answers:failed", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      reason: sessionError ? getUnknownErrorMessage(sessionError) : "Review session not found.",
+    });
     throw new Error("Review session not found.");
   }
 
   if (params.markSkipped) {
-    await supabaseAdmin
+    const skippedPayload = {
+      status: "skipped",
+      completed_at: new Date().toISOString(),
+    };
+    const skippedUpdate = await supabaseAdmin
       .from("user_review_sessions")
-      .update({
-        status: "skipped",
-        completed_at: new Date().toISOString(),
-      })
+      .update(skippedPayload)
       .eq("id", params.reviewSessionId)
       .eq("user_id", params.userId);
+    if (skippedUpdate.error) {
+      console.error("[review] submit_answers:failed", {
+        user_id: params.userId,
+        review_session_id: params.reviewSessionId,
+        reason: getUnknownErrorMessage(skippedUpdate.error),
+      });
+      throw new Error("Unable to update review session.");
+    }
+    console.info("[review] submit_answers:update_session:success", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      status: "skipped",
+      total_score: 0,
+      earned_score: 0,
+    });
     return {
       review_session_id: params.reviewSessionId,
       status: "skipped" as const,
@@ -626,54 +671,179 @@ export async function submitReviewSessionAnswers(params: {
     .order("question_order", { ascending: true });
 
   if (questionError) {
+    console.error("[review] submit_answers:failed", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      reason: getUnknownErrorMessage(questionError),
+    });
     throw new Error("Unable to load review questions.");
   }
 
-  const answerMap = new Map(
-    params.answers.map((row) => [row.question_id, row.answer_text.trim()]),
-  );
+  const answersByQuestionId = new Map<string, string>();
+  const answersByQuestionOrder = new Map<number, string>();
+  params.answers.forEach((row) => {
+    const answerText = toStringValue(row.answer_text ?? "").trim();
+    const questionId = toStringValue(row.question_id).trim();
+    const questionOrder = Math.max(0, Math.floor(toNumberValue(row.question_order) || 0));
+    if (questionId) {
+      answersByQuestionId.set(questionId, answerText);
+    }
+    if (questionOrder > 0) {
+      answersByQuestionOrder.set(questionOrder, answerText);
+    }
+  });
+
   let totalScore = 0;
   let earnedScore = 0;
+  const nowIso = new Date().toISOString();
 
   for (const question of (questionRows ?? []) as GenericRecord[]) {
     const questionId = toStringValue(question.id);
+    const questionOrder = Math.max(1, Math.floor(toNumberValue(question.question_order) || 1));
     const maxScore = Math.max(1, Math.floor(toNumberValue(question.max_score) || 5));
-    const userAnswer = answerMap.get(questionId) ?? "";
+    const userAnswer = answersByQuestionId.get(questionId) ?? answersByQuestionOrder.get(questionOrder) ?? "";
     const answerPayload = (question.correct_answer_json ?? {}) as Record<string, unknown>;
-    const correctAnswer = toStringValue(answerPayload.correct_answer).trim().toLowerCase();
+    const directCorrect = toStringValue(answerPayload.correct_answer).trim();
+    const valueCorrect = toStringValue(answerPayload.value).trim();
+    const correctAnswer = (directCorrect || valueCorrect).toLowerCase();
+    const acceptableAnswers = Array.isArray(answerPayload.acceptable_answers)
+      ? answerPayload.acceptable_answers
+          .map((item) => toStringValue(item).trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+    const acceptedSet = new Set([correctAnswer, ...acceptableAnswers].filter(Boolean));
     const normalizedAnswer = userAnswer.trim().toLowerCase();
 
     let resultStatus: "correct" | "partial" | "incorrect" = "incorrect";
     let perQuestionEarned = 0;
-    if (normalizedAnswer && normalizedAnswer === correctAnswer) {
+    if (normalizedAnswer && acceptedSet.has(normalizedAnswer)) {
       resultStatus = "correct";
       perQuestionEarned = maxScore;
-    } else if (normalizedAnswer && correctAnswer && normalizedAnswer.includes(correctAnswer.slice(0, 8))) {
+    } else if (
+      normalizedAnswer &&
+      correctAnswer &&
+      correctAnswer.length >= 4 &&
+      (normalizedAnswer.includes(correctAnswer.slice(0, 8)) ||
+        correctAnswer.includes(normalizedAnswer.slice(0, 8)))
+    ) {
       resultStatus = "partial";
       perQuestionEarned = Math.max(1, Math.floor(maxScore / 2));
     }
+    const isCorrect = resultStatus === "correct";
 
     totalScore += maxScore;
     earnedScore += perQuestionEarned;
 
-    await supabaseAdmin
-      .from("user_review_session_questions")
-      .update({
+    console.info("[review] submit_answers:update_question:start", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      question_id: questionId,
+      question_order: questionOrder,
+      user_answer_text: userAnswer,
+    });
+
+    const updatePayloadCandidates: Array<Record<string, unknown>> = [
+      {
+        user_answer_text: userAnswer,
         user_answer_json: { answer_text: userAnswer },
-        result_status: resultStatus,
         earned_score: perQuestionEarned,
-      })
-      .eq("id", questionId);
+        result_status: resultStatus,
+        is_correct: isCorrect,
+        updated_at: nowIso,
+      },
+      {
+        user_answer_text: userAnswer,
+        user_answer_json: { answer_text: userAnswer },
+        earned_score: perQuestionEarned,
+        result_status: resultStatus,
+        updated_at: nowIso,
+      },
+      {
+        user_answer_text: userAnswer,
+        user_answer_json: { answer_text: userAnswer },
+        earned_score: perQuestionEarned,
+        result_status: resultStatus,
+      },
+      {
+        user_answer_text: userAnswer,
+        earned_score: perQuestionEarned,
+        result_status: resultStatus,
+      },
+      {
+        user_answer_json: { answer_text: userAnswer },
+        earned_score: perQuestionEarned,
+        result_status: resultStatus,
+      },
+      {
+        user_answer_json: { answer_text: userAnswer },
+      },
+    ];
+
+    let updated = false;
+    let lastUpdateError: unknown = null;
+    for (const payload of updatePayloadCandidates) {
+      const updateResult = await supabaseAdmin
+        .from("user_review_session_questions")
+        .update(payload)
+        .eq("id", questionId)
+        .eq("review_session_id", params.reviewSessionId);
+      if (!updateResult.error) {
+        updated = true;
+        break;
+      }
+      lastUpdateError = updateResult.error;
+      if (!isMissingRelationOrColumnError(updateResult.error)) {
+        break;
+      }
+    }
+
+    if (!updated) {
+      console.error("[review] submit_answers:update_question:failed", {
+        user_id: params.userId,
+        review_session_id: params.reviewSessionId,
+        question_id: questionId,
+        question_order: questionOrder,
+        user_answer_text: userAnswer,
+        db_error: getUnknownErrorMessage(lastUpdateError),
+      });
+      throw new Error("Unable to save review answer.");
+    }
+
+    console.info("[review] submit_answers:update_question:success", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      question_id: questionId,
+      question_order: questionOrder,
+      user_answer_text: userAnswer,
+      earned_score: perQuestionEarned,
+      result_status: resultStatus,
+    });
   }
 
-  await supabaseAdmin
+  const sessionUpdate = await supabaseAdmin
     .from("user_review_sessions")
     .update({
       status: "completed",
-      completed_at: new Date().toISOString(),
+      completed_at: nowIso,
     })
     .eq("id", params.reviewSessionId)
     .eq("user_id", params.userId);
+  if (sessionUpdate.error) {
+    console.error("[review] submit_answers:failed", {
+      user_id: params.userId,
+      review_session_id: params.reviewSessionId,
+      reason: getUnknownErrorMessage(sessionUpdate.error),
+    });
+    throw new Error("Unable to update review session.");
+  }
+
+  console.info("[review] submit_answers:update_session:success", {
+    user_id: params.userId,
+    review_session_id: params.reviewSessionId,
+    status: "completed",
+    total_score: totalScore,
+    earned_score: earnedScore,
+  });
 
   return {
     review_session_id: params.reviewSessionId,

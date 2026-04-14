@@ -119,6 +119,9 @@ export async function generateStructuredJson<T>(
           role: "user",
           content: [
             "Generate a valid JSON object only.",
+            "Use double quotes for every key and string value.",
+            "Escape internal double quotes as \\\" and backslashes as \\\\.",
+            "Do not output markdown, comments, or any text outside JSON.",
             "Use this input payload:",
             toStableJson(inputPayload),
           ].join("\n"),
@@ -137,7 +140,24 @@ export async function generateStructuredJson<T>(
       throw new Error("DeepSeek returned an empty completion payload.");
     }
 
-    const parsedJson = JSON.parse(text) as unknown;
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(text) as unknown;
+    } catch (parseError) {
+      console.error("[deepseek] json_parse_failed", {
+        feature: params.feature,
+        model,
+        message: parseError instanceof Error ? parseError.message : String(parseError),
+        raw_response_length: text.length,
+        raw_response_head: text.slice(0, 240),
+        raw_response_tail: text.slice(Math.max(0, text.length - 240)),
+      });
+      throw new Error(
+        `JSON parse failed: ${
+          parseError instanceof Error ? parseError.message : String(parseError)
+        }`,
+      );
+    }
     parsedOutputJson = parsedJson;
     const parsed = params.outputSchema.safeParse(parsedJson);
 
